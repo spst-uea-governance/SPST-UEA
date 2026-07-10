@@ -1,4 +1,5 @@
 import asyncio
+from copy import deepcopy
 from dataclasses import asdict
 from typing import Any
 
@@ -15,6 +16,7 @@ from spst_runtime.persistence.sqlite_repository import SQLiteRepository
 from spst_runtime.providers.memory_provider import MemoryProvider
 from spst_runtime.providers.model_provider import ModelProvider
 from spst_runtime.repository.subject_repository import SubjectRepository
+from spst_runtime.repository.workspace_orchestrator import WorkspaceOrchestrator
 
 class RuntimeOrchestrator:
     """Fully wired SPST runtime lifecycle orchestrator."""
@@ -29,12 +31,17 @@ class RuntimeOrchestrator:
         repository: SQLiteRepository | None = None,
         maintenance_service: Any | None = None,
         subject_repository: SubjectRepository | None = None,
+        workspace_orchestrator: WorkspaceOrchestrator | None = None,
+        workspace_id: str | None = None,
     ):
         self.bus = bus or EventBus()
         self.repository = repository or SQLiteRepository(db_path)
         self.memory_provider = memory_provider or MemoryProvider(path=db_path)
         self.model_provider = model_provider or ModelProvider()
         self.subject_repository = subject_repository or SubjectRepository()
+        self.workspace_orchestrator = workspace_orchestrator
+        self.workspace_id = workspace_id
+        self._pending_approvals: dict[str, dict[str, Any]] = {}
         self.goal_manager = GoalManager(repository=self.repository)
         self.goal_engine = GoalEngine()
         self.autopoiesis_engine = AutopoiesisEngine()
@@ -54,8 +61,19 @@ class RuntimeOrchestrator:
         *,
         role: str,
         goals: list[dict[str, Any]] | None = None,
+        workspace_id: str | None = None,
     ) -> SubjectState:
-        return self.subject_repository.create(subject_id, role=role, goals=goals)
+        return self.subject_repository.create(
+            subject_id,
+            role=role,
+            goals=goals,
+            workspace_id=workspace_id or self.workspace_id,
+        )
+
+    def create_security_subject(self, workspace_id: str | None = None) -> SubjectState:
+        target_workspace = workspace_id or self.workspace_id
+        subject_id = f"security:{target_workspace or 'local'}"
+        return self.create_subject(subject_id, role="SecuritySubject", workspace_id=target_workspace)
 
     def dispatch_subject(self, subject_id: str, event: Event) -> SubjectState:
         state = self.subject_repository.load(subject_id)
@@ -75,6 +93,9 @@ class RuntimeOrchestrator:
             state.metadata["autonomous"] = True
         self._retrieve(state, event)
         result = self.pipeline.run(state, event)
+        if result.metadata.get("governance_pending"):
+            self._register_pending_approval(state, event, result)
+            return result
         self._act(result, event)
         self._commit(result, event)
         return result
@@ -97,6 +118,13 @@ class RuntimeOrchestrator:
             )
         if prompt:
             for record in self.memory_provider.search(prompt, top_k=5):
+                if record not in contexts:
+                    contexts.append(record)
+
+        if prompt and self.workspace_orchestrator is not None and self.workspace_id:
+            workspace_context = self.workspace_orchestrator.retrieve_context(self.workspace_id, prompt, top_k=5)
+            state.metadata["workspace_context"] = workspace_context
+            for record in workspace_context:
                 if record not in contexts:
                     contexts.append(record)
 
@@ -169,6 +197,12 @@ class RuntimeOrchestrator:
                     "version": version,
                 },
             )
+        if state.metadata.get("mcp_request"):
+            tool_provider = self.pipeline.transition_engine.tool_provider
+            state.metadata["mcp_result"] = tool_provider.handle_mcp(
+                state.metadata["mcp_request"],
+                governance_authorized=bool(state.metadata.get("governance", {}).get("authorized")),
+            )
 
     def _commit(self, state: SubjectState, event: Event) -> None:
         version = state.metadata.get("version", 0)
@@ -205,6 +239,63 @@ class RuntimeOrchestrator:
                     "transition_log": state.metadata.get("transition_log", []),
                     "authorized": state.metadata.get("governance", {}).get("authorized", False),
                     "action_event": state.metadata.get("action_event", {}),
+                },
+            )
+        )
+        state.metadata["state_provenance"] = self.repository.verify_provenance()
+
+    def pending_approvals(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "approval_id": approval_id,
+                "diff": record["candidate"].metadata.get("governance", {}).get("diff", {}),
+                "trust_level": record["candidate"].metadata.get("governance", {}).get("trust_level"),
+                "reasons": record["candidate"].metadata.get("governance", {}).get("reasons", []),
+            }
+            for approval_id, record in sorted(self._pending_approvals.items())
+        ]
+
+    def resolve_approval(self, approval_id: str, *, approved: bool) -> SubjectState:
+        try:
+            record = self._pending_approvals.pop(approval_id)
+        except KeyError as exc:
+            raise KeyError(f"Unknown approval request: {approval_id}") from exc
+        candidate = record["candidate"]
+        if not approved:
+            candidate.metadata["governance"] = {
+                **candidate.metadata.get("governance", {}),
+                "authorized": False,
+                "status": "rejected_by_human",
+            }
+            return candidate
+        event = record["event"]
+        approved_event = Event(
+            type=event.type,
+            payload={**event.payload, "human_approved": True, "approval_id": approval_id},
+        )
+        return self.dispatch(record["state"], approved_event)
+
+    def _register_pending_approval(self, state: SubjectState, event: Event, candidate: SubjectState) -> None:
+        governance = candidate.metadata.get("governance", {})
+        approval_id = str(governance["approval_id"])
+        self._pending_approvals[approval_id] = {
+            "state": deepcopy(state),
+            "event": deepcopy(event),
+            "candidate": candidate,
+        }
+        candidate.metadata["pending_approval"] = {
+            "approval_id": approval_id,
+            "diff": governance.get("diff", {}),
+            "trust_level": governance.get("trust_level"),
+        }
+        asyncio.run(
+            self.repository.save(
+                f"runtime:hitl:pending:{approval_id}",
+                {
+                    "approval_id": approval_id,
+                    "diff": governance.get("diff", {}),
+                    "reasons": governance.get("reasons", []),
+                    "event_type": event.type,
                 },
             )
         )

@@ -1,4 +1,7 @@
+import hashlib
+import hmac
 import json
+import os
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -18,6 +21,9 @@ class SQLiteRepository(PersistenceRepository):
 
     def __init__(self, path: str = "spst.db"):
         self.path = path
+        self._provenance_secret = os.getenv("SPST_PROVENANCE_KEY", "spst-local-provenance-v1").encode(
+            "utf-8"
+        )
 
     def connect(self) -> sqlite3.Connection:
         self._initialize()
@@ -53,6 +59,7 @@ class SQLiteRepository(PersistenceRepository):
                         """,
                         (key, serialized),
                     )
+                    self._append_provenance(conn, key, serialized)
                 return
             except sqlite3.OperationalError as exc:
                 if not self._is_locked(exc) or attempt == 5:
@@ -101,6 +108,18 @@ class SQLiteRepository(PersistenceRepository):
                     )
                     """
                 )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS state_provenance (
+                        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                        record_key TEXT NOT NULL,
+                        record_hash TEXT NOT NULL,
+                        previous_hash TEXT NOT NULL,
+                        chain_hash TEXT NOT NULL,
+                        signature TEXT NOT NULL
+                    )
+                    """
+                )
                 conn.commit()
                 self._initialized_paths.add(path_key)
             finally:
@@ -120,3 +139,57 @@ class SQLiteRepository(PersistenceRepository):
     def _is_locked(error: sqlite3.OperationalError) -> bool:
         message = str(error).lower()
         return "locked" in message or "busy" in message
+
+    def verify_provenance(self) -> dict[str, Any]:
+        """Verify the HMAC-protected append-only hash chain and latest state hashes."""
+        with self.connection() as conn:
+            entries = conn.execute(
+                """
+                SELECT sequence, record_key, record_hash, previous_hash, chain_hash, signature
+                FROM state_provenance ORDER BY sequence ASC
+                """
+            ).fetchall()
+            previous_hash = ""
+            latest_hashes: dict[str, str] = {}
+            for _, record_key, record_hash, stored_previous, chain_hash, signature in entries:
+                expected_chain = self._chain_hash(previous_hash, record_key, record_hash)
+                expected_signature = self._sign(expected_chain)
+                if (
+                    stored_previous != previous_hash
+                    or chain_hash != expected_chain
+                    or not hmac.compare_digest(signature, expected_signature)
+                ):
+                    return {"valid": False, "entries": len(entries), "reason": "chain_verification_failed"}
+                previous_hash = chain_hash
+                latest_hashes[record_key] = record_hash
+            for record_key, expected_hash in latest_hashes.items():
+                row = conn.execute("SELECT value FROM state_store WHERE key = ?", (record_key,)).fetchone()
+                if row is None or self._record_hash(row[0]) != expected_hash:
+                    return {"valid": False, "entries": len(entries), "reason": "state_hash_mismatch"}
+        return {"valid": True, "entries": len(entries), "latest_hash": previous_hash}
+
+    def _append_provenance(self, conn: sqlite3.Connection, key: str, serialized: str) -> None:
+        row = conn.execute(
+            "SELECT chain_hash FROM state_provenance ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()
+        previous_hash = row[0] if row else ""
+        record_hash = self._record_hash(serialized)
+        chain_hash = self._chain_hash(previous_hash, key, record_hash)
+        conn.execute(
+            """
+            INSERT INTO state_provenance(record_key, record_hash, previous_hash, chain_hash, signature)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (key, record_hash, previous_hash, chain_hash, self._sign(chain_hash)),
+        )
+
+    @staticmethod
+    def _record_hash(serialized: str) -> str:
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _chain_hash(previous_hash: str, key: str, record_hash: str) -> str:
+        return hashlib.sha256(f"{previous_hash}:{key}:{record_hash}".encode("utf-8")).hexdigest()
+
+    def _sign(self, chain_hash: str) -> str:
+        return hmac.new(self._provenance_secret, chain_hash.encode("utf-8"), hashlib.sha256).hexdigest()

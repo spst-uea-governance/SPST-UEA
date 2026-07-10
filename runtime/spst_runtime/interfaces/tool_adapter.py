@@ -13,3 +13,8 @@ class ToolAdapter(ABC):
     def health(self) -> dict[str, Any]:
         """Return local tool boundary health."""
         ...
+
+    @abstractmethod
+    def handle_mcp(self, request: dict[str, Any], *, governance_authorized: bool) -> dict[str, Any]:
+        """Handle a local MCP JSON-RPC request through the governed tool boundary."""
+        ...

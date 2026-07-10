@@ -49,6 +49,8 @@ HTML = """<!doctype html>
       <div id="cockpit-trace" class="trace"></div>
       <h3>Goals</h3>
       <pre id="cockpit-goals">Loading...</pre>
+      <h3>Human Approval Queue</h3>
+      <div id="cockpit-approvals">No pending approvals.</div>
     </div>
     <div class="card">
       <label>Steps <input id="steps" type="number" value="3" min="0"></label>
@@ -101,6 +103,39 @@ HTML = """<!doctype html>
       document.getElementById("cockpit-trace").innerHTML = (status.last_trace || []).map((step) => `<span>${step}</span>`).join("");
       const goals = await (await fetch("/api/goals")).json();
       document.getElementById("cockpit-goals").textContent = JSON.stringify(goals.goals, null, 2);
+      renderApprovals(status.pending_approvals || []);
+    }
+    function renderApprovals(approvals) {
+      const container = document.getElementById("cockpit-approvals");
+      container.replaceChildren();
+      if (!approvals.length) {
+        container.textContent = "No pending approvals.";
+        return;
+      }
+      approvals.forEach((approval) => {
+        const card = document.createElement("div");
+        card.className = "card";
+        const details = document.createElement("pre");
+        details.textContent = JSON.stringify(approval, null, 2);
+        const approve = document.createElement("button");
+        approve.textContent = "Approve";
+        approve.addEventListener("click", () => resolveApproval(approval.approval_id, true));
+        const reject = document.createElement("button");
+        reject.textContent = "Reject";
+        reject.addEventListener("click", () => resolveApproval(approval.approval_id, false));
+        card.append(details, approve, reject);
+        container.append(card);
+      });
+    }
+    async function resolveApproval(approvalId, approved) {
+      const response = await fetch("/api/approval", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({approval_id: approvalId, approved})
+      });
+      const data = await response.json();
+      document.getElementById("output").textContent = JSON.stringify(data, null, 2);
+      await refreshCockpit();
     }
     async function dispatchPrompt() {
       const prompt = document.getElementById("dispatch-prompt").value;
@@ -142,6 +177,7 @@ class CockpitRuntime:
             "requires_api_key": self.orchestrator.model_provider.health().get("requires_api_key", False),
             "memory_stats": self.orchestrator.memory_provider.long_term_memory.stats(),
             "subjects": self.subjects()["subjects"],
+            "pending_approvals": self.orchestrator.pending_approvals(),
         }
 
     def goals(self) -> dict:
@@ -172,7 +208,7 @@ class CockpitRuntime:
             goals.append({**goal, "status": goal.get("status", "pending")})
 
         prompt = payload.get("prompt", "")
-        event = Event(type=payload.get("event", "user_action"), payload={"prompt": prompt})
+        event = Event(type=payload.get("event", "user_action"), payload=dict(payload))
         if not self.loop.ctx.running:
             self.loop.start()
         self.last_state = self.loop.step(self.last_state, event) or self.last_state
@@ -183,6 +219,15 @@ class CockpitRuntime:
             "governance": self.last_state.metadata.get("governance", {}),
             "goal": (self.last_state.metadata.get("goals") or [{}])[0],
             "amplification": self.last_state.metadata.get("intelligence_amplification", {}),
+        }
+
+    def approve(self, approval_id: str, *, approved: bool) -> dict:
+        self.last_state = self.orchestrator.resolve_approval(approval_id, approved=approved)
+        return {
+            "version": self.last_state.metadata.get("version"),
+            "trace": self.last_state.metadata.get("last_trace", []),
+            "governance": self.last_state.metadata.get("governance", {}),
+            "pending_approvals": self.orchestrator.pending_approvals(),
         }
 
     def _dispatch_swarm(self, payload: dict) -> dict:
@@ -266,6 +311,13 @@ def handle_cockpit_request(
     if method == "POST" and parsed.path == "/api/dispatch":
         payload = json.loads((body or b"{}").decode("utf-8"))
         return HTTPStatus.OK, runtime.dispatch(payload)
+
+    if method == "POST" and parsed.path == "/api/approval":
+        payload = json.loads((body or b"{}").decode("utf-8"))
+        return HTTPStatus.OK, runtime.approve(
+            str(payload["approval_id"]),
+            approved=bool(payload.get("approved")),
+        )
 
     return HTTPStatus.NOT_FOUND, {"error": "not_found"}
 

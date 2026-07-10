@@ -3,6 +3,7 @@ from typing import Any
 
 from spst_runtime.engines.autopoiesis_engine import AutopoiesisEngine
 from spst_runtime.engines.goal_engine import GoalEngine
+from spst_runtime.engines.security_engine import SecurityEngine
 from spst_runtime.intelligence_amplifier import IntelligenceAmplifier
 from spst_runtime.managers.goal_manager import GoalManager
 from spst_runtime.providers.tool_provider import ToolProvider
@@ -20,12 +21,14 @@ class TransitionEngine:
         goal_manager: GoalManager | None = None,
         tool_provider: ToolProvider | None = None,
         autopoiesis_engine: AutopoiesisEngine | None = None,
+        security_engine: SecurityEngine | None = None,
     ):
         self.intelligence_amplifier = intelligence_amplifier or IntelligenceAmplifier()
         self.goal_engine = goal_engine or GoalEngine()
         self.goal_manager = goal_manager or GoalManager()
         self.tool_provider = tool_provider or ToolProvider()
         self.autopoiesis_engine = autopoiesis_engine or AutopoiesisEngine()
+        self.security_engine = security_engine or SecurityEngine()
 
     def execute(self, state: Any, event: Any) -> Any:
         if not hasattr(state, "metadata"):
@@ -78,6 +81,8 @@ class TransitionEngine:
                     "prompt": prompt,
                 },
             )
+        if payload.get("mcp_request"):
+            state.metadata["mcp_request"] = deepcopy(payload["mcp_request"])
         goals = self.goal_manager.sync(state.metadata.get("goals", []))
         goal_plan = self.goal_engine.plan(
             goals,
@@ -94,6 +99,13 @@ class TransitionEngine:
     def _reflect(self, state: Any, event: Any) -> None:
         state.metadata.setdefault("reflection_required", True)
         payload = getattr(event, "payload", {}) or {}
+        destructive = bool(payload.get("breaking_change") or payload.get("architecture_change"))
+        state.metadata["change_risk"] = {
+            "classification": "destructive" if destructive else "routine",
+            "requires_human_approval": destructive,
+            "diff": payload.get("diff", {}),
+        }
+        state.metadata["security_assessment"] = self.security_engine.scan(payload)
         amplification = state.metadata.get("intelligence_amplification", {})
         score = 0.25 if payload.get("force_low_esi") else float(amplification.get("amplification_score", 0.0))
         esi = min(1.0, max(0.0, score))

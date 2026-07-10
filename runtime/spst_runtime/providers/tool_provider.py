@@ -1,4 +1,5 @@
 import hashlib
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -11,11 +12,13 @@ class ToolProvider(ToolAdapter):
     """Deterministic local sandbox for diagnosis and self-repair planning."""
 
     sandbox_name: str = "local-self-repair"
+    workspace_root: str | None = None
 
     def __post_init__(self) -> None:
         self.dynamic_dir = Path(__file__).resolve().parents[1] / "tools" / "dynamic"
         self.dynamic_dir.mkdir(parents=True, exist_ok=True)
         self._dynamic_tools: dict[str, Path] = {}
+        self._workspace_root = Path(self.workspace_root or Path.cwd()).resolve()
 
     def run(self, tool: str, payload: dict[str, Any]) -> dict[str, Any]:
         if tool == "diagnose":
@@ -40,6 +43,10 @@ class ToolProvider(ToolAdapter):
                 str(payload.get("task") or "frontier_verifier"),
                 str(payload.get("prompt") or ""),
             )
+        if tool == "mcp":
+            return self.handle_mcp(payload.get("request", {}), governance_authorized=bool(payload.get("authorized")))
+        if tool == "execute_local":
+            return self.execute_local(payload.get("command", []), governance_authorized=bool(payload.get("authorized")))
         if tool in self._dynamic_tools:
             return self.run_dynamic_tool(tool, payload)
         return {
@@ -84,7 +91,7 @@ class ToolProvider(ToolAdapter):
         }
 
     def list_tools(self) -> list[str]:
-        return sorted(["diagnose", "repair", "generate_dynamic_tool", *self._dynamic_tools])
+        return sorted(["diagnose", "repair", "generate_dynamic_tool", "local.execute", *self._dynamic_tools])
 
     def health(self) -> dict[str, Any]:
         return {
@@ -92,7 +99,73 @@ class ToolProvider(ToolAdapter):
             "provider": self.sandbox_name,
             "external_network": False,
             "dynamic_tools": self.list_tools(),
+            "mcp": {"jsonrpc": "2.0", "local_only": True},
         }
+
+    def handle_mcp(self, request: dict[str, Any], *, governance_authorized: bool) -> dict[str, Any]:
+        request_id = request.get("id")
+        if request.get("jsonrpc") != "2.0":
+            return self._mcp_error(request_id, -32600, "invalid_jsonrpc")
+        method = request.get("method")
+        if method == "initialize":
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}},
+            }
+        if method == "tools/list":
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {"tools": [{"name": "local.execute", "description": "Governed local command profiles"}]},
+            }
+        if method != "tools/call":
+            return self._mcp_error(request_id, -32601, "method_not_found")
+        params = request.get("params", {}) or {}
+        if params.get("name") != "local.execute":
+            return self._mcp_error(request_id, -32602, "unknown_tool")
+        arguments = params.get("arguments", {}) or {}
+        result = self.execute_local(arguments.get("command", []), governance_authorized=governance_authorized)
+        if result["status"] == "denied":
+            return self._mcp_error(request_id, -32001, result["reason"])
+        return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+    def execute_local(self, command: Any, *, governance_authorized: bool) -> dict[str, Any]:
+        if not governance_authorized:
+            return {"status": "denied", "reason": "governance_required", "sandbox": self.sandbox_name}
+        if not isinstance(command, list) or not all(isinstance(part, str) for part in command):
+            return {"status": "denied", "reason": "invalid_command", "sandbox": self.sandbox_name}
+        permitted_profiles = {
+            ("python", "--version"),
+            ("git", "status", "--short"),
+            ("git", "diff", "--check"),
+            ("pytest", "--version"),
+            ("mypy", "--version"),
+            ("ruff", "--version"),
+        }
+        if tuple(command) not in permitted_profiles:
+            return {"status": "denied", "reason": "command_profile_not_permitted", "sandbox": self.sandbox_name}
+        completed = subprocess.run(
+            command,
+            cwd=self._workspace_root,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            shell=False,
+            check=False,
+        )
+        return {
+            "status": "completed" if completed.returncode == 0 else "failed",
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout[-2000:],
+            "stderr": completed.stderr[-2000:],
+            "sandbox": self.sandbox_name,
+        }
+
+    @staticmethod
+    def _mcp_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
+        return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
     def _safe_tool_name(self, task: str) -> str:
         normalized = "".join(char if char.isalnum() else "_" for char in task.lower()).strip("_")

@@ -43,13 +43,20 @@ class StateTransitionPipeline:
             "type": "state_transition",
             "event_type": getattr(event, "type", None),
             "provenance_verified": True,
+            "payload": getattr(event, "payload", {}) or {},
+            "change_risk": candidate.metadata.get("change_risk", {}),
+            "security_assessment": candidate.metadata.get("security_assessment", {}),
         }
-        authorized = self.governance_engine.authorize(action)
-        candidate.metadata["governance"] = {
-            "authorized": authorized,
-            "action": action,
-        }
-        if not authorized:
+        decide = getattr(self.governance_engine, "decide", None)
+        if callable(decide):
+            decision = decide(action)
+        else:
+            decision = {"authorized": self.governance_engine.authorize(action)}
+        candidate.metadata["governance"] = {"action": action, **decision}
+        if decision.get("requires_human_approval") and not decision.get("authorized"):
+            candidate.metadata["governance_pending"] = True
+            return candidate
+        if not decision.get("authorized", False):
             raise GovernanceViolation("Governance rejected state transition.")
 
         return self.state_manager.commit(candidate)

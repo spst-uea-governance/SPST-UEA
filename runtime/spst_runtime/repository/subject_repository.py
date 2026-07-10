@@ -5,10 +5,18 @@ class SubjectRepository:
         self._state=SubjectState()
         self._subjects: dict[str, SubjectState] = {"default": self._state}
 
-    def create(self, subject_id: str, *, role: str, goals: list[dict] | None = None) -> SubjectState:
+    def create(
+        self,
+        subject_id: str,
+        *,
+        role: str,
+        goals: list[dict] | None = None,
+        workspace_id: str | None = None,
+    ) -> SubjectState:
         state = SubjectState(metadata={
             "subject_id": subject_id,
             "role": role,
+            "workspace_id": workspace_id,
             "version": 0,
             "goals": goals or [],
             "swarm": {"messages_sent": 0, "messages_received": 0},
