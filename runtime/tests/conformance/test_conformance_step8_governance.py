@@ -1,5 +1,5 @@
 """
-Conformance Test Stub for Codex Step 8: Governance Decision Interface.
+Conformance Test for Codex Step 8: Governance Decision Interface.
 Authority Order: 4. tests (Must satisfy RFC-0004 & normative specification).
 Codex MUST NOT bypass governance for convenience.
 """

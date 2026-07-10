@@ -1,11 +1,9 @@
-try:
-    from fastapi import FastAPI
-except Exception:
-    FastAPI=None
+from fastapi import FastAPI
 
-app = FastAPI(title="SPST Runtime") if FastAPI else None
 
-if app:
-    @app.get("/health")
-    async def health():
-        return {"status":"ok"}
+app = FastAPI(title="SPST Runtime")
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}

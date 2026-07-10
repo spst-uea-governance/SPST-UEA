@@ -13,6 +13,8 @@ This pass makes the reference runtime executable in Codex without requiring netw
 - Added an OpenAI Responses API model adapter behind the SPST `ModelAdapter` boundary.
 - Added an API-key-free local/Codex-mediated adapter for Codex runtime operation.
 - Enabled conformance tests for transition ordering, governance rejection, and persistence recovery.
+- Added lifecycle scheduling, deep-copy checkpoints, integrity-checked migration,
+  public local SDK, and reproducible local benchmark support.
 
 ## Boundary Decisions
 
@@ -20,4 +22,5 @@ This pass makes the reference runtime executable in Codex without requiring netw
 - API-key-free operation uses `spst_runtime.providers.local_codex_adapter`.
 - Reflection and governance remain separate from state commit.
 - Persistence stores structured dictionaries and does not directly mutate subject identity.
-- Placeholder advanced theory remains documented rather than overstated as production-complete.
+- Documentation remains explicit about non-sentience and the API-key-free local
+  runtime boundary; no theoretical claim is represented as executable behavior.

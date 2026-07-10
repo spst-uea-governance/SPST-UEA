@@ -10,3 +10,5 @@ dist/
 *.db
 *.db-shm
 *.db-wal
+runtime/spst_runtime/tools/dynamic/*.py
+!runtime/spst_runtime/tools/dynamic/__init__.py

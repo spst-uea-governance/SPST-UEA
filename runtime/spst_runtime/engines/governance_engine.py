@@ -3,6 +3,9 @@ from typing import Any
 class GovernanceEngine:
     """Authorize runtime actions that can affect protected state."""
 
+    def __init__(self):
+        self.immunity_rules: list[dict[str, Any]] = []
+
     def authorize(self, action: Any) -> bool:
         if not isinstance(action, dict):
             return False
@@ -18,3 +21,11 @@ class GovernanceEngine:
             return provenance_verified
 
         return True
+
+    def register_immunity_rule(self, rule: dict[str, Any]) -> dict[str, Any]:
+        if self.authorize({**rule, "type": "state_transition"}):
+            normalized = dict(rule)
+            normalized["registered"] = True
+            self.immunity_rules.append(normalized)
+            return normalized
+        return {**rule, "registered": False}

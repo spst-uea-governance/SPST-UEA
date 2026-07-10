@@ -1,5 +1,5 @@
 """
-Conformance Test Stub for Codex Step 9: ACID/WAL Persistence & State Recovery.
+Conformance Test for Codex Step 9: ACID/WAL Persistence & State Recovery.
 Authority Order: 4. tests (Must satisfy RFC-0003 & normative specification).
 "Persistence Is Reconstructed, Not Preserved."
 """

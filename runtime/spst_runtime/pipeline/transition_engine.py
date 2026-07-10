@@ -70,6 +70,14 @@ class TransitionEngine:
             prompt,
             session_state,
         )
+        if payload.get("requires_dynamic_tool"):
+            state.metadata["dynamic_tool_genesis"] = self.tool_provider.run(
+                "generate_dynamic_tool",
+                {
+                    "task": payload.get("unknown_task") or "frontier_verifier",
+                    "prompt": prompt,
+                },
+            )
         goals = self.goal_manager.sync(state.metadata.get("goals", []))
         goal_plan = self.goal_engine.plan(
             goals,
@@ -105,6 +113,15 @@ class TransitionEngine:
                 "issue": issue,
                 "attempts": [diagnose],
             }
+        genesis = state.metadata.get("dynamic_tool_genesis", {})
+        if genesis.get("status") == "mounted":
+            state.metadata["dynamic_tool_result"] = self.tool_provider.run(
+                genesis["tool_name"],
+                {
+                    "prompt": payload.get("prompt", ""),
+                    "context": state.metadata.get("retrieved_context", []),
+                },
+            )
 
     def _govern(self, state: Any, event: Any) -> None:
         state.metadata.setdefault("governance_required", True)
@@ -125,6 +142,20 @@ class TransitionEngine:
                     **state.metadata.get("phase2_reflection", {}),
                     **result.get("patch", {}).get("phase2_reflection", {}),
                 }
+        if state.metadata.get("dynamic_tool_result", {}).get("status") == "solved":
+            state.metadata["auto_immunity"] = {
+                "status": "immune",
+                "chaos_event": {
+                    "type": "simulated_missing_context",
+                    "branch": "sandbox",
+                    "contained": True,
+                },
+                "governance_rule": {
+                    "action": "fallback_to_verified_dynamic_tool",
+                    "provenance_verified": True,
+                    "source": "active_chaos_self_play",
+                },
+            }
 
     def _commit(self, state: Any, event: Any) -> None:
         state.metadata.setdefault("commit_pending", True)

@@ -1,42 +1,122 @@
 import json
 import sqlite3
-from typing import Any
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from threading import Lock, RLock
+from typing import Any, Iterator
+
 from spst_runtime.persistence.repository import PersistenceRepository
+
 
 class SQLiteRepository(PersistenceRepository):
     """SQLite key/value repository with WAL mode enabled for state recovery."""
+
+    _registry_lock = Lock()
+    _path_locks: dict[str, RLock] = {}
+    _initialized_paths: set[str] = set()
 
     def __init__(self, path: str = "spst.db"):
         self.path = path
 
     def connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS state_store (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            )
-            """
-        )
+        self._initialize()
+        conn = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
+        conn.execute("PRAGMA busy_timeout=30000;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
         return conn
+
+    @contextmanager
+    def connection(self) -> Iterator[sqlite3.Connection]:
+        """Yield a connection and always close its OS handle afterwards."""
+        conn = self.connect()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     async def save(self, key: str, value: dict[str, Any]) -> None:
         serialized = json.dumps(value, sort_keys=True)
-        with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO state_store(key, value)
-                VALUES(?, ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                """,
-                (key, serialized),
-            )
+        for attempt in range(6):
+            try:
+                with self.locked(), self.connection() as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute(
+                        """
+                        INSERT INTO state_store(key, value)
+                        VALUES(?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        """,
+                        (key, serialized),
+                    )
+                return
+            except sqlite3.OperationalError as exc:
+                if not self._is_locked(exc) or attempt == 5:
+                    raise
+                time.sleep(0.02 * (2**attempt))
 
     async def load(self, key: str) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            row = conn.execute("SELECT value FROM state_store WHERE key = ?", (key,)).fetchone()
+        for attempt in range(6):
+            try:
+                with self.connection() as conn:
+                    row = conn.execute(
+                        "SELECT value FROM state_store WHERE key = ?", (key,)
+                    ).fetchone()
+                break
+            except sqlite3.OperationalError as exc:
+                if not self._is_locked(exc) or attempt == 5:
+                    raise
+                time.sleep(0.02 * (2**attempt))
         if row is None:
             return None
         return json.loads(row[0])
+
+    @contextmanager
+    def locked(self) -> Iterator[None]:
+        """Serialize in-process write sequences for one database path."""
+        lock = self._lock_for_path()
+        with lock:
+            yield
+
+    def _initialize(self) -> None:
+        path_key = self._path_key()
+        with self._lock_for_path():
+            if path_key in self._initialized_paths:
+                return
+            if self.path != ":memory:":
+                Path(self.path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
+            try:
+                conn.execute("PRAGMA busy_timeout=30000;")
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS state_store (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    )
+                    """
+                )
+                conn.commit()
+                self._initialized_paths.add(path_key)
+            finally:
+                conn.close()
+
+    def _lock_for_path(self) -> RLock:
+        path_key = self._path_key()
+        with self._registry_lock:
+            return self._path_locks.setdefault(path_key, RLock())
+
+    def _path_key(self) -> str:
+        if self.path == ":memory:":
+            return self.path
+        return str(Path(self.path).expanduser().resolve())
+
+    @staticmethod
+    def _is_locked(error: sqlite3.OperationalError) -> bool:
+        message = str(error).lower()
+        return "locked" in message or "busy" in message

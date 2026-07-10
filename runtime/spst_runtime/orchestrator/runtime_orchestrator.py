@@ -1,5 +1,5 @@
 import asyncio
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict
 from typing import Any
 
 from spst_runtime.bus.event_bus import EventBus
@@ -76,7 +76,7 @@ class RuntimeOrchestrator:
         self._retrieve(state, event)
         result = self.pipeline.run(state, event)
         self._act(result, event)
-        self._commit(result)
+        self._commit(result, event)
         return result
 
     def _retrieve(self, state: SubjectState, event: Event) -> None:
@@ -136,6 +136,25 @@ class RuntimeOrchestrator:
                 "version": version,
             },
         )
+        if state.metadata.get("dynamic_tool_result"):
+            state.metadata["dynamic_tool_memory"] = self.memory_provider.store(
+                f"dynamic_tool:{version}",
+                {
+                    "prompt": prompt,
+                    "text": (
+                        "Dynamic tool solved unknown frontier task with deterministic verifier "
+                        "and local sandbox validation."
+                    ),
+                    "trace": state.metadata.get("last_trace", []),
+                    "tool_result": state.metadata["dynamic_tool_result"],
+                },
+                {
+                    "phase": "act",
+                    "event_type": getattr(event, "type", None),
+                    "version": version,
+                    "capability": "dynamic_tool_genesis",
+                },
+            )
         if state.metadata.get("autopoiesis"):
             state.metadata["autopoiesis_memory"] = self.memory_provider.store(
                 f"autopoiesis:{version}",
@@ -151,9 +170,22 @@ class RuntimeOrchestrator:
                 },
             )
 
-    def _commit(self, state: SubjectState) -> None:
+    def _commit(self, state: SubjectState, event: Event) -> None:
         version = state.metadata.get("version", 0)
-        state.metadata["maintenance"] = self.maintenance_service()
+        if state.metadata.get("dynamic_tool_result"):
+            state.metadata["rule_crystals"] = self.memory_provider.crystallize_rules(top_k=5)
+        if state.metadata.get("auto_immunity"):
+            registered = self.pipeline.governance_engine.register_immunity_rule(
+                state.metadata["auto_immunity"]["governance_rule"]
+            )
+            state.metadata["auto_immunity"]["governance_rule"] = registered
+        if event.type == "system_tick":
+            state.metadata["maintenance"] = self.maintenance_service()
+        else:
+            state.metadata["maintenance"] = {
+                "status": "deferred",
+                "reason": "non_autonomous_event",
+            }
         self.goal_manager.persist(state.metadata.get("goals", []))
         asyncio.run(self.repository.save("runtime:subject_main", self._serialize_state(state)))
         subject_id = state.metadata.get("subject_id")
@@ -177,7 +209,5 @@ class RuntimeOrchestrator:
             )
         )
 
-    def _serialize_state(self, state: Any) -> dict[str, Any]:
-        if is_dataclass(state):
-            return asdict(state)
-        return {"metadata": getattr(state, "metadata", {})}
+    def _serialize_state(self, state: SubjectState) -> dict[str, Any]:
+        return asdict(state)

@@ -1,5 +1,5 @@
 """
-Conformance Test Stub for Codex Step 5: Deterministic State Transition Coordinator.
+Conformance Test for Codex Step 5: Deterministic State Transition Coordinator.
 Authority Order: 4. tests (Must satisfy RFC-0003 & normative specification).
 """
 import pytest

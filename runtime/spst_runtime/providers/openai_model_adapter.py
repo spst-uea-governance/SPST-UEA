@@ -36,7 +36,7 @@ class OpenAIModelAdapter(ModelAdapter):
                 "error": f"{self.api_key_env} is not set.",
             }
 
-        payload = {
+        payload: dict[str, Any] = {
             "model": os.getenv("SPST_OPENAI_MODEL", self.model),
             "input": prompt,
             "metadata": {

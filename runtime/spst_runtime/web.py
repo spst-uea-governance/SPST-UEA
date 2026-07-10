@@ -2,6 +2,7 @@ import argparse
 import json
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from spst_runtime.chat_bridge import run_chat_turn
@@ -129,7 +130,7 @@ class CockpitRuntime:
         self.orchestrator = RuntimeOrchestrator(db_path=db_path)
         self.loop = RuntimeLoop(orchestrator=self.orchestrator, state=self.state)
         self.last_state = self.state
-        self.last_swarm_result = {}
+        self.last_swarm_result: dict[str, dict[str, Any]] = {}
 
     def status(self) -> dict:
         metadata = self.last_state.metadata
@@ -245,7 +246,7 @@ def handle_cockpit_request(
     *,
     body: bytes | None = None,
     runtime: CockpitRuntime | None = None,
-) -> tuple[int, dict]:
+) -> tuple[HTTPStatus, dict[str, Any]]:
     runtime = runtime or DEFAULT_COCKPIT
     parsed = urlparse(path)
 

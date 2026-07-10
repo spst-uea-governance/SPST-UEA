@@ -24,8 +24,8 @@ python -m mypy spst_runtime
 - `runtime/` - Python reference runtime package and tests.
 - `docs/` - architecture, governance, runtime model, and Codex handoff guidance.
 - `rfc/` - normative RFC drafts and templates.
-- `benchmark/` - benchmark placeholder area.
-- `sdk/` - SDK placeholder area.
+- `benchmark/` - reproducible RFC-0005 local benchmark runner.
+- `sdk/` - typed, API-key-free Python cockpit SDK.
 
 ## Codex Notes
 
