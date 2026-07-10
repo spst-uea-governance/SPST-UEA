@@ -1,0 +1,41 @@
+[build-system]
+requires=["setuptools>=68","wheel"]
+build-backend="setuptools.build_meta"
+
+[project]
+name="spst-runtime"
+version="0.1.0"
+description="Reference runtime for SPST-UEA"
+requires-python=">=3.11"
+dependencies=[
+  "pydantic>=2",
+  "fastapi>=0.115"
+]
+
+[project.optional-dependencies]
+dev=[
+  "pytest>=8",
+  "ruff>=0.6",
+  "mypy>=1.10"
+]
+
+[project.scripts]
+spst-runtime="spst_runtime.cli:main"
+
+[tool.setuptools]
+package-dir={""="."}
+
+[tool.setuptools.packages.find]
+include=["spst_runtime*"]
+
+[tool.pytest.ini_options]
+testpaths=["tests"]
+markers=[
+  "conformance: marks tests for SPST-UEA RFC normative conformance"
+]
+
+[tool.ruff]
+line-length=100
+
+[tool.mypy]
+python_version="3.11"
