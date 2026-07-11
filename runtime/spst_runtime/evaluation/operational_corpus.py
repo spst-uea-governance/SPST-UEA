@@ -127,6 +127,16 @@ class OperationalEvaluationCorpus:
             "schema_version": self.SCHEMA_VERSION,
         }
 
+    def task_contract(self, task_id: str) -> dict[str, Any] | None:
+        """Return one active public contract without loading private task content."""
+        for entry in self._matching_entries(None):
+            if entry["id"] != task_id:
+                continue
+            if self._is_expired(entry):
+                return None
+            return deepcopy(self._public_entry(entry))
+        return None
+
     def load_for_shadow(
         self,
         *,

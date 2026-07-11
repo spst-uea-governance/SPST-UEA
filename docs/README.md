@@ -39,6 +39,7 @@ The documentation is organized around a strict separation between:
 | `phase11-reproducible-capability-evaluation.md` | Paired local capability evaluation and calibration evidence |
 | `phase12-calibration-registry-governance.md` | Immutable evaluation history, comparability, and regression HITL governance |
 | `phase13-consent-scoped-operational-shadow.md` | Consented local task corpus and non-mutating operational shadow evaluation |
+| `phase14-artifact-verified-outcomes.md` | Fixed-profile artifact evidence and consented human outcome calibration |
 
 ## Normative Language
 

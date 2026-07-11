@@ -58,6 +58,8 @@ class GovernanceEngine:
             return self._decide_operational_corpus_registration(action, covenant)
         if action.get("type") == "operational_shadow_evaluation":
             return self._decide_operational_shadow_evaluation(action, covenant)
+        if action.get("type") == "artifact_outcome_evidence":
+            return self._decide_artifact_outcome_evidence(action, covenant)
 
         payload = action.get("payload", {}) or {}
         risk = action.get("change_risk", {}) or {}
@@ -380,6 +382,84 @@ class GovernanceEngine:
             True,
             False,
             ["operational_shadow_authorized"],
+            action=action,
+            covenant=covenant,
+        )
+
+    def _decide_artifact_outcome_evidence(
+        self,
+        action: dict[str, Any],
+        covenant: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = action.get("payload", {}) or {}
+        if action.get("source") != "artifact_outcome_ledger":
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["artifact_outcome_source_required"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("local_only") or not payload.get("evidence_only"):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["artifact_outcome_must_be_local_evidence_only"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("task_contract_active"):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["artifact_outcome_active_task_required"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("expected_source_snapshot_present"):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["artifact_outcome_snapshot_required"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("human_calibration_consent"):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["artifact_outcome_human_consent_required"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("human_decision_valid"):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["artifact_outcome_human_decision_required"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("retention_within_task"):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["artifact_outcome_retention_mismatch"],
+                action=action,
+                covenant=covenant,
+            )
+        return self._decision(
+            "High",
+            True,
+            False,
+            ["artifact_outcome_evidence_authorized"],
             action=action,
             covenant=covenant,
         )

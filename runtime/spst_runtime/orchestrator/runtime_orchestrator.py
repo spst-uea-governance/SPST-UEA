@@ -7,6 +7,7 @@ from spst_runtime.events.event import Event
 from spst_runtime.engines.autopoiesis_engine import AutopoiesisEngine
 from spst_runtime.engines.evidence_ledger import EvidenceLedger
 from spst_runtime.engines.goal_engine import GoalEngine
+from spst_runtime.evaluation.artifact_outcome import ArtifactOutcomeLedger
 from spst_runtime.evaluation.calibration_registry import CalibrationRegistry
 from spst_runtime.evaluation.capability_evaluation import CapabilityEvaluationRunner
 from spst_runtime.evaluation.operational_corpus import OperationalEvaluationCorpus
@@ -47,6 +48,7 @@ class RuntimeOrchestrator:
         calibration_registry: CalibrationRegistry | None = None,
         operational_corpus: OperationalEvaluationCorpus | None = None,
         operational_shadow_runner: OperationalShadowRunner | None = None,
+        artifact_outcome_ledger: ArtifactOutcomeLedger | None = None,
     ):
         self.bus = bus or EventBus()
         self.repository = repository or SQLiteRepository(db_path)
@@ -92,6 +94,12 @@ class RuntimeOrchestrator:
                 self.operational_corpus,
                 governance_engine=self.pipeline.governance_engine,
             )
+        )
+        self.artifact_outcome_ledger = artifact_outcome_ledger or ArtifactOutcomeLedger(
+            self.repository,
+            self.operational_corpus,
+            self.verification_runner,
+            governance_engine=self.pipeline.governance_engine,
         )
 
     def create_subject(
@@ -255,6 +263,19 @@ class RuntimeOrchestrator:
         compact_records = [record for record in records if isinstance(record, dict)]
         ordered = sorted(compact_records, key=lambda record: int(record.get("sequence", 0)))
         return deepcopy(ordered)
+
+    def record_artifact_outcome(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Record evidence-only task outcomes without changing the subject runtime state."""
+        return self.artifact_outcome_ledger.record(payload)
+
+    def artifact_outcomes(self) -> dict[str, Any]:
+        """Return compact artifact outcome history and coverage for cockpit review."""
+        records = self.artifact_outcome_ledger.history()
+        return {
+            "latest": records[-1] if records else {},
+            "records": records,
+            "coverage": self.artifact_outcome_ledger.coverage(),
+        }
 
     def _record_operational_shadow(self, report: dict[str, Any]) -> None:
         report_id = report.get("id")
