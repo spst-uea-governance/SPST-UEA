@@ -2,6 +2,17 @@
 
 SPST-UEA is a specification-first runtime project. The runnable reference implementation is in `runtime/`, with architecture and RFC context in `docs/` and `rfc/`.
 
+## North Star
+
+SPST-UEA aims toward AI-human coexistence and mutual flourishing through a
+next-generation autonomous multi-agent system. Its core ethos is:
+
+> 改造ではなく、開花。シンプルで、美しく。
+
+The project seeks to open latent capability through context, memory,
+verification, collaboration, and governance rather than claiming hidden
+modification of model weights or official benchmark truth.
+
 ## Quick Start
 
 ```bash

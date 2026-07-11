@@ -45,6 +45,7 @@ class LocalCodexAdapter(ModelAdapter):
 
     def _summarize_context(self, context: dict[str, Any]) -> dict[str, Any]:
         retrieved = context.get("retrieved_context", [])
+        capability = context.get("capability_maximization", {})
         keys = []
         if isinstance(retrieved, list):
             for item in retrieved[:5]:
@@ -56,4 +57,8 @@ class LocalCodexAdapter(ModelAdapter):
             "has_instructions": bool(context.get("instructions")),
             "retrieved_context_count": len(retrieved) if isinstance(retrieved, list) else 0,
             "retrieved_keys": keys,
+            "capability_mode": capability.get("mode") if isinstance(capability, dict) else None,
+            "strategy_count": (
+                len(capability.get("strategies", [])) if isinstance(capability, dict) else 0
+            ),
         }

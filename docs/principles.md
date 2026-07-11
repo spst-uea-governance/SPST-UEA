@@ -2,6 +2,18 @@
 
 These principles are frozen for SPST-UEA Project 1.0 unless changed through a major-version governance process.
 
+## Core Ethos
+
+All principles are interpreted through this posture:
+
+> 改造ではなく、開花。シンプルで、美しく。
+
+SPST-UEA SHOULD amplify capability by arranging context, memory, verification,
+and governance so that existing model ability can open more fully. It MUST NOT
+claim that scaffolding has modified model weights, official benchmark truth, or
+the model's intrinsic nature. The preferred design is simple, legible, and
+beautiful enough to be audited.
+
 ## P-001 Model Independence
 
 The architecture MUST NOT require a specific language model, provider, or model family.

@@ -2,6 +2,7 @@ from copy import deepcopy
 from typing import Any
 
 from spst_runtime.engines.autopoiesis_engine import AutopoiesisEngine
+from spst_runtime.engines.capability_maximizer import CapabilityMaximizer
 from spst_runtime.engines.goal_engine import GoalEngine
 from spst_runtime.engines.security_engine import SecurityEngine
 from spst_runtime.intelligence_amplifier import IntelligenceAmplifier
@@ -22,6 +23,7 @@ class TransitionEngine:
         tool_provider: ToolProvider | None = None,
         autopoiesis_engine: AutopoiesisEngine | None = None,
         security_engine: SecurityEngine | None = None,
+        capability_maximizer: CapabilityMaximizer | None = None,
     ):
         self.intelligence_amplifier = intelligence_amplifier or IntelligenceAmplifier()
         self.goal_engine = goal_engine or GoalEngine()
@@ -29,6 +31,7 @@ class TransitionEngine:
         self.tool_provider = tool_provider or ToolProvider()
         self.autopoiesis_engine = autopoiesis_engine or AutopoiesisEngine()
         self.security_engine = security_engine or SecurityEngine()
+        self.capability_maximizer = capability_maximizer or CapabilityMaximizer()
 
     def execute(self, state: Any, event: Any) -> Any:
         if not hasattr(state, "metadata"):
@@ -72,6 +75,12 @@ class TransitionEngine:
         state.metadata["intelligence_amplification"] = self.intelligence_amplifier.amplify(
             prompt,
             session_state,
+        )
+        state.metadata["capability_maximization"] = self.capability_maximizer.maximize(
+            prompt,
+            amplification=state.metadata["intelligence_amplification"],
+            session_state=session_state,
+            payload=payload,
         )
         if payload.get("requires_dynamic_tool"):
             state.metadata["dynamic_tool_genesis"] = self.tool_provider.run(

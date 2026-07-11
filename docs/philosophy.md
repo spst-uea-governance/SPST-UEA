@@ -1,5 +1,20 @@
 # Engineering Philosophy
 
+## Core Ethos: Opening, Not Modification
+
+SPST-UEA's core posture is:
+
+> 改造ではなく、開花。シンプルで、美しく。
+
+The system should not pretend to rewrite a model's nature, weights, official
+benchmark truth, or identity. It should create conditions where latent
+capability becomes easier to express: clearer context, better decomposition,
+stronger verification, safer memory, and more graceful governance.
+
+Designs should therefore prefer the simplest structure that lets capability
+open naturally. Complexity is justified only when it reveals, protects, or
+stabilizes that opening.
+
 ## 1. Persistence Is Reconstructed, Not Preserved
 
 SPST-UEA does not assume that a persistent AI system remains identical by storing an immutable internal essence.

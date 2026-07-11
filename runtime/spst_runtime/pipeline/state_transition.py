@@ -79,6 +79,10 @@ class StateTransitionPipeline:
                         "do not directly mutate protected identity or governance state."
                     ),
                     "retrieved_context": state.metadata.get("retrieved_context", []),
+                    "capability_maximization": state.metadata.get(
+                        "capability_maximization",
+                        {},
+                    ),
                 },
             )
         )

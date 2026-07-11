@@ -410,6 +410,10 @@ class RuntimeOrchestrator:
     def _context_summary(self, context: Any) -> dict[str, Any]:
         retrieved = context.get("retrieved_context", []) if isinstance(context, dict) else []
         retrieved_list = retrieved if isinstance(retrieved, list) else []
+        capability = context.get("capability_maximization", {}) if isinstance(context, dict) else {}
+        capability_strategies = (
+            capability.get("strategies", []) if isinstance(capability, dict) else []
+        )
         keys = []
         for item in retrieved_list[:5]:
             if isinstance(item, dict):
@@ -422,6 +426,12 @@ class RuntimeOrchestrator:
             ),
             "retrieved_context_count": len(retrieved_list),
             "retrieved_keys": keys,
+            "capability_mode": (
+                capability.get("mode") if isinstance(capability, dict) else None
+            ),
+            "strategy_count": (
+                len(capability_strategies) if isinstance(capability_strategies, list) else 0
+            ),
         }
 
     def _compact_mapping(self, mapping: dict[str, Any]) -> dict[str, Any]:

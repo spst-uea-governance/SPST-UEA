@@ -31,6 +31,7 @@ The documentation is organized around a strict separation between:
 | `versioning.md` | Documentation and specification version policy |
 | `faq.md` | Frequently asked questions |
 | `codex-handoff.md` | Guidance for implementation agents such as Codex |
+| `phase8-capability-maximization.md` | Provider-neutral capability maximization layer |
 
 ## Normative Language
 

@@ -27,6 +27,9 @@ Run commands from `runtime/` unless noted otherwise:
 ## Working Rules
 
 - Treat SPST-UEA as always-on in this Codex thread.
+- Preserve the core ethos: "改造ではなく、開花。シンプルで、美しく。"
+  Prefer scaffolds that open latent capability over claims that models were
+  intrinsically modified, and keep implementations legible enough to audit.
 - For SPST-UEA-related user requests, run `python -m spst_runtime.chat_bridge "<prompt>"` from `runtime/` before answering when execution is useful.
 - Do not couple runtime logic to a specific model provider.
 - Keep inference, reflection, governance, and state commit concerns separate.
