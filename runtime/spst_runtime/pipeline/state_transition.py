@@ -46,6 +46,7 @@ class StateTransitionPipeline:
             "payload": getattr(event, "payload", {}) or {},
             "change_risk": candidate.metadata.get("change_risk", {}),
             "security_assessment": candidate.metadata.get("security_assessment", {}),
+            "trace": candidate.metadata.get("last_trace", []),
         }
         decide = getattr(self.governance_engine, "decide", None)
         if callable(decide):
@@ -53,6 +54,8 @@ class StateTransitionPipeline:
         else:
             decision = {"authorized": self.governance_engine.authorize(action)}
         candidate.metadata["governance"] = {"action": action, **decision}
+        if "covenant_policy" in decision:
+            candidate.metadata["covenant_policy"] = decision["covenant_policy"]
         if decision.get("requires_human_approval") and not decision.get("authorized"):
             candidate.metadata["governance_pending"] = True
             return candidate

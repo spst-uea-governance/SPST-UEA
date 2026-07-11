@@ -207,7 +207,6 @@ class CockpitRuntime:
             goals = self.last_state.metadata.setdefault("goals", [])
             goals.append({**goal, "status": goal.get("status", "pending")})
 
-        prompt = payload.get("prompt", "")
         event = Event(type=payload.get("event", "user_action"), payload=dict(payload))
         if not self.loop.ctx.running:
             self.loop.start()

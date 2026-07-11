@@ -19,6 +19,7 @@ The documentation is organized around a strict separation between:
 |---|---|
 | `index.md` | Entry point and documentation map |
 | `spst-uea-covenant.md` | Constitutional charter for AI-human co-creation and cognitive governance |
+| `covenant-runtime-policy.md` | Runtime policy mapping from Covenant clauses to governance decisions |
 | `philosophy.md` | Foundational engineering philosophy |
 | `principles.md` | Frozen design principles |
 | `architecture.md` | High-level system architecture |

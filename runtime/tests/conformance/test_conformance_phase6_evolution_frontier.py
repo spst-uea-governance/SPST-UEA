@@ -7,7 +7,7 @@ from spst_runtime.orchestrator.runtime_orchestrator import RuntimeOrchestrator
 @pytest.mark.conformance
 def test_conformance_phase6_evolution_frontier(tmp_path):
     orchestrator = RuntimeOrchestrator(db_path=str(tmp_path / "phase6_frontier.db"))
-    subject = orchestrator.create_subject(
+    orchestrator.create_subject(
         "frontier",
         role="EvolutionSubject",
         goals=[
