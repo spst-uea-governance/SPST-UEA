@@ -54,6 +54,10 @@ class GovernanceEngine:
             return self._decide_local_verification(action, covenant)
         if action.get("type") == "capability_evaluation":
             return self._decide_capability_evaluation(action, covenant)
+        if action.get("type") == "operational_corpus_registration":
+            return self._decide_operational_corpus_registration(action, covenant)
+        if action.get("type") == "operational_shadow_evaluation":
+            return self._decide_operational_shadow_evaluation(action, covenant)
 
         payload = action.get("payload", {}) or {}
         risk = action.get("change_risk", {}) or {}
@@ -274,6 +278,108 @@ class GovernanceEngine:
             True,
             False,
             ["capability_evaluation_authorized"],
+            action=action,
+            covenant=covenant,
+        )
+
+    def _decide_operational_corpus_registration(
+        self,
+        action: dict[str, Any],
+        covenant: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = action.get("payload", {}) or {}
+        if action.get("source") != "operational_evaluation_corpus":
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["operational_corpus_source_required"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("local_only"):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["operational_corpus_must_be_local"],
+                action=action,
+                covenant=covenant,
+            )
+        if (
+            not payload.get("consent_granted")
+            or payload.get("consent_scope") != "local_operational_evaluation"
+        ):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["operational_corpus_consent_required"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("contract_valid"):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["operational_corpus_contract_invalid"],
+                action=action,
+                covenant=covenant,
+            )
+        return self._decision(
+            "High",
+            True,
+            False,
+            ["operational_corpus_registration_authorized"],
+            action=action,
+            covenant=covenant,
+        )
+
+    def _decide_operational_shadow_evaluation(
+        self,
+        action: dict[str, Any],
+        covenant: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = action.get("payload", {}) or {}
+        if action.get("source") != "operational_shadow_runner":
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["operational_shadow_source_required"],
+                action=action,
+                covenant=covenant,
+            )
+        if not (
+            payload.get("analysis_only")
+            and payload.get("read_only")
+            and payload.get("shadow_only")
+            and payload.get("consent_scoped")
+            and payload.get("local_only")
+        ):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["operational_shadow_must_be_l0_local"],
+                action=action,
+                covenant=covenant,
+            )
+        if int(payload.get("task_count", 0)) <= 0:
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["operational_shadow_tasks_required"],
+                action=action,
+                covenant=covenant,
+            )
+        return self._decision(
+            "High",
+            True,
+            False,
+            ["operational_shadow_authorized"],
             action=action,
             covenant=covenant,
         )

@@ -9,6 +9,8 @@ from spst_runtime.engines.evidence_ledger import EvidenceLedger
 from spst_runtime.engines.goal_engine import GoalEngine
 from spst_runtime.evaluation.calibration_registry import CalibrationRegistry
 from spst_runtime.evaluation.capability_evaluation import CapabilityEvaluationRunner
+from spst_runtime.evaluation.operational_corpus import OperationalEvaluationCorpus
+from spst_runtime.evaluation.operational_shadow import OperationalShadowRunner
 from spst_runtime.interfaces.model_adapter import ModelAdapter
 from spst_runtime.engines.verification_runner import VerificationRunner
 from spst_runtime.maintenance import run_maintenance
@@ -25,6 +27,9 @@ from spst_runtime.repository.workspace_orchestrator import WorkspaceOrchestrator
 class RuntimeOrchestrator:
     """Fully wired SPST runtime lifecycle orchestrator."""
 
+    SHADOW_INDEX_KEY = "runtime:operational_shadow:index:v1"
+    SHADOW_INDEX_SCHEMA_VERSION = "operational-shadow-index-v1"
+
     def __init__(
         self,
         db_path: str = "spst_runtime_lifecycle.db",
@@ -40,6 +45,8 @@ class RuntimeOrchestrator:
         verification_runner: VerificationRunner | None = None,
         capability_evaluation_runner: CapabilityEvaluationRunner | None = None,
         calibration_registry: CalibrationRegistry | None = None,
+        operational_corpus: OperationalEvaluationCorpus | None = None,
+        operational_shadow_runner: OperationalShadowRunner | None = None,
     ):
         self.bus = bus or EventBus()
         self.repository = repository or SQLiteRepository(db_path)
@@ -73,6 +80,19 @@ class RuntimeOrchestrator:
             )
         )
         self.calibration_registry = calibration_registry or CalibrationRegistry(self.repository)
+        self.operational_corpus = operational_corpus or OperationalEvaluationCorpus(
+            self.repository,
+            governance_engine=self.pipeline.governance_engine,
+            security_engine=self.pipeline.transition_engine.security_engine,
+        )
+        self.operational_shadow_runner = (
+            operational_shadow_runner
+            or OperationalShadowRunner(
+                self.model_provider,
+                self.operational_corpus,
+                governance_engine=self.pipeline.governance_engine,
+            )
+        )
 
     def create_subject(
         self,
@@ -166,6 +186,131 @@ class RuntimeOrchestrator:
                 "verification_run": verification_run,
             },
         )
+
+    def register_operational_task(self, task: dict[str, Any]) -> dict[str, Any]:
+        """Register a locally consented task without exposing its prompt in cockpit data."""
+        return self.operational_corpus.register(task)
+
+    def run_operational_shadow(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Run a non-mutating L0 shadow evaluation and persist compact audit evidence."""
+        candidate_value = payload.get("candidate_id")
+        baseline_value = payload.get("baseline_id")
+        split_value = payload.get("split")
+        task_values = payload.get("task_ids")
+        task_ids = (
+            [value for value in task_values if isinstance(value, str)]
+            if isinstance(task_values, list)
+            else None
+        )
+        report = self.operational_shadow_runner.run(
+            candidate_id=candidate_value if isinstance(candidate_value, str) else None,
+            split=split_value if isinstance(split_value, str) else "holdout",
+            task_ids=task_ids,
+        )
+        governance = report.get("governance", {})
+        if isinstance(governance, dict) and governance.get("authorized", False):
+            calibration = self.calibration_registry.register(
+                report,
+            candidate_id=candidate_value if isinstance(candidate_value, str) else None,
+            baseline_id=(
+                baseline_value
+                if isinstance(baseline_value, str)
+                and baseline_value.startswith("CAL-")
+                and len(baseline_value) == 20
+                else None
+            ),
+            )
+            report["calibration"] = calibration
+            requires_human_approval = bool(
+                calibration.get("policy", {}).get("requires_human_approval", False)
+            )
+            report["promotion"] = {
+                "status": (
+                    "held_for_human_review"
+                    if requires_human_approval
+                    else "shadow_only_not_promoted"
+                ),
+                "automatic_adoption": False,
+                "requires_human_approval": requires_human_approval,
+            }
+        else:
+            report["calibration"] = {}
+            report["promotion"] = {
+                "status": "blocked",
+                "automatic_adoption": False,
+                "requires_human_approval": False,
+            }
+        self._record_operational_shadow(report)
+        return report
+
+    def operational_shadow_history(self) -> list[dict[str, Any]]:
+        """Return compact shadow audit history without raw task content or model text."""
+        with self.repository.locked():
+            stored = asyncio.run(self.repository.load(self.SHADOW_INDEX_KEY))
+        if not isinstance(stored, dict):
+            return []
+        records = stored.get("records", [])
+        if not isinstance(records, list):
+            return []
+        compact_records = [record for record in records if isinstance(record, dict)]
+        ordered = sorted(compact_records, key=lambda record: int(record.get("sequence", 0)))
+        return deepcopy(ordered)
+
+    def _record_operational_shadow(self, report: dict[str, Any]) -> None:
+        report_id = report.get("id")
+        if not isinstance(report_id, str) or not report_id:
+            return
+        with self.repository.locked():
+            stored = asyncio.run(self.repository.load(self.SHADOW_INDEX_KEY))
+            if not isinstance(stored, dict) or not isinstance(stored.get("records"), list):
+                stored = {
+                    "schema_version": self.SHADOW_INDEX_SCHEMA_VERSION,
+                    "records": [],
+                }
+            records = [record for record in stored["records"] if isinstance(record, dict)]
+            existing = next((record for record in records if record.get("id") == report_id), None)
+            if existing is None:
+                summary = self._operational_shadow_summary(report, len(records) + 1)
+                updated_index = {
+                    "schema_version": self.SHADOW_INDEX_SCHEMA_VERSION,
+                    "records": [*records, summary],
+                }
+                asyncio.run(
+                    self.repository.save(f"runtime:operational_shadow:{report_id}", report)
+                )
+                asyncio.run(self.repository.save(self.SHADOW_INDEX_KEY, updated_index))
+                persistence_status = "stored"
+            else:
+                persistence_status = "already_recorded"
+        provenance = self.repository.verify_provenance()
+        report["persistence"] = {
+            "key": f"runtime:operational_shadow:{report_id}",
+            "status": persistence_status,
+            "provenance_valid": provenance.get("valid", False),
+        }
+        report["state_provenance"] = {
+            key: provenance.get(key)
+            for key in ("valid", "entries", "latest_hash", "key_source")
+            if key in provenance
+        }
+
+    @staticmethod
+    def _operational_shadow_summary(report: dict[str, Any], sequence: int) -> dict[str, Any]:
+        suite = report.get("suite", {})
+        calibration = report.get("calibration", {})
+        comparison = calibration.get("comparison", {}) if isinstance(calibration, dict) else {}
+        promotion = report.get("promotion", {})
+        return {
+            "id": report.get("id"),
+            "sequence": sequence,
+            "candidate_id": report.get("candidate_id"),
+            "status": report.get("status"),
+            "suite_hash": suite.get("hash") if isinstance(suite, dict) else None,
+            "eligible_count": suite.get("eligible_count") if isinstance(suite, dict) else None,
+            "calibration_id": calibration.get("id") if isinstance(calibration, dict) else None,
+            "comparison_status": comparison.get("status") if isinstance(comparison, dict) else None,
+            "promotion_status": promotion.get("status") if isinstance(promotion, dict) else None,
+        }
 
     def _retrieve(self, state: SubjectState, event: Event) -> None:
         payload = getattr(event, "payload", {}) or {}

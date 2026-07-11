@@ -38,6 +38,7 @@ The documentation is organized around a strict separation between:
 | `phase10-verified-local-evidence.md` | Governed local verification runner and reproducible evidence gate |
 | `phase11-reproducible-capability-evaluation.md` | Paired local capability evaluation and calibration evidence |
 | `phase12-calibration-registry-governance.md` | Immutable evaluation history, comparability, and regression HITL governance |
+| `phase13-consent-scoped-operational-shadow.md` | Consented local task corpus and non-mutating operational shadow evaluation |
 
 ## Normative Language
 

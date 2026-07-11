@@ -48,6 +48,8 @@ HTML = """<!doctype html>
         <div class="metric">Verification <strong id="cockpit-verification">-</strong></div>
         <div class="metric">Evaluation <strong id="cockpit-evaluation">-</strong></div>
         <div class="metric">Calibration <strong id="cockpit-calibration">-</strong></div>
+        <div class="metric">Corpus <strong id="cockpit-corpus">-</strong></div>
+        <div class="metric">Shadow <strong id="cockpit-shadow">-</strong></div>
       </div>
       <h3>Pipeline Trace</h3>
       <div id="cockpit-trace" class="trace"></div>
@@ -63,6 +65,10 @@ HTML = """<!doctype html>
       <pre id="cockpit-evaluation-detail">No capability evaluation recorded.</pre>
       <h3>Calibration Registry</h3>
       <pre id="cockpit-calibration-detail">No calibration history recorded.</pre>
+      <h3>Operational Corpus</h3>
+      <pre id="cockpit-corpus-detail">No consented tasks recorded.</pre>
+      <h3>Operational Shadow Evaluation</h3>
+      <pre id="cockpit-shadow-detail">No shadow evaluation recorded.</pre>
     </div>
     <div class="card">
       <label>Steps <input id="steps" type="number" value="3" min="0"></label>
@@ -116,12 +122,18 @@ HTML = """<!doctype html>
       document.getElementById("cockpit-verification").textContent = status.verification?.status ?? "-";
       document.getElementById("cockpit-evaluation").textContent = status.evaluation?.status ?? "-";
       document.getElementById("cockpit-calibration").textContent = status.calibration?.comparison?.status ?? "-";
+      document.getElementById("cockpit-corpus").textContent = status.corpus?.active_count ?? "-";
+      document.getElementById("cockpit-shadow").textContent = status.shadow?.status ?? "-";
       document.getElementById("cockpit-trace").innerHTML = (status.last_trace || []).map((step) => `<span>${step}</span>`).join("");
       document.getElementById("cockpit-decision").textContent = JSON.stringify(status.decision_explanation || {}, null, 2);
       document.getElementById("cockpit-verification-detail").textContent = JSON.stringify(status.verification || {}, null, 2);
       document.getElementById("cockpit-evaluation-detail").textContent = JSON.stringify(status.evaluation || {}, null, 2);
       const calibrations = await (await fetch("/api/calibrations")).json();
       document.getElementById("cockpit-calibration-detail").textContent = JSON.stringify(calibrations, null, 2);
+      const corpus = await (await fetch("/api/corpus")).json();
+      document.getElementById("cockpit-corpus-detail").textContent = JSON.stringify(corpus, null, 2);
+      const shadows = await (await fetch("/api/shadow-evaluations")).json();
+      document.getElementById("cockpit-shadow-detail").textContent = JSON.stringify(shadows, null, 2);
       const goals = await (await fetch("/api/goals")).json();
       document.getElementById("cockpit-goals").textContent = JSON.stringify(goals.goals, null, 2);
       renderApprovals(status.pending_approvals || []);
@@ -191,6 +203,7 @@ class CockpitRuntime:
         self.loop = RuntimeLoop(orchestrator=self.orchestrator, state=self.state)
         self.last_state = self.state
         self.last_swarm_result: dict[str, dict[str, Any]] = {}
+        self.last_shadow: dict[str, Any] = {}
 
     def status(self) -> dict:
         metadata = self.last_state.metadata
@@ -209,6 +222,8 @@ class CockpitRuntime:
             "verification": metadata.get("verification_run", {}),
             "evaluation": metadata.get("capability_evaluation", {}),
             "calibration": metadata.get("calibration_registry", {}),
+            "corpus": self.orchestrator.operational_corpus.stats(),
+            "shadow": self.last_shadow,
         }
 
     def goals(self) -> dict:
@@ -235,6 +250,26 @@ class CockpitRuntime:
             "latest": records[-1] if records else {},
             "records": records,
         }
+
+    def corpus(self) -> dict:
+        return {
+            "manifest": self.orchestrator.operational_corpus.manifest(),
+            "stats": self.orchestrator.operational_corpus.stats(),
+        }
+
+    def register_corpus_task(self, payload: dict) -> dict:
+        return self.orchestrator.register_operational_task(payload)
+
+    def shadow_evaluations(self) -> dict:
+        records = self.orchestrator.operational_shadow_history()
+        return {
+            "latest": self.last_shadow or (records[-1] if records else {}),
+            "records": records,
+        }
+
+    def run_shadow_evaluation(self, payload: dict) -> dict:
+        self.last_shadow = self.orchestrator.run_operational_shadow(payload)
+        return self.last_shadow
 
     def subjects(self) -> dict:
         subjects = []
@@ -392,6 +427,12 @@ def handle_cockpit_request(
     if method == "GET" and parsed.path == "/api/calibrations":
         return HTTPStatus.OK, runtime.calibrations()
 
+    if method == "GET" and parsed.path == "/api/corpus":
+        return HTTPStatus.OK, runtime.corpus()
+
+    if method == "GET" and parsed.path == "/api/shadow-evaluations":
+        return HTTPStatus.OK, runtime.shadow_evaluations()
+
     if method == "GET" and parsed.path == "/api/memory/search":
         query = parse_qs(parsed.query).get("q", [""])[0]
         return HTTPStatus.OK, runtime.memory_search(query)
@@ -399,6 +440,14 @@ def handle_cockpit_request(
     if method == "POST" and parsed.path == "/api/dispatch":
         payload = json.loads((body or b"{}").decode("utf-8"))
         return HTTPStatus.OK, runtime.dispatch(payload)
+
+    if method == "POST" and parsed.path == "/api/corpus/tasks":
+        payload = json.loads((body or b"{}").decode("utf-8"))
+        return HTTPStatus.OK, runtime.register_corpus_task(payload)
+
+    if method == "POST" and parsed.path == "/api/shadow-evaluations":
+        payload = json.loads((body or b"{}").decode("utf-8"))
+        return HTTPStatus.OK, runtime.run_shadow_evaluation(payload)
 
     if method == "POST" and parsed.path == "/api/approval":
         payload = json.loads((body or b"{}").decode("utf-8"))
@@ -434,6 +483,8 @@ class RuntimeWebHandler(BaseHTTPRequestHandler):
             "/api/verification",
             "/api/evaluations",
             "/api/calibrations",
+            "/api/corpus",
+            "/api/shadow-evaluations",
             "/api/memory/search",
         }:
             status, payload = handle_cockpit_request("GET", self.path)
