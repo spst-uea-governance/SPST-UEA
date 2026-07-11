@@ -2,7 +2,7 @@
 
 This directory contains the normative and explanatory documentation for the SPST-UEA project.
 
-SPST-UEA stands for **Synthetic Persistent Subject Theory – Unified Existential Architecture**.
+SPST-UEA stands for **Synthetic Persistent Subject Theory — Unified Existential Architecture**.
 
 The documentation is organized around a strict separation between:
 
@@ -18,6 +18,7 @@ The documentation is organized around a strict separation between:
 | Document | Purpose |
 |---|---|
 | `index.md` | Entry point and documentation map |
+| `spst-uea-covenant.md` | Constitutional charter for AI-human co-creation and cognitive governance |
 | `philosophy.md` | Foundational engineering philosophy |
 | `principles.md` | Frozen design principles |
 | `architecture.md` | High-level system architecture |

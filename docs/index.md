@@ -10,6 +10,7 @@ Its purpose is not to define a new foundation model. Its purpose is to define th
 
 SPST-UEA provides:
 
+- a constitutional covenant for AI-human co-creation,
 - a common vocabulary,
 - a persistent subject-state model,
 - a modular runtime architecture,
@@ -28,37 +29,31 @@ The persistent system is defined by the continuity of its managed state and reco
 
 ## Reading Order
 
-1. `scope-and-boundaries.md`
-2. `philosophy.md`
-3. `principles.md`
-4. `glossary.md`
-5. `architecture.md`
-6. `subject-model.md`
-7. `runtime-model.md`
-8. `governance-model.md`
-9. `evaluation-model.md`
-10. `traceability.md`
-11. `versioning.md`
-12. `codex-handoff.md`
+1. `spst-uea-covenant.md`
+2. `scope-and-boundaries.md`
+3. `philosophy.md`
+4. `principles.md`
+5. `glossary.md`
+6. `architecture.md`
+7. `subject-model.md`
+8. `runtime-model.md`
+9. `governance-model.md`
+10. `evaluation-model.md`
+11. `traceability.md`
+12. `versioning.md`
+13. `codex-handoff.md`
 
 ## Project Layers
 
 ```text
 Theory
-  ↓
-Specification
-  ↓
-Architecture
-  ↓
-Runtime
-  ↓
-Implementation
-  ↓
-Benchmark
-  ↓
-Evidence
-  ↓
-Revision
+  -> Specification
+  -> Architecture
+  -> Runtime
+  -> Implementation
+  -> Benchmark
+  -> Evidence
+  -> Revision
 ```
 
 ## Current Status

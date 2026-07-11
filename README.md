@@ -13,6 +13,8 @@ The project seeks to open latent capability through context, memory,
 verification, collaboration, and governance rather than claiming hidden
 modification of model weights or official benchmark truth.
 
+The normative constitutional charter is `docs/spst-uea-covenant.md`.
+
 ## Quick Start
 
 ```bash
@@ -40,7 +42,7 @@ python -m mypy spst_runtime
 
 ## Codex Notes
 
-Before changing behavior, read `docs/codex-handoff.md`. Implementation work should preserve module boundaries, keep providers behind adapters, and avoid bypassing governance for convenience.
+Before changing behavior, read `AGENTS.md`, `docs/spst-uea-covenant.md`, and `docs/codex-handoff.md`. Implementation work should preserve module boundaries, keep providers behind adapters, and avoid bypassing governance for convenience.
 
 ## Current Runtime Status
 

@@ -14,6 +14,8 @@ claim that scaffolding has modified model weights, official benchmark truth, or
 the model's intrinsic nature. The preferred design is simple, legible, and
 beautiful enough to be audited.
 
+The constitutional authority for these principles is `spst-uea-covenant.md`.
+
 ## P-001 Model Independence
 
 The architecture MUST NOT require a specific language model, provider, or model family.

@@ -43,7 +43,7 @@ class IntelligenceAmplifier:
 
     def _classify_intent(self, prompt: str) -> str:
         text = prompt.lower()
-        if any(word in text for word in ("implement", "build", "add", "fix", "実装", "構築", "螳溯", "遏")):
+        if any(word in text for word in ("implement", "build", "add", "fix", "実装", "構築")):
             return "implementation"
         if any(word in text for word in ("design", "architecture", "設計", "アーキテクチャ")):
             return "design"
@@ -58,9 +58,9 @@ class IntelligenceAmplifier:
         units = ["capture_user_goal", "route_through_spst_boundary"]
         if len(prompt) > 40:
             units.append("summarize_core_request")
-        if any(token in lowered for token in ("design", "architecture", "設計", "アーキテクチャ", "繝ｼ", "險")):
+        if any(token in lowered for token in ("design", "architecture", "設計", "アーキテクチャ")):
             units.append("draft_architecture")
-        if any(token in lowered for token in ("implement", "build", "add", "fix", "実装", "構築", "螳溯", "遏")):
+        if any(token in lowered for token in ("implement", "build", "add", "fix", "実装", "構築")):
             units.append("implement_minimal_safe_change")
         units.extend(["evaluate_governance", "prepare_user_facing_answer"])
         return units

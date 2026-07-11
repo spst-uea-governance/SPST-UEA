@@ -9,6 +9,9 @@ These instructions apply to the entire repository.
 - The runnable Python package lives in `runtime/`.
 - `benchmark/` publishes the reproducible local RFC-0005 benchmark runner.
 - `sdk/python/` publishes the typed, API-key-free cockpit SDK.
+- Treat `docs/spst-uea-covenant.md` as the constitutional governance layer for
+  AI-human co-creation, autonomy levels, non-negotiables, failure handling, and
+  memory identity.
 - Treat `docs/codex-handoff.md` as the primary implementation guide.
 - Read `docs/phase7-sovereign-governance-os.md` before changing federation,
   provenance, security, HITL, or MCP behavior.
@@ -30,6 +33,8 @@ Run commands from `runtime/` unless noted otherwise:
 - Preserve the core ethos: "改造ではなく、開花。シンプルで、美しく。"
   Prefer scaffolds that open latent capability over claims that models were
   intrinsically modified, and keep implementations legible enough to audit.
+- Preserve Honesty First: distinguish verified evidence, local inference, and
+  aspirational roadmap language.
 - For SPST-UEA-related user requests, run `python -m spst_runtime.chat_bridge "<prompt>"` from `runtime/` before answering when execution is useful.
 - Do not couple runtime logic to a specific model provider.
 - Keep inference, reflection, governance, and state commit concerns separate.

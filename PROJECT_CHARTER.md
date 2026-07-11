@@ -10,6 +10,9 @@ multi-agent system** that can greatly exceed today's AI systems in realized
 usefulness, reliability, coordination, and self-governed operation, while
 remaining legible, auditable, and aligned with human agency.
 
+The constitutional form of this North Star is maintained in
+`docs/spst-uea-covenant.md`.
+
 ## Core Ethos
 
 > 改造ではなく、開花。シンプルで、美しく。

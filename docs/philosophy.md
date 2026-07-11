@@ -15,6 +15,8 @@ Designs should therefore prefer the simplest structure that lets capability
 open naturally. Complexity is justified only when it reveals, protects, or
 stabilizes that opening.
 
+The constitutional expression of this ethos is `spst-uea-covenant.md`.
+
 ## 1. Persistence Is Reconstructed, Not Preserved
 
 SPST-UEA does not assume that a persistent AI system remains identical by storing an immutable internal essence.
