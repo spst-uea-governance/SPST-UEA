@@ -39,18 +39,19 @@ The persistent system is defined by the continuity of its managed state and reco
 6. `phase12-calibration-registry-governance.md`
 7. `phase13-consent-scoped-operational-shadow.md`
 8. `phase14-artifact-verified-outcomes.md`
-9. `scope-and-boundaries.md`
-10. `philosophy.md`
-11. `principles.md`
-12. `glossary.md`
-13. `architecture.md`
-14. `subject-model.md`
-15. `runtime-model.md`
-16. `governance-model.md`
-17. `evaluation-model.md`
-18. `traceability.md`
-19. `versioning.md`
-20. `codex-handoff.md`
+9. `phase15-longitudinal-promotion.md`
+10. `scope-and-boundaries.md`
+11. `philosophy.md`
+12. `principles.md`
+13. `glossary.md`
+14. `architecture.md`
+15. `subject-model.md`
+16. `runtime-model.md`
+17. `governance-model.md`
+18. `evaluation-model.md`
+19. `traceability.md`
+20. `versioning.md`
+21. `codex-handoff.md`
 
 ## Project Layers
 

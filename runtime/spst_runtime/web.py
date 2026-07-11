@@ -51,6 +51,7 @@ HTML = """<!doctype html>
         <div class="metric">Corpus <strong id="cockpit-corpus">-</strong></div>
         <div class="metric">Shadow <strong id="cockpit-shadow">-</strong></div>
         <div class="metric">Artifacts <strong id="cockpit-artifacts">-</strong></div>
+        <div class="metric">Promotions <strong id="cockpit-promotions">-</strong></div>
       </div>
       <h3>Pipeline Trace</h3>
       <div id="cockpit-trace" class="trace"></div>
@@ -72,6 +73,8 @@ HTML = """<!doctype html>
       <pre id="cockpit-shadow-detail">No shadow evaluation recorded.</pre>
       <h3>Artifact Outcome Evidence</h3>
       <pre id="cockpit-artifacts-detail">No artifact outcome recorded.</pre>
+      <h3>Longitudinal Promotions</h3>
+      <pre id="cockpit-promotions-detail">No promotion proposal recorded.</pre>
     </div>
     <div class="card">
       <label>Steps <input id="steps" type="number" value="3" min="0"></label>
@@ -128,6 +131,7 @@ HTML = """<!doctype html>
       document.getElementById("cockpit-corpus").textContent = status.corpus?.active_count ?? "-";
       document.getElementById("cockpit-shadow").textContent = status.shadow?.status ?? "-";
       document.getElementById("cockpit-artifacts").textContent = status.artifact_outcomes?.coverage?.eligible_count ?? "-";
+      document.getElementById("cockpit-promotions").textContent = status.promotions?.coverage?.active_count ?? "-";
       document.getElementById("cockpit-trace").innerHTML = (status.last_trace || []).map((step) => `<span>${step}</span>`).join("");
       document.getElementById("cockpit-decision").textContent = JSON.stringify(status.decision_explanation || {}, null, 2);
       document.getElementById("cockpit-verification-detail").textContent = JSON.stringify(status.verification || {}, null, 2);
@@ -140,6 +144,8 @@ HTML = """<!doctype html>
       document.getElementById("cockpit-shadow-detail").textContent = JSON.stringify(shadows, null, 2);
       const artifacts = await (await fetch("/api/artifact-outcomes")).json();
       document.getElementById("cockpit-artifacts-detail").textContent = JSON.stringify(artifacts, null, 2);
+      const promotions = await (await fetch("/api/promotions")).json();
+      document.getElementById("cockpit-promotions-detail").textContent = JSON.stringify(promotions, null, 2);
       const goals = await (await fetch("/api/goals")).json();
       document.getElementById("cockpit-goals").textContent = JSON.stringify(goals.goals, null, 2);
       renderApprovals(status.pending_approvals || []);
@@ -211,10 +217,12 @@ class CockpitRuntime:
         self.last_swarm_result: dict[str, dict[str, Any]] = {}
         self.last_shadow: dict[str, Any] = {}
         self.last_artifact_outcome: dict[str, Any] = {}
+        self.last_promotion: dict[str, Any] = {}
 
     def status(self) -> dict:
         metadata = self.last_state.metadata
         artifact_outcomes = self.orchestrator.artifact_outcomes()
+        promotions = self.orchestrator.longitudinal_promotions()
         return {
             "running": self.loop.ctx.running,
             "tick": self.loop.ctx.tick,
@@ -235,6 +243,10 @@ class CockpitRuntime:
             "artifact_outcomes": {
                 "latest": self.last_artifact_outcome or artifact_outcomes["latest"],
                 "coverage": artifact_outcomes["coverage"],
+            },
+            "promotions": {
+                "latest": self.last_promotion or promotions["latest"],
+                "coverage": promotions["coverage"],
             },
         }
 
@@ -289,6 +301,27 @@ class CockpitRuntime:
     def record_artifact_outcome(self, payload: dict) -> dict:
         self.last_artifact_outcome = self.orchestrator.record_artifact_outcome(payload)
         return self.last_artifact_outcome
+
+    def promotions(self) -> dict:
+        return self.orchestrator.longitudinal_promotions()
+
+    def propose_promotion(self, payload: dict) -> dict:
+        self.last_promotion = self.orchestrator.propose_longitudinal_promotion(payload)
+        return self.last_promotion
+
+    def resolve_promotion(self, promotion_id: str, *, approved: bool) -> dict:
+        self.last_promotion = self.orchestrator.resolve_longitudinal_promotion(
+            promotion_id,
+            approved=approved,
+        )
+        return self.last_promotion
+
+    def rollback_promotion(self, promotion_id: str, *, approved: bool) -> dict:
+        self.last_promotion = self.orchestrator.rollback_longitudinal_promotion(
+            promotion_id,
+            approved=approved,
+        )
+        return self.last_promotion
 
     def subjects(self) -> dict:
         subjects = []
@@ -455,6 +488,9 @@ def handle_cockpit_request(
     if method == "GET" and parsed.path == "/api/artifact-outcomes":
         return HTTPStatus.OK, runtime.artifact_outcomes()
 
+    if method == "GET" and parsed.path == "/api/promotions":
+        return HTTPStatus.OK, runtime.promotions()
+
     if method == "GET" and parsed.path == "/api/memory/search":
         query = parse_qs(parsed.query).get("q", [""])[0]
         return HTTPStatus.OK, runtime.memory_search(query)
@@ -474,6 +510,24 @@ def handle_cockpit_request(
     if method == "POST" and parsed.path == "/api/artifact-outcomes":
         payload = json.loads((body or b"{}").decode("utf-8"))
         return HTTPStatus.OK, runtime.record_artifact_outcome(payload)
+
+    if method == "POST" and parsed.path == "/api/promotions":
+        payload = json.loads((body or b"{}").decode("utf-8"))
+        return HTTPStatus.OK, runtime.propose_promotion(payload)
+
+    if method == "POST" and parsed.path == "/api/promotions/approval":
+        payload = json.loads((body or b"{}").decode("utf-8"))
+        return HTTPStatus.OK, runtime.resolve_promotion(
+            str(payload["promotion_id"]),
+            approved=bool(payload.get("approved")),
+        )
+
+    if method == "POST" and parsed.path == "/api/promotions/rollback":
+        payload = json.loads((body or b"{}").decode("utf-8"))
+        return HTTPStatus.OK, runtime.rollback_promotion(
+            str(payload["promotion_id"]),
+            approved=bool(payload.get("approved")),
+        )
 
     if method == "POST" and parsed.path == "/api/approval":
         payload = json.loads((body or b"{}").decode("utf-8"))
@@ -512,6 +566,7 @@ class RuntimeWebHandler(BaseHTTPRequestHandler):
             "/api/corpus",
             "/api/shadow-evaluations",
             "/api/artifact-outcomes",
+            "/api/promotions",
             "/api/memory/search",
         }:
             status, payload = handle_cockpit_request("GET", self.path)

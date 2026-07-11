@@ -40,6 +40,7 @@ The documentation is organized around a strict separation between:
 | `phase12-calibration-registry-governance.md` | Immutable evaluation history, comparability, and regression HITL governance |
 | `phase13-consent-scoped-operational-shadow.md` | Consented local task corpus and non-mutating operational shadow evaluation |
 | `phase14-artifact-verified-outcomes.md` | Fixed-profile artifact evidence and consented human outcome calibration |
+| `phase15-longitudinal-promotion.md` | Longitudinal evidence synthesis and reversible shadow-only promotion governance |
 
 ## Normative Language
 

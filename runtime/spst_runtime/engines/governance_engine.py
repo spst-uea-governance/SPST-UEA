@@ -60,6 +60,12 @@ class GovernanceEngine:
             return self._decide_operational_shadow_evaluation(action, covenant)
         if action.get("type") == "artifact_outcome_evidence":
             return self._decide_artifact_outcome_evidence(action, covenant)
+        if action.get("type") == "longitudinal_evidence_synthesis":
+            return self._decide_longitudinal_evidence_synthesis(action, covenant)
+        if action.get("type") == "longitudinal_promotion_activation":
+            return self._decide_longitudinal_promotion_activation(action, covenant)
+        if action.get("type") == "longitudinal_promotion_rollback":
+            return self._decide_longitudinal_promotion_rollback(action, covenant)
 
         payload = action.get("payload", {}) or {}
         risk = action.get("change_risk", {}) or {}
@@ -460,6 +466,205 @@ class GovernanceEngine:
             True,
             False,
             ["artifact_outcome_evidence_authorized"],
+            action=action,
+            covenant=covenant,
+        )
+
+    def _decide_longitudinal_evidence_synthesis(
+        self,
+        action: dict[str, Any],
+        covenant: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = action.get("payload", {}) or {}
+        if action.get("source") != "longitudinal_promotion_governance":
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["longitudinal_evidence_source_required"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("local_only") or not payload.get("evidence_only"):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["longitudinal_evidence_must_be_local_evidence_only"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("provenance_valid"):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["longitudinal_evidence_provenance_required"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("policy_contract_valid"):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["longitudinal_evidence_policy_contract_invalid"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("candidate_baseline_distinct"):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["longitudinal_evidence_candidate_baseline_required"],
+                action=action,
+                covenant=covenant,
+            )
+        return self._decision(
+            "High",
+            True,
+            False,
+            ["longitudinal_evidence_synthesis_authorized"],
+            action=action,
+            covenant=covenant,
+        )
+
+    def _decide_longitudinal_promotion_activation(
+        self,
+        action: dict[str, Any],
+        covenant: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = action.get("payload", {}) or {}
+        if action.get("source") != "longitudinal_promotion_governance":
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["longitudinal_promotion_source_required"],
+                action=action,
+                covenant=covenant,
+            )
+        if not (
+            payload.get("local_only")
+            and payload.get("reversible")
+            and payload.get("shadow_only")
+        ):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["longitudinal_promotion_must_be_local_reversible_shadow"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("provenance_valid"):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["longitudinal_promotion_provenance_required"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("promotion_eligible") or payload.get("promotion_status") != (
+            "held_for_human_review"
+        ):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["longitudinal_promotion_eligible_evidence_required"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("human_decision_recorded"):
+            return self._decision(
+                "Low",
+                False,
+                True,
+                ["longitudinal_promotion_human_approval_required"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("human_approved"):
+            return self._decision(
+                "High",
+                True,
+                False,
+                ["longitudinal_promotion_human_rejection_recorded"],
+                action=action,
+                covenant=covenant,
+            )
+        return self._decision(
+            "Medium",
+            True,
+            False,
+            ["longitudinal_promotion_shadow_authorized"],
+            action=action,
+            covenant=covenant,
+        )
+
+    def _decide_longitudinal_promotion_rollback(
+        self,
+        action: dict[str, Any],
+        covenant: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = action.get("payload", {}) or {}
+        if action.get("source") != "longitudinal_promotion_governance":
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["longitudinal_rollback_source_required"],
+                action=action,
+                covenant=covenant,
+            )
+        if not (
+            payload.get("local_only")
+            and payload.get("reversible")
+            and payload.get("shadow_only")
+        ):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["longitudinal_rollback_must_be_local_reversible_shadow"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("provenance_valid"):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["longitudinal_rollback_provenance_required"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("promotion_active"):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["longitudinal_rollback_active_promotion_required"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("human_decision_recorded") or not payload.get("human_approved"):
+            return self._decision(
+                "Low",
+                False,
+                True,
+                ["longitudinal_rollback_human_approval_required"],
+                action=action,
+                covenant=covenant,
+            )
+        return self._decision(
+            "Medium",
+            True,
+            False,
+            ["longitudinal_rollback_authorized"],
             action=action,
             covenant=covenant,
         )

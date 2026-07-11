@@ -10,6 +10,9 @@ from spst_runtime.engines.goal_engine import GoalEngine
 from spst_runtime.evaluation.artifact_outcome import ArtifactOutcomeLedger
 from spst_runtime.evaluation.calibration_registry import CalibrationRegistry
 from spst_runtime.evaluation.capability_evaluation import CapabilityEvaluationRunner
+from spst_runtime.evaluation.longitudinal_promotion import (
+    LongitudinalPromotionGovernance,
+)
 from spst_runtime.evaluation.operational_corpus import OperationalEvaluationCorpus
 from spst_runtime.evaluation.operational_shadow import OperationalShadowRunner
 from spst_runtime.interfaces.model_adapter import ModelAdapter
@@ -49,6 +52,7 @@ class RuntimeOrchestrator:
         operational_corpus: OperationalEvaluationCorpus | None = None,
         operational_shadow_runner: OperationalShadowRunner | None = None,
         artifact_outcome_ledger: ArtifactOutcomeLedger | None = None,
+        longitudinal_promotion_governance: LongitudinalPromotionGovernance | None = None,
     ):
         self.bus = bus or EventBus()
         self.repository = repository or SQLiteRepository(db_path)
@@ -100,6 +104,15 @@ class RuntimeOrchestrator:
             self.operational_corpus,
             self.verification_runner,
             governance_engine=self.pipeline.governance_engine,
+        )
+        self.longitudinal_promotion_governance = (
+            longitudinal_promotion_governance
+            or LongitudinalPromotionGovernance(
+                self.repository,
+                self.operational_corpus,
+                self.artifact_outcome_ledger,
+                governance_engine=self.pipeline.governance_engine,
+            )
         )
 
     def create_subject(
@@ -275,6 +288,43 @@ class RuntimeOrchestrator:
             "latest": records[-1] if records else {},
             "records": records,
             "coverage": self.artifact_outcome_ledger.coverage(),
+        }
+
+    def propose_longitudinal_promotion(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create an evidence-only promotion proposal without changing subject state."""
+        return self.longitudinal_promotion_governance.propose(payload)
+
+    def resolve_longitudinal_promotion(
+        self,
+        promotion_id: str,
+        *,
+        approved: bool,
+    ) -> dict[str, Any]:
+        """Record a human approval or rejection for a shadow-only proposal."""
+        return self.longitudinal_promotion_governance.resolve(
+            promotion_id,
+            approved=approved,
+        )
+
+    def rollback_longitudinal_promotion(
+        self,
+        promotion_id: str,
+        *,
+        approved: bool,
+    ) -> dict[str, Any]:
+        """Record a human-authorized rollback for an active shadow-only proposal."""
+        return self.longitudinal_promotion_governance.rollback(
+            promotion_id,
+            approved=approved,
+        )
+
+    def longitudinal_promotions(self) -> dict[str, Any]:
+        """Return compact promotion projections and aggregate state coverage."""
+        records = self.longitudinal_promotion_governance.history()
+        return {
+            "latest": records[-1] if records else {},
+            "records": records,
+            "coverage": self.longitudinal_promotion_governance.coverage(),
         }
 
     def _record_operational_shadow(self, report: dict[str, Any]) -> None:
