@@ -40,6 +40,7 @@ class LocalCodexAdapter(ModelAdapter):
             "methods": ["infer", "health", "get_capabilities"],
             "required_provider": "none",
             "supports_streaming": False,
+            "supports_structured_evaluation": False,
             "requires_api_key": False,
         }
 

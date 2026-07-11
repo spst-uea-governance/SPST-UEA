@@ -36,6 +36,8 @@ The documentation is organized around a strict separation between:
 | `codex-handoff.md` | Guidance for implementation agents such as Codex |
 | `phase8-capability-maximization.md` | Provider-neutral capability maximization layer |
 | `phase10-verified-local-evidence.md` | Governed local verification runner and reproducible evidence gate |
+| `phase11-reproducible-capability-evaluation.md` | Paired local capability evaluation and calibration evidence |
+| `phase12-calibration-registry-governance.md` | Immutable evaluation history, comparability, and regression HITL governance |
 
 ## Normative Language
 

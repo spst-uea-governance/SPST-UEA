@@ -46,6 +46,8 @@ HTML = """<!doctype html>
         <div class="metric">Memory <strong id="cockpit-memory">-</strong></div>
         <div class="metric">Evidence <strong id="cockpit-evidence">-</strong></div>
         <div class="metric">Verification <strong id="cockpit-verification">-</strong></div>
+        <div class="metric">Evaluation <strong id="cockpit-evaluation">-</strong></div>
+        <div class="metric">Calibration <strong id="cockpit-calibration">-</strong></div>
       </div>
       <h3>Pipeline Trace</h3>
       <div id="cockpit-trace" class="trace"></div>
@@ -57,6 +59,10 @@ HTML = """<!doctype html>
       <pre id="cockpit-decision">No decision recorded.</pre>
       <h3>Local Verification</h3>
       <pre id="cockpit-verification-detail">No verification run recorded.</pre>
+      <h3>Capability Evaluation</h3>
+      <pre id="cockpit-evaluation-detail">No capability evaluation recorded.</pre>
+      <h3>Calibration Registry</h3>
+      <pre id="cockpit-calibration-detail">No calibration history recorded.</pre>
     </div>
     <div class="card">
       <label>Steps <input id="steps" type="number" value="3" min="0"></label>
@@ -108,9 +114,14 @@ HTML = """<!doctype html>
       document.getElementById("cockpit-memory").textContent = status.memory_stats?.total_records ?? "-";
       document.getElementById("cockpit-evidence").textContent = status.evidence?.status ?? "-";
       document.getElementById("cockpit-verification").textContent = status.verification?.status ?? "-";
+      document.getElementById("cockpit-evaluation").textContent = status.evaluation?.status ?? "-";
+      document.getElementById("cockpit-calibration").textContent = status.calibration?.comparison?.status ?? "-";
       document.getElementById("cockpit-trace").innerHTML = (status.last_trace || []).map((step) => `<span>${step}</span>`).join("");
       document.getElementById("cockpit-decision").textContent = JSON.stringify(status.decision_explanation || {}, null, 2);
       document.getElementById("cockpit-verification-detail").textContent = JSON.stringify(status.verification || {}, null, 2);
+      document.getElementById("cockpit-evaluation-detail").textContent = JSON.stringify(status.evaluation || {}, null, 2);
+      const calibrations = await (await fetch("/api/calibrations")).json();
+      document.getElementById("cockpit-calibration-detail").textContent = JSON.stringify(calibrations, null, 2);
       const goals = await (await fetch("/api/goals")).json();
       document.getElementById("cockpit-goals").textContent = JSON.stringify(goals.goals, null, 2);
       renderApprovals(status.pending_approvals || []);
@@ -196,6 +207,8 @@ class CockpitRuntime:
             "decision_explanation": metadata.get("decision_explanation", {}),
             "covenant_policy": metadata.get("covenant_policy", {}),
             "verification": metadata.get("verification_run", {}),
+            "evaluation": metadata.get("capability_evaluation", {}),
+            "calibration": metadata.get("calibration_registry", {}),
         }
 
     def goals(self) -> dict:
@@ -212,6 +225,16 @@ class CockpitRuntime:
 
     def verification(self) -> dict:
         return {"verification": self.last_state.metadata.get("verification_run", {})}
+
+    def evaluations(self) -> dict:
+        return {"evaluation": self.last_state.metadata.get("capability_evaluation", {})}
+
+    def calibrations(self) -> dict:
+        records = self.orchestrator.calibration_registry.history()
+        return {
+            "latest": records[-1] if records else {},
+            "records": records,
+        }
 
     def subjects(self) -> dict:
         subjects = []
@@ -252,6 +275,8 @@ class CockpitRuntime:
                 {},
             ),
             "verification": self.last_state.metadata.get("verification_run", {}),
+            "evaluation": self.last_state.metadata.get("capability_evaluation", {}),
+            "calibration": self.last_state.metadata.get("calibration_registry", {}),
             "goal": (self.last_state.metadata.get("goals") or [{}])[0],
             "amplification": self.last_state.metadata.get("intelligence_amplification", {}),
         }
@@ -268,6 +293,8 @@ class CockpitRuntime:
                 {},
             ),
             "verification": self.last_state.metadata.get("verification_run", {}),
+            "evaluation": self.last_state.metadata.get("capability_evaluation", {}),
+            "calibration": self.last_state.metadata.get("calibration_registry", {}),
             "pending_approvals": self.orchestrator.pending_approvals(),
         }
 
@@ -316,6 +343,8 @@ class CockpitRuntime:
                 {},
             ),
             "verification": executor_state.metadata.get("verification_run", {}),
+            "evaluation": executor_state.metadata.get("capability_evaluation", {}),
+            "calibration": executor_state.metadata.get("calibration_registry", {}),
             "subjects": self.subjects()["subjects"],
             "next_actions": executor_state.metadata.get("next_actions", []),
             "self_repair": executor_state.metadata.get("self_repair", {}),
@@ -357,6 +386,12 @@ def handle_cockpit_request(
     if method == "GET" and parsed.path == "/api/verification":
         return HTTPStatus.OK, runtime.verification()
 
+    if method == "GET" and parsed.path == "/api/evaluations":
+        return HTTPStatus.OK, runtime.evaluations()
+
+    if method == "GET" and parsed.path == "/api/calibrations":
+        return HTTPStatus.OK, runtime.calibrations()
+
     if method == "GET" and parsed.path == "/api/memory/search":
         query = parse_qs(parsed.query).get("q", [""])[0]
         return HTTPStatus.OK, runtime.memory_search(query)
@@ -397,6 +432,8 @@ class RuntimeWebHandler(BaseHTTPRequestHandler):
             "/api/subjects",
             "/api/evidence",
             "/api/verification",
+            "/api/evaluations",
+            "/api/calibrations",
             "/api/memory/search",
         }:
             status, payload = handle_cockpit_request("GET", self.path)

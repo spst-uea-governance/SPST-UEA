@@ -39,6 +39,9 @@ class ModelProvider(ModelAdapter):
             "required_provider": capabilities.get("required_provider", "none"),
             "active_provider": adapter.health().get("provider"),
             "fallback_provider": self.fallback.health().get("provider"),
+            "supports_structured_evaluation": bool(
+                capabilities.get("supports_structured_evaluation", False)
+            ),
         }
 
     def _select_adapter(self) -> ModelAdapter:

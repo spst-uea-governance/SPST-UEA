@@ -35,18 +35,20 @@ The persistent system is defined by the continuity of its managed state and reco
 2. `covenant-runtime-policy.md`
 3. `phase9-evidence-driven-governance.md`
 4. `phase10-verified-local-evidence.md`
-5. `scope-and-boundaries.md`
-6. `philosophy.md`
-7. `principles.md`
-8. `glossary.md`
-9. `architecture.md`
-10. `subject-model.md`
-11. `runtime-model.md`
-12. `governance-model.md`
-13. `evaluation-model.md`
-14. `traceability.md`
-15. `versioning.md`
-16. `codex-handoff.md`
+5. `phase11-reproducible-capability-evaluation.md`
+6. `phase12-calibration-registry-governance.md`
+7. `scope-and-boundaries.md`
+8. `philosophy.md`
+9. `principles.md`
+10. `glossary.md`
+11. `architecture.md`
+12. `subject-model.md`
+13. `runtime-model.md`
+14. `governance-model.md`
+15. `evaluation-model.md`
+16. `traceability.md`
+17. `versioning.md`
+18. `codex-handoff.md`
 
 ## Project Layers
 

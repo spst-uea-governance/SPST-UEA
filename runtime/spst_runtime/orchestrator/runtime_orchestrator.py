@@ -7,6 +7,9 @@ from spst_runtime.events.event import Event
 from spst_runtime.engines.autopoiesis_engine import AutopoiesisEngine
 from spst_runtime.engines.evidence_ledger import EvidenceLedger
 from spst_runtime.engines.goal_engine import GoalEngine
+from spst_runtime.evaluation.calibration_registry import CalibrationRegistry
+from spst_runtime.evaluation.capability_evaluation import CapabilityEvaluationRunner
+from spst_runtime.interfaces.model_adapter import ModelAdapter
 from spst_runtime.engines.verification_runner import VerificationRunner
 from spst_runtime.maintenance import run_maintenance
 from spst_runtime.managers.goal_manager import GoalManager
@@ -27,7 +30,7 @@ class RuntimeOrchestrator:
         db_path: str = "spst_runtime_lifecycle.db",
         bus: EventBus | None = None,
         memory_provider: MemoryProvider | None = None,
-        model_provider: ModelProvider | None = None,
+        model_provider: ModelAdapter | None = None,
         pipeline: StateTransitionPipeline | None = None,
         repository: SQLiteRepository | None = None,
         maintenance_service: Any | None = None,
@@ -35,6 +38,8 @@ class RuntimeOrchestrator:
         workspace_orchestrator: WorkspaceOrchestrator | None = None,
         workspace_id: str | None = None,
         verification_runner: VerificationRunner | None = None,
+        capability_evaluation_runner: CapabilityEvaluationRunner | None = None,
+        calibration_registry: CalibrationRegistry | None = None,
     ):
         self.bus = bus or EventBus()
         self.repository = repository or SQLiteRepository(db_path)
@@ -60,6 +65,14 @@ class RuntimeOrchestrator:
             self.pipeline.transition_engine.tool_provider,
             self.pipeline.governance_engine,
         )
+        self.capability_evaluation_runner = (
+            capability_evaluation_runner
+            or CapabilityEvaluationRunner(
+                self.model_provider,
+                governance_engine=self.pipeline.governance_engine,
+            )
+        )
+        self.calibration_registry = calibration_registry or CalibrationRegistry(self.repository)
 
     def create_subject(
         self,
@@ -99,6 +112,7 @@ class RuntimeOrchestrator:
         return result
 
     def dispatch(self, state: SubjectState, event: Event) -> SubjectState:
+        event = self._prepare_capability_evaluation(state, event)
         event = self._prepare_verified_quality_gate(state, event)
         if getattr(event, "type", None) == "system_tick":
             state.metadata["autonomous"] = True
@@ -113,6 +127,29 @@ class RuntimeOrchestrator:
         self._act(result, event)
         self._commit(result, event)
         return result
+
+    def _prepare_capability_evaluation(self, state: SubjectState, event: Event) -> Event:
+        payload = getattr(event, "payload", {}) or {}
+        if not payload.get("evaluate_capability"):
+            return event
+        evaluation = self.capability_evaluation_runner.run()
+        candidate_value = payload.get("calibration_candidate")
+        baseline_value = payload.get("calibration_baseline_id")
+        calibration = self.calibration_registry.register(
+            evaluation,
+            candidate_id=candidate_value if isinstance(candidate_value, str) else None,
+            baseline_id=baseline_value if isinstance(baseline_value, str) else None,
+        )
+        state.metadata["capability_evaluation"] = evaluation
+        state.metadata["calibration_registry"] = calibration
+        return Event(
+            type=event.type,
+            payload={
+                **payload,
+                "evaluation_report": evaluation,
+                "calibration_registry": calibration,
+            },
+        )
 
     def _prepare_verified_quality_gate(self, state: SubjectState, event: Event) -> Event:
         payload = getattr(event, "payload", {}) or {}
@@ -284,9 +321,25 @@ class RuntimeOrchestrator:
                         {},
                     ),
                     "verification_run": state.metadata.get("verification_run", {}),
+                    "capability_evaluation": state.metadata.get(
+                        "capability_evaluation",
+                        {},
+                    ),
+                    "calibration_registry": state.metadata.get(
+                        "calibration_registry",
+                        {},
+                    ),
                 },
             )
         )
+        evaluation = state.metadata.get("capability_evaluation", {})
+        if isinstance(evaluation, dict) and evaluation.get("id"):
+            asyncio.run(
+                self.repository.save(
+                    f"runtime:evaluation:{evaluation['id']}",
+                    evaluation,
+                )
+            )
         state.metadata["state_provenance"] = self.repository.verify_provenance()
         self._persist_evidence(state)
 
@@ -358,6 +411,14 @@ class RuntimeOrchestrator:
                         {},
                     ),
                     "verification_run": candidate.metadata.get("verification_run", {}),
+                    "capability_evaluation": candidate.metadata.get(
+                        "capability_evaluation",
+                        {},
+                    ),
+                    "calibration_registry": candidate.metadata.get(
+                        "calibration_registry",
+                        {},
+                    ),
                 },
             )
         )

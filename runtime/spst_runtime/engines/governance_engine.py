@@ -52,6 +52,8 @@ class GovernanceEngine:
 
         if action.get("type") == "local_verification":
             return self._decide_local_verification(action, covenant)
+        if action.get("type") == "capability_evaluation":
+            return self._decide_capability_evaluation(action, covenant)
 
         payload = action.get("payload", {}) or {}
         risk = action.get("change_risk", {}) or {}
@@ -60,6 +62,7 @@ class GovernanceEngine:
         provenance_verified = bool(action.get("provenance_verified"))
         provenance_scope = action.get("provenance_scope", "sqlite")
         quality_gate_reason = self._quality_gate_reason(action, payload, risk)
+        calibration_gate_reason = self._calibration_gate_reason(payload)
         breaking = bool(
             payload.get("breaking_change")
             or payload.get("architecture_change")
@@ -87,11 +90,18 @@ class GovernanceEngine:
                 action=action,
                 covenant=covenant,
             )
-        if breaking or covenant["requires_human_approval"] or quality_gate_reason:
+        if (
+            breaking
+            or covenant["requires_human_approval"]
+            or quality_gate_reason
+            or calibration_gate_reason
+        ):
             approved = bool(payload.get("human_approved"))
             reasons = ["breaking_or_architectural_change"] if breaking else []
             if quality_gate_reason:
                 reasons.append(quality_gate_reason)
+            if calibration_gate_reason:
+                reasons.append(calibration_gate_reason)
             reasons.extend(covenant["reasons"])
             return self._decision(
                 "Low" if not approved else "Medium",
@@ -178,6 +188,20 @@ class GovernanceEngine:
             return "quality_gate_unverified"
         return None
 
+    def _calibration_gate_reason(self, payload: dict[str, Any]) -> str | None:
+        calibration = payload.get("calibration_registry", {})
+        calibration_data = calibration if isinstance(calibration, dict) else {}
+        comparison = calibration_data.get("comparison", {})
+        policy = calibration_data.get("policy", {})
+        comparison_data = comparison if isinstance(comparison, dict) else {}
+        policy_data = policy if isinstance(policy, dict) else {}
+        if (
+            comparison_data.get("status") == "regressed"
+            and bool(policy_data.get("requires_human_approval"))
+        ):
+            return "calibration_regression_requires_human_approval"
+        return None
+
     def _decide_local_verification(
         self,
         action: dict[str, Any],
@@ -217,6 +241,39 @@ class GovernanceEngine:
             True,
             False,
             ["verification_profile_authorized"],
+            action=action,
+            covenant=covenant,
+        )
+
+    def _decide_capability_evaluation(
+        self,
+        action: dict[str, Any],
+        covenant: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = action.get("payload", {}) or {}
+        if action.get("source") != "capability_evaluation_runner":
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["capability_evaluation_runner_source_required"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("analysis_only") or not payload.get("read_only"):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["capability_evaluation_must_be_read_only"],
+                action=action,
+                covenant=covenant,
+            )
+        return self._decision(
+            "High",
+            True,
+            False,
+            ["capability_evaluation_authorized"],
             action=action,
             covenant=covenant,
         )

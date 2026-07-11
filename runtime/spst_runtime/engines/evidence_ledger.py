@@ -27,6 +27,10 @@ class EvidenceLedger:
         trace = self._trace(action)
         provenance_status = self._provenance_status(action)
         quality_gate = self._quality_gate(action, payload, provenance_status)
+        capability_evaluation = self._evaluation_summary(payload.get("evaluation_report"))
+        calibration_registry = self._calibration_summary(
+            payload.get("calibration_registry")
+        )
         checks = {
             "pipeline_trace": {
                 "status": "passed" if tuple(trace) == self.PIPELINE_STEPS else "failed",
@@ -49,6 +53,8 @@ class EvidenceLedger:
             "trace": trace,
             "checks": checks,
             "quality_gate": quality_gate,
+            "capability_evaluation": capability_evaluation,
+            "calibration_registry": calibration_registry,
             "governance": {},
             "covenant_policy": {},
             "status": "pending_decision",
@@ -181,6 +187,8 @@ class EvidenceLedger:
                 "trace": record["trace"],
                 "checks": record["checks"],
                 "quality_gate": record["quality_gate"],
+                "capability_evaluation": record["capability_evaluation"],
+                "calibration_registry": record["calibration_registry"],
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -236,3 +244,42 @@ class EvidenceLedger:
         if normalized in {"unavailable", "timed_out", "denied"}:
             return normalized
         return "not_provided"
+
+    def _evaluation_summary(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        suite = value.get("suite", {})
+        calibration = value.get("calibration", {})
+        claims = value.get("claims", {})
+        return {
+            "id": value.get("id"),
+            "status": value.get("status"),
+            "suite_version": suite.get("version") if isinstance(suite, dict) else None,
+            "suite_hash": suite.get("hash") if isinstance(suite, dict) else None,
+            "calibration_status": (
+                calibration.get("status") if isinstance(calibration, dict) else None
+            ),
+            "task_quality_uplift_claimed": (
+                claims.get("task_quality_uplift_claimed") if isinstance(claims, dict) else None
+            ),
+        }
+
+    def _calibration_summary(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        contract = value.get("contract", {})
+        comparison = value.get("comparison", {})
+        policy = value.get("policy", {})
+        return {
+            "id": value.get("id"),
+            "role": value.get("role"),
+            "candidate_id": value.get("candidate_id"),
+            "baseline_id": value.get("baseline_id"),
+            "contract_hash": contract.get("hash") if isinstance(contract, dict) else None,
+            "comparison_status": (
+                comparison.get("status") if isinstance(comparison, dict) else None
+            ),
+            "requires_human_approval": (
+                policy.get("requires_human_approval") if isinstance(policy, dict) else None
+            ),
+        }

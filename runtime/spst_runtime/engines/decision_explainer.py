@@ -14,6 +14,11 @@ class DecisionExplainer:
         "quality_gate_failed": "At least one required local verification check failed.",
         "quality_gate_incomplete": "Required local verification evidence is incomplete.",
         "quality_gate_unverified": "The quality gate requires locally verified evidence.",
+        "calibration_regression_requires_human_approval": (
+            "The candidate regressed against its comparable calibration baseline."
+        ),
+        "capability_evaluation_runner_source_required": "Capability evaluation must use the governed runner.",
+        "capability_evaluation_must_be_read_only": "Capability evaluation is restricted to read-only analysis.",
         "security_red_team_block": "The local security review blocked the action.",
         "unverified_provenance": "The state provenance chain is not verified.",
         "unsupported_or_overstated_claim": "The action makes an unsupported or overstated claim.",
