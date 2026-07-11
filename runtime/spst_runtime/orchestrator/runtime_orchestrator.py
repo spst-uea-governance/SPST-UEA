@@ -1,6 +1,5 @@
 import asyncio
 from copy import deepcopy
-from dataclasses import asdict
 from typing import Any
 
 from spst_runtime.bus.event_bus import EventBus
@@ -73,7 +72,11 @@ class RuntimeOrchestrator:
     def create_security_subject(self, workspace_id: str | None = None) -> SubjectState:
         target_workspace = workspace_id or self.workspace_id
         subject_id = f"security:{target_workspace or 'local'}"
-        return self.create_subject(subject_id, role="SecuritySubject", workspace_id=target_workspace)
+        return self.create_subject(
+            subject_id,
+            role="SecuritySubject",
+            workspace_id=target_workspace,
+        )
 
     def dispatch_subject(self, subject_id: str, event: Event) -> SubjectState:
         state = self.subject_repository.load(subject_id)
@@ -93,6 +96,7 @@ class RuntimeOrchestrator:
             state.metadata["autonomous"] = True
         self._retrieve(state, event)
         result = self.pipeline.run(state, event)
+        self._compact_runtime_metadata(result)
         if result.metadata.get("governance_pending"):
             self._register_pending_approval(state, event, result)
             return result
@@ -107,7 +111,7 @@ class RuntimeOrchestrator:
         if memory_key:
             record = self.memory_provider.retrieve(memory_key)
             if record:
-                contexts.append(record)
+                contexts.append(self._compact_context_record(record))
 
         prompt = payload.get("prompt")
         if not prompt and getattr(event, "type", None) == "system_tick":
@@ -118,15 +122,21 @@ class RuntimeOrchestrator:
             )
         if prompt:
             for record in self.memory_provider.search(prompt, top_k=5):
-                if record not in contexts:
-                    contexts.append(record)
+                compact = self._compact_context_record(record)
+                if compact not in contexts:
+                    contexts.append(compact)
 
         if prompt and self.workspace_orchestrator is not None and self.workspace_id:
-            workspace_context = self.workspace_orchestrator.retrieve_context(self.workspace_id, prompt, top_k=5)
+            workspace_context = self.workspace_orchestrator.retrieve_context(
+                self.workspace_id,
+                prompt,
+                top_k=5,
+            )
             state.metadata["workspace_context"] = workspace_context
             for record in workspace_context:
-                if record not in contexts:
-                    contexts.append(record)
+                compact = self._compact_context_record(record)
+                if compact not in contexts:
+                    contexts.append(compact)
 
         state.metadata["retrieved_context"] = contexts
 
@@ -156,7 +166,9 @@ class RuntimeOrchestrator:
             {
                 "prompt": prompt,
                 "trace": state.metadata.get("last_trace", []),
-                "model_inference": state.metadata.get("model_inference", {}),
+                "model_inference": self._compact_model_inference(
+                    state.metadata.get("model_inference", {})
+                ),
             },
             {
                 "phase": "act",
@@ -221,13 +233,14 @@ class RuntimeOrchestrator:
                 "reason": "non_autonomous_event",
             }
         self.goal_manager.persist(state.metadata.get("goals", []))
-        asyncio.run(self.repository.save("runtime:subject_main", self._serialize_state(state)))
+        serialized_state = self._serialize_state(state)
+        asyncio.run(self.repository.save("runtime:subject_main", serialized_state))
         subject_id = state.metadata.get("subject_id")
         if subject_id:
             asyncio.run(
                 self.repository.save(
                     f"runtime:subject:{subject_id}",
-                    self._serialize_state(state),
+                    serialized_state,
                 )
             )
         asyncio.run(
@@ -249,7 +262,9 @@ class RuntimeOrchestrator:
             {
                 "approval_id": approval_id,
                 "diff": record["candidate"].metadata.get("governance", {}).get("diff", {}),
-                "trust_level": record["candidate"].metadata.get("governance", {}).get("trust_level"),
+                "trust_level": record["candidate"].metadata.get("governance", {}).get(
+                    "trust_level"
+                ),
                 "reasons": record["candidate"].metadata.get("governance", {}).get("reasons", []),
             }
             for approval_id, record in sorted(self._pending_approvals.items())
@@ -275,7 +290,12 @@ class RuntimeOrchestrator:
         )
         return self.dispatch(record["state"], approved_event)
 
-    def _register_pending_approval(self, state: SubjectState, event: Event, candidate: SubjectState) -> None:
+    def _register_pending_approval(
+        self,
+        state: SubjectState,
+        event: Event,
+        candidate: SubjectState,
+    ) -> None:
         governance = candidate.metadata.get("governance", {})
         approval_id = str(governance["approval_id"])
         self._pending_approvals[approval_id] = {
@@ -301,4 +321,124 @@ class RuntimeOrchestrator:
         )
 
     def _serialize_state(self, state: SubjectState) -> dict[str, Any]:
-        return asdict(state)
+        return {
+            "identity": self._json_safe(state.identity),
+            "goals": self._json_safe(state.goals),
+            "memory_refs": list(state.memory_refs),
+            "governance": self._json_safe(state.governance),
+            "metadata": self._compact_metadata(state.metadata),
+        }
+
+    def _compact_runtime_metadata(self, state: SubjectState) -> None:
+        if "retrieved_context" in state.metadata:
+            state.metadata["retrieved_context"] = [
+                self._compact_context_record(item)
+                for item in state.metadata.get("retrieved_context", [])
+            ][:5]
+        if "workspace_context" in state.metadata:
+            state.metadata["workspace_context"] = [
+                self._compact_context_record(item)
+                for item in state.metadata.get("workspace_context", [])
+            ][:5]
+        if "model_inference" in state.metadata:
+            state.metadata["model_inference"] = self._compact_model_inference(
+                state.metadata.get("model_inference", {})
+            )
+
+    def _compact_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        compacted: dict[str, Any] = {}
+        for key, value in metadata.items():
+            if key == "retrieved_context":
+                compacted[key] = [
+                    self._compact_context_record(item)
+                    for item in (value if isinstance(value, list) else [])
+                ][:5]
+            elif key == "workspace_context":
+                compacted[key] = [
+                    self._compact_context_record(item)
+                    for item in (value if isinstance(value, list) else [])
+                ][:5]
+            elif key == "model_inference":
+                compacted[key] = self._compact_model_inference(value)
+            elif key in {"autopoiesis_memory", "dynamic_tool_memory", "dynamic_tool_result"}:
+                compacted[key] = self._compact_context_record(value)
+            else:
+                compacted[key] = self._json_safe(value)
+        return compacted
+
+    def _compact_model_inference(self, inference: Any) -> dict[str, Any]:
+        if not isinstance(inference, dict):
+            return {}
+        context = inference.get("context", {})
+        if not isinstance(context, dict) or "retrieved_context_count" not in context:
+            context = self._context_summary(context)
+        return {
+            key: self._json_safe(value)
+            for key, value in inference.items()
+            if key not in {"context", "context_summary"}
+        } | {
+            "context": context,
+            "context_summary": context,
+        }
+
+    def _compact_context_record(self, record: Any) -> dict[str, Any]:
+        if not isinstance(record, dict):
+            return {"text": str(record)[:500]}
+
+        raw_value = record.get("value")
+        value: dict[str, Any] = raw_value if isinstance(raw_value, dict) else {}
+        raw_metadata = record.get("metadata")
+        metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
+        text = (
+            record.get("text")
+            or value.get("text")
+            or value.get("prompt")
+            or value.get("summary")
+            or ""
+        )
+        compacted: dict[str, Any] = {
+            "text": str(text)[:500],
+            "metadata": self._compact_mapping(metadata),
+        }
+        for key in ("key", "id", "kind", "source", "salience", "score", "provenance"):
+            if key in record:
+                compacted[key] = self._json_safe(record[key])
+        if "tags" in record:
+            compacted["tags"] = self._json_safe(record.get("tags", [])[:8])
+        return {key: value for key, value in compacted.items() if value not in ({}, [], "")}
+
+    def _context_summary(self, context: Any) -> dict[str, Any]:
+        retrieved = context.get("retrieved_context", []) if isinstance(context, dict) else []
+        retrieved_list = retrieved if isinstance(retrieved, list) else []
+        keys = []
+        for item in retrieved_list[:5]:
+            if isinstance(item, dict):
+                keys.append(str(item.get("key") or item.get("id") or "context"))
+            else:
+                keys.append("context")
+        return {
+            "has_instructions": (
+                bool(context.get("instructions")) if isinstance(context, dict) else False
+            ),
+            "retrieved_context_count": len(retrieved_list),
+            "retrieved_keys": keys,
+        }
+
+    def _compact_mapping(self, mapping: dict[str, Any]) -> dict[str, Any]:
+        blocked = {"context", "retrieved_context", "model_inference", "tool_result"}
+        return {
+            key: self._json_safe(value)
+            for key, value in mapping.items()
+            if key not in blocked
+        }
+
+    def _json_safe(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {str(key): self._json_safe(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._json_safe(item) for item in value]
+        if isinstance(value, tuple):
+            return [self._json_safe(item) for item in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)

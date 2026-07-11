@@ -18,6 +18,14 @@ Every SQLite save appends a SHA-256 record hash to an HMAC-protected chain.
 `SecuritySubject` performs local AST and token scanning for literal secrets and
 destructive operations before governance can authorize a transition.
 
+New repositories use local per-database HMAC key material when
+`SPST_PROVENANCE_KEY` is not configured. Existing legacy-default chains remain
+verifiable for compatibility and can be re-signed with
+`SQLiteRepository.rotate_provenance_key()` without exposing the secret. Runtime
+snapshots store compact context summaries instead of recursively embedding prior
+retrieval and inference payloads, keeping audit provenance bounded during
+sustained dispatch runs.
+
 ## Adaptive HITL
 
 Routine transitions receive high trust and autonomous authorization. Payloads

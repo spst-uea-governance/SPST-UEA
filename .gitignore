@@ -10,5 +10,7 @@ dist/
 *.db
 *.db-shm
 *.db-wal
+*.provenance_key
+*.provenance_key.*.tmp
 runtime/spst_runtime/tools/dynamic/*.py
 !runtime/spst_runtime/tools/dynamic/__init__.py
