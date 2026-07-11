@@ -3,6 +3,8 @@ import json
 from typing import Any
 
 from spst_runtime.engines.covenant_policy import CovenantPolicyEngine
+from spst_runtime.verification_profiles import VERIFICATION_PROFILE_NAMES
+
 
 class GovernanceEngine:
     """Authorize runtime actions that can affect protected state."""
@@ -48,11 +50,16 @@ class GovernanceEngine:
                 covenant=covenant,
             )
 
+        if action.get("type") == "local_verification":
+            return self._decide_local_verification(action, covenant)
+
         payload = action.get("payload", {}) or {}
         risk = action.get("change_risk", {}) or {}
         action_type = action.get("type")
         source = action.get("source")
         provenance_verified = bool(action.get("provenance_verified"))
+        provenance_scope = action.get("provenance_scope", "sqlite")
+        quality_gate_reason = self._quality_gate_reason(action, payload, risk)
         breaking = bool(
             payload.get("breaking_change")
             or payload.get("architecture_change")
@@ -67,7 +74,11 @@ class GovernanceEngine:
                 action=action,
                 covenant=covenant,
             )
-        if action_type in {"commit_identity_change", "state_transition"} and not provenance_verified:
+        if (
+            action_type in {"commit_identity_change", "state_transition"}
+            and provenance_scope != "ephemeral"
+            and not provenance_verified
+        ):
             return self._decision(
                 "Low",
                 False,
@@ -76,9 +87,11 @@ class GovernanceEngine:
                 action=action,
                 covenant=covenant,
             )
-        if breaking or covenant["requires_human_approval"]:
+        if breaking or covenant["requires_human_approval"] or quality_gate_reason:
             approved = bool(payload.get("human_approved"))
             reasons = ["breaking_or_architectural_change"] if breaking else []
+            if quality_gate_reason:
+                reasons.append(quality_gate_reason)
             reasons.extend(covenant["reasons"])
             return self._decision(
                 "Low" if not approved else "Medium",
@@ -135,3 +148,75 @@ class GovernanceEngine:
                 seen.add(value)
                 result.append(value)
         return result
+
+    def _quality_gate_reason(
+        self,
+        action: dict[str, Any],
+        payload: dict[str, Any],
+        risk: dict[str, Any],
+    ) -> str | None:
+        evidence = action.get("evidence", {})
+        evidence_data = evidence if isinstance(evidence, dict) else {}
+        quality_gate = evidence_data.get("quality_gate", {})
+        quality_data = quality_gate if isinstance(quality_gate, dict) else {}
+        required = bool(
+            quality_data.get("required")
+            or payload.get("requires_quality_gate")
+            or payload.get("breaking_change")
+            or payload.get("architecture_change")
+            or risk.get("requires_human_approval")
+        )
+        if not required:
+            return None
+        status = quality_data.get("status", "incomplete")
+        if status != "passed":
+            return "quality_gate_failed" if status == "failed" else "quality_gate_incomplete"
+        if (
+            payload.get("verified_quality_gate")
+            and quality_data.get("verification_source") != "verified_local"
+        ):
+            return "quality_gate_unverified"
+        return None
+
+    def _decide_local_verification(
+        self,
+        action: dict[str, Any],
+        covenant: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = action.get("payload", {}) or {}
+        profile = str(payload.get("verification_profile") or "")
+        if action.get("source") != "verification_runner":
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["verification_runner_source_required"],
+                action=action,
+                covenant=covenant,
+            )
+        if profile not in VERIFICATION_PROFILE_NAMES:
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["verification_profile_not_permitted"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("analysis_only") or not payload.get("read_only"):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["verification_must_be_read_only"],
+                action=action,
+                covenant=covenant,
+            )
+        return self._decision(
+            "High",
+            True,
+            False,
+            ["verification_profile_authorized"],
+            action=action,
+            covenant=covenant,
+        )

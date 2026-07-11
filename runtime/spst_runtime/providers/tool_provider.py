@@ -1,10 +1,12 @@
 import hashlib
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from spst_runtime.interfaces.tool_adapter import ToolAdapter
+from spst_runtime.verification_profiles import command_for, timeout_for
 
 
 @dataclass
@@ -47,6 +49,11 @@ class ToolProvider(ToolAdapter):
             return self.handle_mcp(payload.get("request", {}), governance_authorized=bool(payload.get("authorized")))
         if tool == "execute_local":
             return self.execute_local(payload.get("command", []), governance_authorized=bool(payload.get("authorized")))
+        if tool == "verify_local":
+            return self.execute_verification_profile(
+                str(payload.get("profile") or ""),
+                governance_authorized=bool(payload.get("authorized")),
+            )
         if tool in self._dynamic_tools:
             return self.run_dynamic_tool(tool, payload)
         return {
@@ -91,7 +98,16 @@ class ToolProvider(ToolAdapter):
         }
 
     def list_tools(self) -> list[str]:
-        return sorted(["diagnose", "repair", "generate_dynamic_tool", "local.execute", *self._dynamic_tools])
+        return sorted(
+            [
+                "diagnose",
+                "repair",
+                "generate_dynamic_tool",
+                "local.execute",
+                "verify.local",
+                *self._dynamic_tools,
+            ]
+        )
 
     def health(self) -> dict[str, Any]:
         return {
@@ -162,6 +178,100 @@ class ToolProvider(ToolAdapter):
             "stderr": completed.stderr[-2000:],
             "sandbox": self.sandbox_name,
         }
+
+    def execute_verification_profile(
+        self,
+        profile: str,
+        *,
+        governance_authorized: bool,
+    ) -> dict[str, Any]:
+        """Run a fixed local profile without accepting arbitrary command input."""
+        if not governance_authorized:
+            return {
+                "profile": profile,
+                "status": "denied",
+                "reason": "governance_required",
+                "sandbox": self.sandbox_name,
+            }
+        command = command_for(profile)
+        if command is None:
+            return {
+                "profile": profile,
+                "status": "denied",
+                "reason": "verification_profile_not_permitted",
+                "sandbox": self.sandbox_name,
+            }
+
+        started_at = time.perf_counter()
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=self._workspace_root,
+                capture_output=True,
+                text=True,
+                timeout=timeout_for(profile),
+                shell=False,
+                check=False,
+            )
+        except FileNotFoundError:
+            return self._verification_result(
+                profile,
+                "unavailable",
+                None,
+                "",
+                "executable_not_found",
+                started_at,
+            )
+        except subprocess.TimeoutExpired as error:
+            return self._verification_result(
+                profile,
+                "timed_out",
+                None,
+                self._text(error.stdout),
+                self._text(error.stderr),
+                started_at,
+            )
+        return self._verification_result(
+            profile,
+            "completed" if completed.returncode == 0 else "failed",
+            completed.returncode,
+            completed.stdout,
+            completed.stderr,
+            started_at,
+            command=list(command),
+        )
+
+    def _verification_result(
+        self,
+        profile: str,
+        status: str,
+        returncode: int | None,
+        stdout: str,
+        stderr: str,
+        started_at: float,
+        *,
+        command: list[str] | None = None,
+    ) -> dict[str, Any]:
+        output = f"{stdout}\n{stderr}"
+        result: dict[str, Any] = {
+            "profile": profile,
+            "status": status,
+            "returncode": returncode,
+            "duration_ms": int((time.perf_counter() - started_at) * 1000),
+            "output_digest": hashlib.sha256(output.encode("utf-8")).hexdigest(),
+            "stdout": stdout[-2000:],
+            "stderr": stderr[-2000:],
+            "sandbox": self.sandbox_name,
+        }
+        if command is not None:
+            result["command"] = command
+        return result
+
+    @staticmethod
+    def _text(value: Any) -> str:
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return str(value or "")
 
     @staticmethod
     def _mcp_error(request_id: Any, code: int, message: str) -> dict[str, Any]:

@@ -18,3 +18,13 @@ class ToolAdapter(ABC):
     def handle_mcp(self, request: dict[str, Any], *, governance_authorized: bool) -> dict[str, Any]:
         """Handle a local MCP JSON-RPC request through the governed tool boundary."""
         ...
+
+    @abstractmethod
+    def execute_verification_profile(
+        self,
+        profile: str,
+        *,
+        governance_authorized: bool,
+    ) -> dict[str, Any]:
+        """Run one fixed local verification profile after governance approval."""
+        ...

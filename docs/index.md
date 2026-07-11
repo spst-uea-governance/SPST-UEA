@@ -12,6 +12,7 @@ SPST-UEA provides:
 
 - a constitutional covenant for AI-human co-creation,
 - executable Covenant runtime policy gates,
+- evidence-driven runtime governance and human-readable decisions,
 - a common vocabulary,
 - a persistent subject-state model,
 - a modular runtime architecture,
@@ -32,18 +33,20 @@ The persistent system is defined by the continuity of its managed state and reco
 
 1. `spst-uea-covenant.md`
 2. `covenant-runtime-policy.md`
-3. `scope-and-boundaries.md`
-4. `philosophy.md`
-5. `principles.md`
-6. `glossary.md`
-7. `architecture.md`
-8. `subject-model.md`
-9. `runtime-model.md`
-10. `governance-model.md`
-11. `evaluation-model.md`
-12. `traceability.md`
-13. `versioning.md`
-14. `codex-handoff.md`
+3. `phase9-evidence-driven-governance.md`
+4. `phase10-verified-local-evidence.md`
+5. `scope-and-boundaries.md`
+6. `philosophy.md`
+7. `principles.md`
+8. `glossary.md`
+9. `architecture.md`
+10. `subject-model.md`
+11. `runtime-model.md`
+12. `governance-model.md`
+13. `evaluation-model.md`
+14. `traceability.md`
+15. `versioning.md`
+16. `codex-handoff.md`
 
 ## Project Layers
 

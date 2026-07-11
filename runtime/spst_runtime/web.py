@@ -44,6 +44,8 @@ HTML = """<!doctype html>
         <div class="metric">Tick <strong id="cockpit-tick">-</strong></div>
         <div class="metric">ESI <strong id="cockpit-esi">-</strong></div>
         <div class="metric">Memory <strong id="cockpit-memory">-</strong></div>
+        <div class="metric">Evidence <strong id="cockpit-evidence">-</strong></div>
+        <div class="metric">Verification <strong id="cockpit-verification">-</strong></div>
       </div>
       <h3>Pipeline Trace</h3>
       <div id="cockpit-trace" class="trace"></div>
@@ -51,6 +53,10 @@ HTML = """<!doctype html>
       <pre id="cockpit-goals">Loading...</pre>
       <h3>Human Approval Queue</h3>
       <div id="cockpit-approvals">No pending approvals.</div>
+      <h3>Decision Explanation</h3>
+      <pre id="cockpit-decision">No decision recorded.</pre>
+      <h3>Local Verification</h3>
+      <pre id="cockpit-verification-detail">No verification run recorded.</pre>
     </div>
     <div class="card">
       <label>Steps <input id="steps" type="number" value="3" min="0"></label>
@@ -100,7 +106,11 @@ HTML = """<!doctype html>
       document.getElementById("cockpit-tick").textContent = status.tick;
       document.getElementById("cockpit-esi").textContent = status.esi;
       document.getElementById("cockpit-memory").textContent = status.memory_stats?.total_records ?? "-";
+      document.getElementById("cockpit-evidence").textContent = status.evidence?.status ?? "-";
+      document.getElementById("cockpit-verification").textContent = status.verification?.status ?? "-";
       document.getElementById("cockpit-trace").innerHTML = (status.last_trace || []).map((step) => `<span>${step}</span>`).join("");
+      document.getElementById("cockpit-decision").textContent = JSON.stringify(status.decision_explanation || {}, null, 2);
+      document.getElementById("cockpit-verification-detail").textContent = JSON.stringify(status.verification || {}, null, 2);
       const goals = await (await fetch("/api/goals")).json();
       document.getElementById("cockpit-goals").textContent = JSON.stringify(goals.goals, null, 2);
       renderApprovals(status.pending_approvals || []);
@@ -160,9 +170,13 @@ HTML = """<!doctype html>
 class CockpitRuntime:
     """Live local runtime backing the sovereign web cockpit."""
 
-    def __init__(self, db_path: str = "spst_cockpit.db"):
+    def __init__(
+        self,
+        db_path: str = "spst_cockpit.db",
+        orchestrator: RuntimeOrchestrator | None = None,
+    ):
         self.state = SubjectState(metadata={"version": 0, "goals": []})
-        self.orchestrator = RuntimeOrchestrator(db_path=db_path)
+        self.orchestrator = orchestrator or RuntimeOrchestrator(db_path=db_path)
         self.loop = RuntimeLoop(orchestrator=self.orchestrator, state=self.state)
         self.last_state = self.state
         self.last_swarm_result: dict[str, dict[str, Any]] = {}
@@ -178,10 +192,26 @@ class CockpitRuntime:
             "memory_stats": self.orchestrator.memory_provider.long_term_memory.stats(),
             "subjects": self.subjects()["subjects"],
             "pending_approvals": self.orchestrator.pending_approvals(),
+            "evidence": metadata.get("evidence", {}),
+            "decision_explanation": metadata.get("decision_explanation", {}),
+            "covenant_policy": metadata.get("covenant_policy", {}),
+            "verification": metadata.get("verification_run", {}),
         }
 
     def goals(self) -> dict:
         return {"goals": self.last_state.metadata.get("goals", [])}
+
+    def evidence(self) -> dict:
+        return {
+            "evidence": self.last_state.metadata.get("evidence", {}),
+            "decision_explanation": self.last_state.metadata.get(
+                "decision_explanation",
+                {},
+            ),
+        }
+
+    def verification(self) -> dict:
+        return {"verification": self.last_state.metadata.get("verification_run", {})}
 
     def subjects(self) -> dict:
         subjects = []
@@ -216,6 +246,12 @@ class CockpitRuntime:
             "trace": self.last_state.metadata.get("last_trace", []),
             "transition_log": self.last_state.metadata.get("transition_log", []),
             "governance": self.last_state.metadata.get("governance", {}),
+            "evidence": self.last_state.metadata.get("evidence", {}),
+            "decision_explanation": self.last_state.metadata.get(
+                "decision_explanation",
+                {},
+            ),
+            "verification": self.last_state.metadata.get("verification_run", {}),
             "goal": (self.last_state.metadata.get("goals") or [{}])[0],
             "amplification": self.last_state.metadata.get("intelligence_amplification", {}),
         }
@@ -226,6 +262,12 @@ class CockpitRuntime:
             "version": self.last_state.metadata.get("version"),
             "trace": self.last_state.metadata.get("last_trace", []),
             "governance": self.last_state.metadata.get("governance", {}),
+            "evidence": self.last_state.metadata.get("evidence", {}),
+            "decision_explanation": self.last_state.metadata.get(
+                "decision_explanation",
+                {},
+            ),
+            "verification": self.last_state.metadata.get("verification_run", {}),
             "pending_approvals": self.orchestrator.pending_approvals(),
         }
 
@@ -268,6 +310,12 @@ class CockpitRuntime:
         return {
             "trace": executor_state.metadata.get("last_trace", []),
             "governance": executor_state.metadata.get("governance", {}),
+            "evidence": executor_state.metadata.get("evidence", {}),
+            "decision_explanation": executor_state.metadata.get(
+                "decision_explanation",
+                {},
+            ),
+            "verification": executor_state.metadata.get("verification_run", {}),
             "subjects": self.subjects()["subjects"],
             "next_actions": executor_state.metadata.get("next_actions", []),
             "self_repair": executor_state.metadata.get("self_repair", {}),
@@ -303,6 +351,12 @@ def handle_cockpit_request(
     if method == "GET" and parsed.path == "/api/subjects":
         return HTTPStatus.OK, runtime.subjects()
 
+    if method == "GET" and parsed.path == "/api/evidence":
+        return HTTPStatus.OK, runtime.evidence()
+
+    if method == "GET" and parsed.path == "/api/verification":
+        return HTTPStatus.OK, runtime.verification()
+
     if method == "GET" and parsed.path == "/api/memory/search":
         query = parse_qs(parsed.query).get("q", [""])[0]
         return HTTPStatus.OK, runtime.memory_search(query)
@@ -337,7 +391,14 @@ class RuntimeWebHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, payload)
             return
 
-        if parsed.path in {"/api/status", "/api/goals", "/api/subjects", "/api/memory/search"}:
+        if parsed.path in {
+            "/api/status",
+            "/api/goals",
+            "/api/subjects",
+            "/api/evidence",
+            "/api/verification",
+            "/api/memory/search",
+        }:
             status, payload = handle_cockpit_request("GET", self.path)
             self._send_json(status, payload)
             return

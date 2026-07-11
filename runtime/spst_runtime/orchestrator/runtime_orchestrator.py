@@ -5,7 +5,9 @@ from typing import Any
 from spst_runtime.bus.event_bus import EventBus
 from spst_runtime.events.event import Event
 from spst_runtime.engines.autopoiesis_engine import AutopoiesisEngine
+from spst_runtime.engines.evidence_ledger import EvidenceLedger
 from spst_runtime.engines.goal_engine import GoalEngine
+from spst_runtime.engines.verification_runner import VerificationRunner
 from spst_runtime.maintenance import run_maintenance
 from spst_runtime.managers.goal_manager import GoalManager
 from spst_runtime.models.subject_state import SubjectState
@@ -32,6 +34,7 @@ class RuntimeOrchestrator:
         subject_repository: SubjectRepository | None = None,
         workspace_orchestrator: WorkspaceOrchestrator | None = None,
         workspace_id: str | None = None,
+        verification_runner: VerificationRunner | None = None,
     ):
         self.bus = bus or EventBus()
         self.repository = repository or SQLiteRepository(db_path)
@@ -52,6 +55,10 @@ class RuntimeOrchestrator:
         self.pipeline = pipeline or StateTransitionPipeline(
             transition_engine=transition_engine,
             model_adapter=self.model_provider,
+        )
+        self.verification_runner = verification_runner or VerificationRunner(
+            self.pipeline.transition_engine.tool_provider,
+            self.pipeline.governance_engine,
         )
 
     def create_subject(
@@ -92,17 +99,36 @@ class RuntimeOrchestrator:
         return result
 
     def dispatch(self, state: SubjectState, event: Event) -> SubjectState:
+        event = self._prepare_verified_quality_gate(state, event)
         if getattr(event, "type", None) == "system_tick":
             state.metadata["autonomous"] = True
+        state.metadata["state_provenance"] = self.repository.verify_provenance()
         self._retrieve(state, event)
         result = self.pipeline.run(state, event)
         self._compact_runtime_metadata(result)
         if result.metadata.get("governance_pending"):
             self._register_pending_approval(state, event, result)
+            self._persist_evidence(result)
             return result
         self._act(result, event)
         self._commit(result, event)
         return result
+
+    def _prepare_verified_quality_gate(self, state: SubjectState, event: Event) -> Event:
+        payload = getattr(event, "payload", {}) or {}
+        if not payload.get("verified_quality_gate"):
+            return event
+        verification_run = self.verification_runner.run()
+        state.metadata["verification_run"] = verification_run
+        return Event(
+            type=event.type,
+            payload={
+                **payload,
+                "requires_quality_gate": True,
+                "verification": verification_run.get("verification", {}),
+                "verification_run": verification_run,
+            },
+        )
 
     def _retrieve(self, state: SubjectState, event: Event) -> None:
         payload = getattr(event, "payload", {}) or {}
@@ -252,10 +278,17 @@ class RuntimeOrchestrator:
                     "transition_log": state.metadata.get("transition_log", []),
                     "authorized": state.metadata.get("governance", {}).get("authorized", False),
                     "action_event": state.metadata.get("action_event", {}),
+                    "evidence": state.metadata.get("evidence", {}),
+                    "decision_explanation": state.metadata.get(
+                        "decision_explanation",
+                        {},
+                    ),
+                    "verification_run": state.metadata.get("verification_run", {}),
                 },
             )
         )
         state.metadata["state_provenance"] = self.repository.verify_provenance()
+        self._persist_evidence(state)
 
     def pending_approvals(self) -> list[dict[str, Any]]:
         return [
@@ -266,6 +299,7 @@ class RuntimeOrchestrator:
                     "trust_level"
                 ),
                 "reasons": record["candidate"].metadata.get("governance", {}).get("reasons", []),
+                "evidence_id": record["candidate"].metadata.get("evidence", {}).get("id"),
             }
             for approval_id, record in sorted(self._pending_approvals.items())
         ]
@@ -282,6 +316,8 @@ class RuntimeOrchestrator:
                 "authorized": False,
                 "status": "rejected_by_human",
             }
+            self._refresh_decision_evidence(candidate)
+            self._persist_evidence(candidate)
             return candidate
         event = record["event"]
         approved_event = Event(
@@ -316,9 +352,51 @@ class RuntimeOrchestrator:
                     "diff": governance.get("diff", {}),
                     "reasons": governance.get("reasons", []),
                     "event_type": event.type,
+                    "evidence": candidate.metadata.get("evidence", {}),
+                    "decision_explanation": candidate.metadata.get(
+                        "decision_explanation",
+                        {},
+                    ),
+                    "verification_run": candidate.metadata.get("verification_run", {}),
                 },
             )
         )
+        candidate.metadata["state_provenance"] = self.repository.verify_provenance()
+
+    def _persist_evidence(self, state: SubjectState) -> None:
+        evidence = state.metadata.get("evidence", {})
+        if not isinstance(evidence, dict) or not evidence.get("id"):
+            return
+        ledger = getattr(self.pipeline, "evidence_ledger", None)
+        if not isinstance(ledger, EvidenceLedger):
+            return
+        evidence_key = f"runtime:evidence:{evidence['id']}"
+        finalized = ledger.finalize(
+            evidence,
+            state.metadata.get("state_provenance", {}),
+        )
+        finalized["persistence"] = {
+            "key": evidence_key,
+            "status": "stored",
+        }
+        state.metadata["evidence"] = finalized
+        asyncio.run(self.repository.save(evidence_key, finalized))
+        state.metadata["state_provenance"] = self.repository.verify_provenance()
+        finalized["persistence"]["provenance_valid"] = state.metadata[
+            "state_provenance"
+        ].get("valid", False)
+
+    def _refresh_decision_evidence(self, state: SubjectState) -> None:
+        evidence = state.metadata.get("evidence", {})
+        decision = state.metadata.get("governance", {})
+        ledger = getattr(self.pipeline, "evidence_ledger", None)
+        explainer = getattr(self.pipeline, "decision_explainer", None)
+        if not isinstance(evidence, dict) or not isinstance(decision, dict):
+            return
+        if isinstance(ledger, EvidenceLedger):
+            ledger.attach_decision(evidence, decision)
+        if explainer is not None:
+            state.metadata["decision_explanation"] = explainer.explain(decision, evidence)
 
     def _serialize_state(self, state: SubjectState) -> dict[str, Any]:
         return {
