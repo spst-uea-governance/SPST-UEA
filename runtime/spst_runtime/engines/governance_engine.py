@@ -425,6 +425,33 @@ class GovernanceEngine:
                 action=action,
                 covenant=covenant,
             )
+        if not payload.get("producer_evidence_present"):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["artifact_outcome_producer_evidence_required"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("producer_provenance_valid"):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["artifact_outcome_producer_provenance_required"],
+                action=action,
+                covenant=covenant,
+            )
+        if not payload.get("producer_evidence_valid"):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["artifact_outcome_producer_evidence_invalid"],
+                action=action,
+                covenant=covenant,
+            )
         if not payload.get("expected_source_snapshot_present"):
             return self._decision(
                 "Low",

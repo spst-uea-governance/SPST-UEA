@@ -215,6 +215,7 @@ class RuntimeOrchestrator:
     def run_operational_shadow(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Run a non-mutating L0 shadow evaluation and persist compact audit evidence."""
         candidate_value = payload.get("candidate_id")
+        baseline_candidate_value = payload.get("baseline_candidate_id")
         baseline_value = payload.get("baseline_id")
         split_value = payload.get("split")
         task_values = payload.get("task_ids")
@@ -225,6 +226,11 @@ class RuntimeOrchestrator:
         )
         report = self.operational_shadow_runner.run(
             candidate_id=candidate_value if isinstance(candidate_value, str) else None,
+            baseline_candidate_id=(
+                baseline_candidate_value
+                if isinstance(baseline_candidate_value, str)
+                else None
+            ),
             split=split_value if isinstance(split_value, str) else "holdout",
             task_ids=task_ids,
         )
@@ -375,12 +381,14 @@ class RuntimeOrchestrator:
             "id": report.get("id"),
             "sequence": sequence,
             "candidate_id": report.get("candidate_id"),
+            "baseline_candidate_id": report.get("baseline_candidate_id"),
             "status": report.get("status"),
             "suite_hash": suite.get("hash") if isinstance(suite, dict) else None,
             "eligible_count": suite.get("eligible_count") if isinstance(suite, dict) else None,
             "calibration_id": calibration.get("id") if isinstance(calibration, dict) else None,
             "comparison_status": comparison.get("status") if isinstance(comparison, dict) else None,
             "promotion_status": promotion.get("status") if isinstance(promotion, dict) else None,
+            "producer_binding_count": len(report.get("producer_evidence", [])),
         }
 
     def _retrieve(self, state: SubjectState, event: Event) -> None:

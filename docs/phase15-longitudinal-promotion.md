@@ -22,13 +22,23 @@ A proposal can be sufficient for a human-reviewed shadow activation only when:
 4. Each candidate/task and baseline/task pair is unambiguous; duplicate or
    unpaired task evidence is treated as insufficient rather than silently
    selected.
-5. At least three paired tasks exist, the verified-artifact acceptance delta is
+5. Every source has a verified Phase 13 producer binding. A binding cannot be
+   reused, and paired candidate/baseline evidence must have resolved and
+   different semantic configuration and semantic artifact digests. Raw byte
+   digests, candidate/run/task identifiers, arm labels, and nonsemantic
+   metadata alone never make evidence distinct.
+6. At least three paired tasks exist, the verified-artifact acceptance delta is
    at least `0.05`, and its population variance does not exceed `0.25`.
 
 The measured value is explicitly
 `verified_artifact_acceptance_delta_not_task_quality`. It is a local evidence
 coverage signal, not a claim that an LLM became intrinsically more capable.
 `task_quality_uplift_claimed` and `official_benchmark_claimed` remain `false`.
+Records created without a verified producer binding remain visible but are
+ineligible for new promotion synthesis. Relabeled identical evidence is reported
+as `candidate_evidence_not_distinct`. Unsupported or unsafe-to-interpret
+artifact semantics are reported as `semantic_distinctness_unresolved` and are
+excluded rather than guessed to be independent.
 
 ## Safe Policy Contract
 

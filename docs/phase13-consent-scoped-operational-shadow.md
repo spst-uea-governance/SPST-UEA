@@ -59,6 +59,29 @@ runner records `subject_state_committed: false` and `actions_executed: false`.
 Only compact evaluation evidence and its HMAC-protected calibration/audit
 records are persisted.
 
+Each persisted report also publishes one compact `producer_evidence` binding
+for every task/arm pair. The baseline arm is assigned the explicit
+`baseline_candidate_id` (default `runtime-baseline`) and the maximized arm is
+assigned `candidate_id`. A binding contains only the producer run identifier,
+task and arm identifiers, a configuration digest, an output-artifact digest,
+contract-scoped semantic digests and resolution statuses, and a deterministic
+binding identifier. It contains no prompt or model text.
+
+The configuration digest excludes the candidate label itself. Renaming an
+otherwise identical run therefore does not create a distinct execution
+condition. The complete report and bindings are persisted through the existing
+SQLite HMAC provenance chain.
+
+Semantic artifact resolution is deliberately narrower than byte hashing. When
+the task declares `expected_json_keys`, the producer parses an exact JSON
+object, projects only those contract keys, rejects duplicate keys, and
+canonicalizes JSON numbers and structure. JSON serialization order, token
+whitespace, escape representation, filenames, timestamps, paths, environment
+labels, and unrelated top-level fields cannot create semantic distinctness.
+Free-text contract values, wrappers, suffixes, absent contracts, invalid JSON,
+and other formats whose meaning cannot be safely established are recorded as
+`unresolved`; they are not inferred to be independent evidence.
+
 The runner uses the same provider for baseline and capability-maximized arms.
 Task-quality scoring is available only when the adapter explicitly advertises
 structured evaluation support. The default API-key-free

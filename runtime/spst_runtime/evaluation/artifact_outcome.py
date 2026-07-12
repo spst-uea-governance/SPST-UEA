@@ -8,7 +8,9 @@ from typing import Any, Protocol
 
 from spst_runtime.engines.governance_engine import GovernanceEngine
 from spst_runtime.evaluation.operational_corpus import OperationalEvaluationCorpus
+from spst_runtime.evaluation.producer_evidence import verified_producer_binding
 from spst_runtime.persistence.sqlite_repository import SQLiteRepository
+from spst_runtime.verification_profiles import VERIFICATION_PROFILE_NAMES
 
 
 class VerificationRunnerProtocol(Protocol):
@@ -43,10 +45,12 @@ class ArtifactOutcomeLedger:
         task_contract = self.corpus.task_contract(normalized["task_id"])
         task_active = task_contract is not None
         retention_within_task = self._retention_within_task(normalized, task_contract)
+        producer_evidence = self._resolve_producer_evidence(normalized)
         governance = self._governance_decision(
             normalized,
             task_active=task_active,
             retention_within_task=retention_within_task,
+            producer_evidence=producer_evidence,
         )
         verification: dict[str, Any] = {}
         if governance.get("authorized", False):
@@ -60,6 +64,7 @@ class ArtifactOutcomeLedger:
             "status": status,
             "task": task_contract or {"id": normalized["task_id"]},
             "candidate_id": normalized["candidate_id"],
+            "producer_evidence": self._compact_producer_evidence(producer_evidence),
             "expected_source_snapshot": normalized["expected_source_snapshot"],
             "verification": verification,
             "human_review": {
@@ -113,18 +118,26 @@ class ArtifactOutcomeLedger:
         *,
         task_active: bool,
         retention_within_task: bool,
+        producer_evidence: dict[str, Any],
     ) -> dict[str, Any]:
+        producer_valid = bool(producer_evidence.get("valid", False))
+        provenance_valid = bool(producer_evidence.get("provenance_valid", False))
         return self.governance_engine.decide(
             {
                 "type": "artifact_outcome_evidence",
                 "event_type": "artifact_outcome_evidence",
                 "source": "artifact_outcome_ledger",
-                "provenance_scope": "ephemeral",
-                "provenance_verified": False,
+                "provenance_scope": "sqlite",
+                "provenance_verified": provenance_valid,
                 "payload": {
                     "local_only": True,
                     "evidence_only": True,
                     "task_contract_active": task_active,
+                    "producer_evidence_present": normalized["producer_evidence"][
+                        "present"
+                    ],
+                    "producer_evidence_valid": producer_valid,
+                    "producer_provenance_valid": provenance_valid,
                     "expected_source_snapshot_present": normalized[
                         "expected_source_snapshot_present"
                     ],
@@ -137,6 +150,47 @@ class ArtifactOutcomeLedger:
                 "security_assessment": {"blocked": False, "findings": []},
             }
         )
+
+    def _resolve_producer_evidence(
+        self,
+        normalized: dict[str, Any],
+    ) -> dict[str, Any]:
+        reference = normalized["producer_evidence"]
+        provenance = self.repository.verify_provenance()
+        result = {
+            "status": "missing",
+            "valid": False,
+            "provenance_valid": bool(provenance.get("valid", False)),
+            "producer_run_id": reference["producer_run_id"],
+            "binding_id": reference["binding_id"],
+        }
+        if not reference["present"]:
+            return result
+        if not provenance.get("valid", False):
+            return {**result, "status": "provenance_invalid"}
+        with self.repository.locked():
+            report = asyncio.run(
+                self.repository.load(
+                    f"runtime:operational_shadow:{reference['producer_run_id']}"
+                )
+            )
+        if not isinstance(report, dict):
+            return {**result, "status": "producer_run_not_found"}
+        binding = verified_producer_binding(report, reference["binding_id"])
+        if binding is None:
+            return {**result, "status": "binding_invalid"}
+        if binding.get("task_id") != normalized["task_id"]:
+            return {**result, "status": "task_mismatch"}
+        if binding.get("candidate_id") != normalized["candidate_id"]:
+            return {**result, "status": "candidate_mismatch"}
+        if binding.get("producer_status") != "completed":
+            return {**result, "status": "producer_not_completed"}
+        return {
+            **binding,
+            "status": "verified",
+            "valid": True,
+            "provenance_valid": True,
+        }
 
     def _run_verification(self) -> dict[str, Any]:
         try:
@@ -181,7 +235,9 @@ class ArtifactOutcomeLedger:
         normalized: dict[str, Any],
         verification: dict[str, Any],
     ) -> str:
-        if verification.get("status") != "passed":
+        if verification.get("status") != "passed" or not self._fixed_profiles_passed(
+            verification.get("profiles")
+        ):
             return "verification_failed"
         if not self._same_snapshot(
             normalized["expected_source_snapshot"],
@@ -191,6 +247,15 @@ class ArtifactOutcomeLedger:
         if normalized["human_review"]["decision"] == "rejected":
             return "rejected_by_human"
         return "verified_accepted"
+
+    @staticmethod
+    def _fixed_profiles_passed(value: Any) -> bool:
+        profiles = value if isinstance(value, dict) else {}
+        return all(
+            isinstance(profiles.get(name), dict)
+            and profiles[name].get("status") == "completed"
+            for name in VERIFICATION_PROFILE_NAMES
+        )
 
     @staticmethod
     def _calibration(status: str) -> dict[str, Any]:
@@ -253,6 +318,7 @@ class ArtifactOutcomeLedger:
     def _normalize_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         source = payload if isinstance(payload, dict) else {}
         expected = self._mapping(source.get("expected_source_snapshot"))
+        producer = self._mapping(source.get("producer_evidence"))
         human = self._mapping(source.get("human_calibration"))
         consent = self._mapping(human.get("consent"))
         decision = human.get("decision")
@@ -262,6 +328,16 @@ class ArtifactOutcomeLedger:
         return {
             "task_id": self._safe_task_id(source.get("task_id")),
             "candidate_id": self._candidate_id(source.get("candidate_id")),
+            "producer_evidence": {
+                "producer_run_id": self._safe_identifier_value(
+                    producer.get("producer_run_id")
+                ),
+                "binding_id": self._safe_identifier_value(producer.get("binding_id")),
+                "present": bool(
+                    self._safe_identifier_value(producer.get("producer_run_id"))
+                    and self._safe_identifier_value(producer.get("binding_id"))
+                ),
+            },
             "expected_source_snapshot": {
                 "revision": self._safe_revision(expected.get("revision")),
                 "git_status_digest": self._safe_identifier_value(
@@ -300,12 +376,14 @@ class ArtifactOutcomeLedger:
         task = self._mapping(record.get("task"))
         verification = self._mapping(record.get("verification"))
         calibration = self._mapping(record.get("calibration"))
+        producer_evidence = self._mapping(record.get("producer_evidence"))
         return {
             "id": record["id"],
             "sequence": sequence,
             "task_id": task.get("id"),
             "domain": task.get("domain"),
             "candidate_id": record.get("candidate_id"),
+            "producer_evidence": self._compact_producer_evidence(producer_evidence),
             "status": record.get("status"),
             "verification_id": verification.get("id"),
             "verification_status": verification.get("status"),
@@ -317,6 +395,7 @@ class ArtifactOutcomeLedger:
             "status": record["status"],
             "task": record["task"],
             "candidate_id": record["candidate_id"],
+            "producer_evidence": record["producer_evidence"],
             "expected_source_snapshot": record["expected_source_snapshot"],
             "verification": record["verification"],
             "human_review": record["human_review"],
@@ -376,6 +455,31 @@ class ArtifactOutcomeLedger:
             key: decision.get(key)
             for key in ("authorized", "trust_level", "requires_human_approval", "reasons")
         }
+
+    @staticmethod
+    def _compact_producer_evidence(value: dict[str, Any]) -> dict[str, Any]:
+        keys = (
+            "status",
+            "schema_version",
+            "producer_run_id",
+            "binding_id",
+            "task_id",
+            "candidate_id",
+            "arm",
+            "configuration_digest",
+            "semantic_configuration_status",
+            "semantic_configuration_reason",
+            "semantic_configuration_digest",
+            "artifact_digest",
+            "artifact_semantic_profile",
+            "artifact_semantic_status",
+            "artifact_semantic_reason",
+            "artifact_semantic_digest",
+            "producer_status",
+            "verification_status",
+            "provenance_valid",
+        )
+        return {key: value.get(key) for key in keys if key in value}
 
     @staticmethod
     def _mapping(value: Any) -> dict[str, Any]:

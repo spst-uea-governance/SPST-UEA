@@ -10,11 +10,14 @@ candidate, or execute arbitrary commands.
 An artifact outcome record requires all of the following:
 
 1. An active Phase 13 consented task contract.
-2. An expected source snapshot (`revision` and `git_status_digest`) from a
+2. A `producer_evidence` reference (`producer_run_id` and `binding_id`) that
+   resolves to the same task and candidate in a persisted, provenance-valid
+   Phase 13 shadow report. The producer arm must have completed.
+3. An expected source snapshot (`revision` and `git_status_digest`) from a
    fixed Phase 10 verification run.
-3. A fresh `VerificationRunner` result with the same snapshot and every fixed
+4. A fresh `VerificationRunner` result with the same snapshot and every fixed
    profile passing.
-4. A human calibration decision of `accepted` or `rejected`, with explicit
+5. A human calibration decision of `accepted` or `rejected`, with explicit
    local evaluation consent whose retention date does not outlive the task
    consent window.
 
@@ -22,6 +25,26 @@ The ledger stores task identifiers, prompt digests, source snapshot hashes,
 compact profile results, and the decision label. It deliberately accepts no
 free-text review rationale and stores no task prompt, model text, raw command,
 or raw test output.
+
+The ledger does not trust producer digests supplied in the request. It loads
+the HMAC-protected shadow report, recomputes the binding, and checks the task,
+candidate, arm completion, and exact persisted binding before governance may
+authorize fixed verification. Missing, altered, or relabeled bindings are
+`blocked` and calibration-ineligible.
+
+The recomputed binding also carries the producer's contract-scoped semantic
+configuration and artifact status. Phase 14 authenticates and retains those
+fields; it does not turn an unresolved semantic comparison into a resolved
+one, and it does not treat different byte digests as proof of independence.
+
+```json
+{
+  "producer_evidence": {
+    "producer_run_id": "SHADOW-0123456789abcdef",
+    "binding_id": "PBIND-0123456789abcdef"
+  }
+}
+```
 
 ## Outcome States
 
@@ -41,7 +64,8 @@ changed, or a runtime profile may be automatically promoted.
 
 `ArtifactOutcomeLedger` is a local evidence-only action. `GovernanceEngine`
 rejects records without an active consented task, exact expected snapshot,
-explicit human calibration consent, valid decision, or bounded retention.
+valid producer binding and provenance, explicit human calibration consent,
+valid decision, or bounded retention.
 
 Every accepted or rejected record is persisted through the HMAC-protected
 SQLite repository. HMAC provenance detects tampering; it is not encryption.

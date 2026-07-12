@@ -5,6 +5,10 @@ import pytest
 
 from spst_runtime.evaluation.operational_corpus import OperationalEvaluationCorpus
 from spst_runtime.evaluation.operational_shadow import OperationalShadowRunner
+from spst_runtime.evaluation.producer_evidence import (
+    build_producer_evidence,
+    canonical_artifact_semantics,
+)
 from spst_runtime.interfaces.model_adapter import ModelAdapter
 from spst_runtime.orchestrator.runtime_orchestrator import RuntimeOrchestrator
 from spst_runtime.persistence.sqlite_repository import SQLiteRepository
@@ -113,6 +117,148 @@ def test_phase13_shadow_excludes_expired_tasks_and_never_records_raw_prompt(tmp_
     assert report["task_quality"]["available"] is True
     assert active_task["prompt"] not in json.dumps(report)
     assert report["claims"]["automatic_adoption"] is False
+
+
+@pytest.mark.conformance
+def test_phase13_binds_each_task_arm_to_compact_producer_evidence(tmp_path):
+    repository = SQLiteRepository(str(tmp_path / "phase13-producer-evidence.db"))
+    corpus = OperationalEvaluationCorpus(repository)
+    corpus.register(_task())
+
+    report = OperationalShadowRunner(ShadowAdapter(), corpus).run(
+        candidate_id="candidate-maximized",
+        baseline_candidate_id="candidate-baseline",
+    )
+    bindings = report["producer_evidence"]
+
+    assert len(bindings) == 2
+    assert {binding["candidate_id"] for binding in bindings} == {
+        "candidate-baseline",
+        "candidate-maximized",
+    }
+    assert {binding["arm"] for binding in bindings} == {"baseline", "maximized"}
+    assert {binding["producer_run_id"] for binding in bindings} == {report["id"]}
+    assert len({binding["configuration_digest"] for binding in bindings}) == 2
+    assert all(binding["artifact_digest"] for binding in bindings)
+    assert all(binding["binding_id"].startswith("PBIND-") for binding in bindings)
+    assert all(
+        binding["artifact_semantic_status"] == "unresolved" for binding in bindings
+    )
+    assert _task()["prompt"] not in json.dumps(bindings)
+
+
+@pytest.mark.conformance
+def test_phase13_canonicalizes_contract_json_without_treating_wrappers_as_evidence():
+    canonical = canonical_artifact_semantics(
+        '{"score":1,"timestamp":"2026-07-12T00:00:00Z","filename":"a.json"}',
+        ["score"],
+    )
+    surface_variants = (
+        '{\n  "filename": "renamed.json", "score": 1, "environment": "other"\n}',
+        '{"\\u0073core":1,"absolute_path":"C:/different/result.json"}',
+        '{"unrelated":{"debug":true},"score":1}',
+    )
+
+    assert canonical["status"] == "resolved"
+    assert all(
+        canonical_artifact_semantics(value, ["score"])["semantic_digest"]
+        == canonical["semantic_digest"]
+        for value in surface_variants
+    )
+    assert canonical_artifact_semantics('{"payload":{"score":1}}', ["score"])[
+        "status"
+    ] == "unresolved"
+    assert canonical_artifact_semantics('{"score":1}\nmeaningless-suffix', ["score"])[
+        "status"
+    ] == "unresolved"
+    assert canonical_artifact_semantics('{"result":"free text"}', ["result"])[
+        "reason"
+    ] == "free_text_semantics_unresolved"
+
+
+@pytest.mark.conformance
+def test_phase13_semantic_configuration_ignores_only_identity_and_metadata_labels():
+    def report(
+        run_id: str,
+        task_id: str,
+        candidate_id: str,
+        baseline_candidate_id: str,
+        *,
+        suite_hash: str,
+    ) -> dict[str, Any]:
+        semantics = canonical_artifact_semantics('{"score":1}', ["score"])
+        return {
+            "id": run_id,
+            "candidate_id": candidate_id,
+            "baseline_candidate_id": baseline_candidate_id,
+            "suite": {
+                "version": "phase13-operational-shadow-v1",
+                "hash": suite_hash,
+                "split": "holdout",
+            },
+            "provider": {
+                "name": "shadow-local",
+                "model_version": "shadow-v1",
+                "task_scoring_supported": True,
+            },
+            "cases": [
+                {
+                    "case_id": task_id,
+                    "domain": "analysis",
+                    "prompt_digest": "same-prompt-contract",
+                    "baseline": {
+                        "status": "completed",
+                        "output_digest": "same-artifact",
+                        "artifact_semantics": semantics,
+                        "verification": {"status": "passed"},
+                        "plan": {},
+                    },
+                    "maximized": {
+                        "status": "completed",
+                        "output_digest": "same-artifact",
+                        "artifact_semantics": semantics,
+                        "verification": {"status": "passed"},
+                        "plan": {
+                            "mode": "capability_maximization",
+                            "domains": ["analysis"],
+                            "strategy_count": 6,
+                            "verification_check_count": 2,
+                            "timestamp": "ignored",
+                            "absolute_path": "C:/ignored",
+                            "unrelated": "ignored",
+                        },
+                    },
+                }
+            ],
+        }
+
+    first = build_producer_evidence(
+        report("SHADOW-run-a", "task-a", "candidate-a", "baseline-a", suite_hash="a")
+    )
+    relabeled = build_producer_evidence(
+        report("SHADOW-run-b", "task-a", "candidate-b", "baseline-b", suite_hash="a")
+    )
+    retasked = build_producer_evidence(
+        report("SHADOW-run-c", "task-b", "candidate-c", "baseline-c", suite_hash="c")
+    )
+
+    first_maximized = next(item for item in first if item["arm"] == "maximized")
+    relabeled_maximized = next(item for item in relabeled if item["arm"] == "maximized")
+    retasked_maximized = next(item for item in retasked if item["arm"] == "maximized")
+    assert first_maximized["binding_id"] != relabeled_maximized["binding_id"]
+    assert (
+        first_maximized["configuration_digest"]
+        == relabeled_maximized["configuration_digest"]
+    )
+    assert (
+        first_maximized["semantic_configuration_digest"]
+        == relabeled_maximized["semantic_configuration_digest"]
+        == retasked_maximized["semantic_configuration_digest"]
+    )
+    assert (
+        first_maximized["configuration_digest"]
+        != retasked_maximized["configuration_digest"]
+    )
 
 
 @pytest.mark.conformance

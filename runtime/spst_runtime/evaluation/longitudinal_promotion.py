@@ -185,9 +185,21 @@ class LongitudinalPromotionGovernance:
         unpaired_ids = sorted((candidate_ids ^ baseline_ids))
         expired_ids: list[str] = []
         invalid_ids: list[str] = []
+        indistinct_ids: list[str] = []
+        unresolved_semantic_ids: list[str] = []
+        paired_task_ids: list[str] = []
         paired_deltas: list[float] = []
         candidate_acceptances: list[float] = []
         baseline_acceptances: list[float] = []
+        binding_uses: dict[str, int] = {}
+
+        for record in sources:
+            binding_id = self._mapping(record.get("producer_evidence")).get("binding_id")
+            if isinstance(binding_id, str) and binding_id:
+                binding_uses[binding_id] = binding_uses.get(binding_id, 0) + 1
+        reused_binding_ids = sorted(
+            binding_id for binding_id, count in binding_uses.items() if count > 1
+        )
 
         for record in sources:
             task_id = record.get("task_id")
@@ -205,8 +217,26 @@ class LongitudinalPromotionGovernance:
                 continue
             if self.corpus.task_contract(task_id) is None:
                 continue
+            candidate_binding = self._mapping(candidate.get("producer_evidence"))
+            baseline_binding = self._mapping(baseline.get("producer_evidence"))
+            if (
+                candidate_binding.get("binding_id") in reused_binding_ids
+                or baseline_binding.get("binding_id") in reused_binding_ids
+            ):
+                continue
+            distinctness = self._producer_evidence_distinct(
+                candidate_binding,
+                baseline_binding,
+            )
+            if distinctness == "unresolved":
+                unresolved_semantic_ids.append(task_id)
+                continue
+            if distinctness == "indistinct":
+                indistinct_ids.append(task_id)
+                continue
             candidate_value = self._acceptance_value(candidate)
             baseline_value = self._acceptance_value(baseline)
+            paired_task_ids.append(task_id)
             candidate_acceptances.append(candidate_value)
             baseline_acceptances.append(baseline_value)
             paired_deltas.append(round(candidate_value - baseline_value, 6))
@@ -229,6 +259,12 @@ class LongitudinalPromotionGovernance:
             reasons.append("expired_or_missing_task_consent")
         if invalid_ids:
             reasons.append("invalid_artifact_outcome")
+        if reused_binding_ids:
+            reasons.append("producer_evidence_reused")
+        if indistinct_ids:
+            reasons.append("candidate_evidence_not_distinct")
+        if unresolved_semantic_ids:
+            reasons.append("semantic_distinctness_unresolved")
         if sample_count < self.MINIMUM_PAIRED_TASKS:
             reasons.append("minimum_paired_tasks_not_met")
         if variance is not None and variance > self.MAXIMUM_VARIANCE:
@@ -257,9 +293,15 @@ class LongitudinalPromotionGovernance:
                 "candidate_duplicate_task_ids": sorted(candidate_duplicates),
                 "baseline_duplicate_task_ids": sorted(baseline_duplicates),
                 "unpaired_task_ids": unpaired_ids,
+                "common_task_ids": common_ids,
+                "indistinct_task_ids": sorted(indistinct_ids),
+                "semantic_distinctness_unresolved_task_ids": sorted(
+                    unresolved_semantic_ids
+                ),
+                "reused_binding_ids": reused_binding_ids,
             },
             "paired": {
-                "task_ids": common_ids,
+                "task_ids": paired_task_ids,
                 "sample_count": sample_count,
                 "candidate_acceptance_rate": self._mean(candidate_acceptances),
                 "baseline_acceptance_rate": self._mean(baseline_acceptances),
@@ -555,9 +597,55 @@ class LongitudinalPromotionGovernance:
         )
 
     def _valid_terminal_record(self, record: dict[str, Any]) -> bool:
+        producer_evidence = self._mapping(record.get("producer_evidence"))
         return (
             record.get("status") in self._terminal_statuses
             and record.get("verification_status") == "passed"
+            and producer_evidence.get("status") == "verified"
+            and all(
+                isinstance(producer_evidence.get(key), str)
+                and bool(producer_evidence.get(key))
+                for key in (
+                    "producer_run_id",
+                    "binding_id",
+                    "configuration_digest",
+                    "artifact_digest",
+                )
+            )
+        )
+
+    @staticmethod
+    def _producer_evidence_distinct(
+        candidate: dict[str, Any],
+        baseline: dict[str, Any],
+    ) -> str:
+        if any(
+            evidence.get("semantic_configuration_status") != "resolved"
+            or evidence.get("artifact_semantic_status") != "resolved"
+            or not LongitudinalPromotionGovernance._sha256_digest(
+                evidence.get("semantic_configuration_digest")
+            )
+            or not LongitudinalPromotionGovernance._sha256_digest(
+                evidence.get("artifact_semantic_digest")
+            )
+            for evidence in (candidate, baseline)
+        ):
+            return "unresolved"
+        if (
+            candidate.get("semantic_configuration_digest")
+            == baseline.get("semantic_configuration_digest")
+            or candidate.get("artifact_semantic_digest")
+            == baseline.get("artifact_semantic_digest")
+        ):
+            return "indistinct"
+        return "distinct"
+
+    @staticmethod
+    def _sha256_digest(value: Any) -> bool:
+        return bool(
+            isinstance(value, str)
+            and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value)
         )
 
     @staticmethod

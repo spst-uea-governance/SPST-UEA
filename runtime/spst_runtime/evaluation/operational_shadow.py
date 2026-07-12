@@ -7,6 +7,10 @@ from typing import Any
 from spst_runtime.engines.capability_maximizer import CapabilityMaximizer
 from spst_runtime.engines.governance_engine import GovernanceEngine
 from spst_runtime.evaluation.operational_corpus import OperationalEvaluationCorpus
+from spst_runtime.evaluation.producer_evidence import (
+    build_producer_evidence,
+    canonical_artifact_semantics,
+)
 from spst_runtime.interfaces.model_adapter import ModelAdapter
 
 
@@ -32,6 +36,7 @@ class OperationalShadowRunner:
         self,
         *,
         candidate_id: str | None = None,
+        baseline_candidate_id: str | None = None,
         split: str = "holdout",
         task_ids: list[str] | None = None,
     ) -> dict[str, Any]:
@@ -39,7 +44,12 @@ class OperationalShadowRunner:
         tasks, manifest = self.corpus.load_for_shadow(split=split, task_ids=task_ids)
         governance = self._governance_decision(len(tasks), split)
         if not governance.get("authorized", False):
-            return self._denied_report(manifest, candidate_id, governance)
+            return self._denied_report(
+                manifest,
+                candidate_id,
+                baseline_candidate_id,
+                governance,
+            )
 
         health = self.model_adapter.health()
         capabilities = self.model_adapter.get_capabilities()
@@ -69,7 +79,7 @@ class OperationalShadowRunner:
         task_quality = self._task_quality(cases, task_scoring_supported)
         scaffold_contract = self._scaffold_contract(cases)
         calibration = self._calibration(task_quality)
-        report = {
+        report: dict[str, Any] = {
             "shadow": {
                 "mode": "consent_scoped_l0_shadow",
                 "trace": list(self.TRACE),
@@ -79,6 +89,9 @@ class OperationalShadowRunner:
                 "automatic_promotion": False,
             },
             "candidate_id": self._candidate_id(candidate_id),
+            "baseline_candidate_id": self._candidate_id(
+                baseline_candidate_id or "runtime-baseline"
+            ),
             "suite": {
                 "version": self.SUITE_VERSION,
                 "corpus_schema_version": manifest["schema_version"],
@@ -133,6 +146,7 @@ class OperationalShadowRunner:
         }
         report["status"] = "scaffold_only" if not task_quality["available"] else "shadow_completed"
         report["id"] = self._identifier(report)
+        report["producer_evidence"] = build_producer_evidence(report)
         return report
 
     def _run_task(
@@ -174,6 +188,10 @@ class OperationalShadowRunner:
                 "provider": "unknown",
                 "latency_ms": int((time.perf_counter() - started_at) * 1000),
                 "output_digest": self._digest(type(exc).__name__),
+                "artifact_semantics": canonical_artifact_semantics(
+                    "",
+                    task.get("expected_json_keys"),
+                ),
                 "task_score": None,
                 "verification": {"status": "error", "score": 0.0, "check_count": 0},
                 "scaffold_contract_score": self._scaffold_score(plan),
@@ -189,6 +207,10 @@ class OperationalShadowRunner:
             "provider": result.get("provider", "unknown"),
             "latency_ms": int((time.perf_counter() - started_at) * 1000),
             "output_digest": self._digest(text),
+            "artifact_semantics": canonical_artifact_semantics(
+                text,
+                task.get("expected_json_keys"),
+            ),
             "task_score": (
                 verification["score"] if available and task_scoring_supported else None
             ),
@@ -307,9 +329,10 @@ class OperationalShadowRunner:
         self,
         manifest: dict[str, Any],
         candidate_id: str | None,
+        baseline_candidate_id: str | None,
         governance: dict[str, Any],
     ) -> dict[str, Any]:
-        report = {
+        report: dict[str, Any] = {
             "shadow": {
                 "mode": "consent_scoped_l0_shadow",
                 "trace": list(self.TRACE),
@@ -319,6 +342,9 @@ class OperationalShadowRunner:
                 "automatic_promotion": False,
             },
             "candidate_id": self._candidate_id(candidate_id),
+            "baseline_candidate_id": self._candidate_id(
+                baseline_candidate_id or "runtime-baseline"
+            ),
             "suite": {
                 "version": self.SUITE_VERSION,
                 "corpus_schema_version": manifest.get("schema_version"),
@@ -377,6 +403,7 @@ class OperationalShadowRunner:
             "status": "blocked",
         }
         report["id"] = self._identifier(report)
+        report["producer_evidence"] = build_producer_evidence(report)
         return report
 
     def _identifier(self, report: dict[str, Any]) -> str:
@@ -384,6 +411,7 @@ class OperationalShadowRunner:
             {
                 "shadow": report["shadow"],
                 "candidate_id": report["candidate_id"],
+                "baseline_candidate_id": report["baseline_candidate_id"],
                 "suite": report["suite"],
                 "provider": report["provider"],
                 "cases": [
