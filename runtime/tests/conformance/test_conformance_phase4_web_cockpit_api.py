@@ -1,8 +1,58 @@
 import json
+import os
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
 from spst_runtime.web import CockpitRuntime, handle_cockpit_request
+
+
+@pytest.mark.conformance
+def test_importing_web_does_not_create_default_cockpit_db(tmp_path):
+    runtime_root = Path(__file__).resolve().parents[2]
+    env = os.environ.copy()
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = os.pathsep.join(
+        value for value in (str(runtime_root), existing_pythonpath) if value
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import spst_runtime.web"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "spst_cockpit.db").exists()
+    assert not (tmp_path / "spst_cockpit.db.provenance_key").exists()
+
+
+@pytest.mark.conformance
+def test_default_cockpit_is_lazy_and_honors_isolated_db_path(tmp_path, monkeypatch):
+    import spst_runtime.web as web
+
+    working_directory = tmp_path / "cwd"
+    working_directory.mkdir()
+    isolated_db = tmp_path / "isolated" / "cockpit.db"
+    isolated_db.parent.mkdir()
+    monkeypatch.chdir(working_directory)
+    monkeypatch.setenv("SPST_COCKPIT_DB_PATH", str(isolated_db))
+    monkeypatch.setattr(web, "_DEFAULT_COCKPIT", None, raising=False)
+
+    status_code, status = web.handle_cockpit_request("GET", "/api/status")
+    first = web.get_default_cockpit()
+    second = web.get_default_cockpit()
+
+    assert status_code == 200
+    assert status["requires_api_key"] is False
+    assert first is second
+    assert isolated_db.exists()
+    assert not (working_directory / "spst_cockpit.db").exists()
 
 
 @pytest.mark.conformance

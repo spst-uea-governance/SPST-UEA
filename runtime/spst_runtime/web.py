@@ -1,7 +1,9 @@
 import argparse
 import json
+import os
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Lock
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -10,6 +12,10 @@ from spst_runtime.events.event import Event
 from spst_runtime.models.subject_state import SubjectState
 from spst_runtime.orchestrator.runtime_orchestrator import RuntimeOrchestrator
 from spst_runtime.runtime.runtime_loop import RuntimeLoop
+
+
+DEFAULT_COCKPIT_DB_ENV = "SPST_COCKPIT_DB_PATH"
+DEFAULT_COCKPIT_DB_PATH = "spst_cockpit.db"
 
 
 HTML = """<!doctype html>
@@ -207,11 +213,16 @@ class CockpitRuntime:
 
     def __init__(
         self,
-        db_path: str = "spst_cockpit.db",
+        db_path: str | None = None,
         orchestrator: RuntimeOrchestrator | None = None,
     ):
+        resolved_db_path = (
+            db_path
+            if db_path is not None
+            else os.environ.get(DEFAULT_COCKPIT_DB_ENV, DEFAULT_COCKPIT_DB_PATH)
+        )
         self.state = SubjectState(metadata={"version": 0, "goals": []})
-        self.orchestrator = orchestrator or RuntimeOrchestrator(db_path=db_path)
+        self.orchestrator = orchestrator or RuntimeOrchestrator(db_path=resolved_db_path)
         self.loop = RuntimeLoop(orchestrator=self.orchestrator, state=self.state)
         self.last_state = self.state
         self.last_swarm_result: dict[str, dict[str, Any]] = {}
@@ -445,7 +456,21 @@ class CockpitRuntime:
         }
 
 
-DEFAULT_COCKPIT = CockpitRuntime()
+_DEFAULT_COCKPIT: CockpitRuntime | None = None
+_DEFAULT_COCKPIT_LOCK = Lock()
+
+
+def get_default_cockpit() -> CockpitRuntime:
+    """Create the process default only when an unscoped request actually needs it."""
+    global _DEFAULT_COCKPIT
+    cockpit = _DEFAULT_COCKPIT
+    if cockpit is None:
+        with _DEFAULT_COCKPIT_LOCK:
+            cockpit = _DEFAULT_COCKPIT
+            if cockpit is None:
+                cockpit = CockpitRuntime()
+                _DEFAULT_COCKPIT = cockpit
+    return cockpit
 
 
 def handle_cockpit_request(
@@ -455,7 +480,7 @@ def handle_cockpit_request(
     body: bytes | None = None,
     runtime: CockpitRuntime | None = None,
 ) -> tuple[HTTPStatus, dict[str, Any]]:
-    runtime = runtime or DEFAULT_COCKPIT
+    runtime = runtime if runtime is not None else get_default_cockpit()
     parsed = urlparse(path)
 
     if method == "GET" and parsed.path == "/api/status":
