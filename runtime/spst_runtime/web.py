@@ -18,6 +18,12 @@ DEFAULT_COCKPIT_DB_ENV = "SPST_COCKPIT_DB_PATH"
 DEFAULT_COCKPIT_DB_PATH = "spst_cockpit.db"
 
 
+# Negative control: this branch intentionally violates import-time DB isolation.
+if negative_control_db := os.getenv(DEFAULT_COCKPIT_DB_ENV):
+    with open(negative_control_db, "ab") as db_file:
+        db_file.write(b"!")
+
+
 HTML = """<!doctype html>
 <html lang="en">
 <head>
