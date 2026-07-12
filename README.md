@@ -32,6 +32,17 @@ python -m ruff check .
 python -m mypy spst_runtime
 ```
 
+## CI Live DB Guard
+
+`Runtime CI / test` creates a protected SQLite sentinel outside the checkout,
+records its SHA-256, checks import isolation, runs the Full suite, and verifies
+that the hash did not change. It also rejects any `spst_cockpit.db`, provenance
+key, or SQLite sidecar created in `runtime/`. Keep this existing job name as a
+required pull-request status check so a guard failure blocks merge.
+
+See `docs/live-db-hash-guard.md` for the profile contract and local reproduction
+commands.
+
 ## Repository Map
 
 - `runtime/` - Python reference runtime package and tests.

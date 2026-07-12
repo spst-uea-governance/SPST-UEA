@@ -1,13 +1,50 @@
 name: Runtime CI
-on: [push,pull_request]
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SPST_COCKPIT_DB_PATH: ${{ runner.temp }}/spst-live-db-hash-guard/spst_cockpit.db
+      SPST_PROVENANCE_KEY: ci-live-db-hash-guard-public-test-key
+      LIVE_DB_GUARD_MANIFEST: ${{ runner.temp }}/spst-live-db-hash-guard/manifest.json
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      - run: pip install -e ./runtime[dev]
-      - run: pytest runtime/tests
-      - run: ruff check runtime
+          python-version: "3.11"
+      - name: Install runtime and verification dependencies
+        run: python -m pip install -e "./runtime[dev]"
+      - name: Prepare Live DB hash guard
+        working-directory: runtime
+        run: >-
+          python scripts/live_db_hash_guard.py prepare
+          --db "$SPST_COCKPIT_DB_PATH"
+          --manifest "$LIVE_DB_GUARD_MANIFEST"
+          --workspace .
+      - name: Verify import isolation
+        working-directory: runtime
+        run: |
+          python -c "import spst_runtime.web"
+          python scripts/live_db_hash_guard.py verify --manifest "$LIVE_DB_GUARD_MANIFEST"
+      - name: Run full runtime suite
+        working-directory: runtime
+        run: python -m pytest -q
+      - name: Verify Live DB guard after full suite
+        working-directory: runtime
+        run: python scripts/live_db_hash_guard.py verify --manifest "$LIVE_DB_GUARD_MANIFEST"
+      - name: Run Ruff
+        working-directory: runtime
+        run: ruff check .
+      - name: Run mypy
+        working-directory: runtime
+        run: python -m mypy spst_runtime
+      - name: Check patch whitespace
+        run: git diff --check
