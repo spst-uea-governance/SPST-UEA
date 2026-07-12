@@ -27,3 +27,11 @@ def test_runtime_ci_keeps_live_db_guard_around_import_and_full_suite():
     assert workflow.index("python -m pytest -q") < workflow.index(
         "Verify Live DB guard after full suite"
     )
+
+
+def test_runtime_ci_resolves_runner_temp_during_step_execution():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    assert "${{ runner.temp }}" not in workflow
+    assert 'guard_dir="${RUNNER_TEMP}/spst-live-db-hash-guard"' in workflow
+    assert '>> "$GITHUB_ENV"' in workflow

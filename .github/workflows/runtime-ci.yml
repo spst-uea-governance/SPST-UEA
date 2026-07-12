@@ -12,14 +12,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      SPST_COCKPIT_DB_PATH: ${{ runner.temp }}/spst-live-db-hash-guard/spst_cockpit.db
       SPST_PROVENANCE_KEY: ci-live-db-hash-guard-public-test-key
-      LIVE_DB_GUARD_MANIFEST: ${{ runner.temp }}/spst-live-db-hash-guard/manifest.json
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Configure isolated Live DB guard paths
+        shell: bash
+        run: |
+          guard_dir="${RUNNER_TEMP}/spst-live-db-hash-guard"
+          echo "SPST_COCKPIT_DB_PATH=${guard_dir}/spst_cockpit.db" >> "$GITHUB_ENV"
+          echo "LIVE_DB_GUARD_MANIFEST=${guard_dir}/manifest.json" >> "$GITHUB_ENV"
       - name: Install runtime and verification dependencies
         run: python -m pip install -e "./runtime[dev]"
       - name: Prepare Live DB hash guard
