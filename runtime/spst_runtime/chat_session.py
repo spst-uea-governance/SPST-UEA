@@ -9,6 +9,7 @@ from spst_runtime.evaluation.metrics import EvaluationResult
 from spst_runtime.intelligence_amplifier import IntelligenceAmplifier
 from spst_runtime.memory.long_term_memory import LongTermMemoryStore
 from spst_runtime.persistence.sqlite_repository import SQLiteRepository
+from spst_runtime.routing_receipt import RoutingReceiptLedger, build_routing_receipt
 
 
 SESSION_KEY = "codex_chat_session"
@@ -17,25 +18,33 @@ SESSION_KEY = "codex_chat_session"
 class ChatSessionStore:
     """Persist Codex-mediated SPST-UEA chat state across bridge invocations."""
 
-    def __init__(self, path: str | None = None):
+    def __init__(self, path: str | None = None, *, read_only: bool = False):
         default_path = Path(__file__).resolve().parents[1] / "spst_chat_state.db"
-        self.repository = SQLiteRepository(path or str(default_path))
+        self.path = path or str(default_path)
+        self.read_only = read_only
+        self.repository = SQLiteRepository(self.path, read_only=read_only)
 
-    def load(self) -> dict[str, Any]:
-        state = asyncio.run(self.repository.load(SESSION_KEY))
-        return state or {
+    @staticmethod
+    def default_state() -> dict[str, Any]:
+        return {
             "mode": CONFIG.mode,
             "provider": CONFIG.provider,
             "turn_count": 0,
             "prompts": [],
             "goals": ["maintain_api_key_free_codex_mediated_operation"],
-        "audit": [],
-        "memory": {
-            "stats": {"total_records": 0, "by_kind": {}, "latest_turn": 0},
-            "retrieved": [],
-            "latest_record_id": None,
-        },
-    }
+            "audit": [],
+            "memory": {
+                "stats": {"total_records": 0, "by_kind": {}, "latest_turn": 0},
+                "retrieved": [],
+                "latest_record_id": None,
+            },
+        }
+
+    def load(self) -> dict[str, Any]:
+        if self.read_only and not Path(self.path).expanduser().is_file():
+            return self.default_state()
+        state = asyncio.run(self.repository.load(SESSION_KEY))
+        return state or self.default_state()
 
     def save(self, state: dict[str, Any]) -> None:
         asyncio.run(self.repository.save(SESSION_KEY, state))
@@ -77,8 +86,16 @@ def summarize_session(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def record_turn(prompt: str, event: str, pipeline: dict[str, Any]) -> dict[str, Any]:
-    store = ChatSessionStore()
+def record_turn(
+    prompt: str,
+    event: str,
+    pipeline: dict[str, Any],
+    *,
+    steps: int = 3,
+    session_path: str | None = None,
+    memory_path: str | None = None,
+) -> dict[str, Any]:
+    store = ChatSessionStore(session_path)
     state = store.load()
     governance = GovernanceEngine()
     action = {
@@ -89,7 +106,7 @@ def record_turn(prompt: str, event: str, pipeline: dict[str, Any]) -> dict[str, 
     authorized = governance.authorize(action)
 
     state["turn_count"] = int(state.get("turn_count", 0)) + 1
-    memory_store = LongTermMemoryStore()
+    memory_store = LongTermMemoryStore(memory_path)
     memory_record = memory_store.remember(
         prompt,
         kind="episodic",
@@ -123,4 +140,18 @@ def record_turn(prompt: str, event: str, pipeline: dict[str, Any]) -> dict[str, 
     state["evaluation"] = evaluate_session(state)
     state["summary"] = summarize_session(state)
     store.save(state)
+    receipt = build_routing_receipt(
+        prompt=prompt,
+        event=event,
+        steps=steps,
+        pipeline=pipeline,
+        session_turn=state["turn_count"],
+        session_state_hash=SQLiteRepository.record_hash(state),
+        memory_record_id=memory_record.id,
+    )
+    RoutingReceiptLedger(store.path).persist(receipt)
+    receipt["verification"] = RoutingReceiptLedger(store.path, read_only=True).verify(
+        receipt["receipt_id"]
+    )
+    state["routing_receipt"] = receipt
     return state

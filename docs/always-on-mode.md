@@ -33,3 +33,21 @@ A healthy always-on turn includes:
 - governance `latest_audit.authorized`
 - intelligence `amplification.amplification_score`
 - long-term `memory.stats.total_records`
+
+Every completed bridge turn also emits a `spst-routing-receipt-v1` document. The
+receipt binds the prompt digest (never the prompt body), event, mode, provider,
+complete seven-stage trace, governance decision, session turn, memory record,
+and persisted session-state hash. The receipt is stored in the session SQLite
+provenance chain and can be checked independently:
+
+```powershell
+python -m spst_runtime.chat_bridge --verify-receipt <receipt-id>
+```
+
+`python -m spst_runtime.chat_bridge --status` uses an immutable SQLite
+read-only connection. It does not create the database, provenance key, WAL, or
+other sidecar files. The `routing` section reports verified receipts and
+receipt coverage from the first receipt-enabled turn. Overall Codex-task
+coverage remains `null` because SPST-UEA cannot observe tasks that bypass the
+bridge. `task_quality_delta` also remains `null` until the same task has
+independently verified normal and SPST-routed outcomes.

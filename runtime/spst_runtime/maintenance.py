@@ -30,8 +30,8 @@ def clean_generated_files() -> dict:
     return {"removed_files": removed_files, "removed_dirs": removed_dirs}
 
 
-def run_maintenance() -> dict:
-    memory = LongTermMemoryStore()
+def run_maintenance(memory_path: str | None = None) -> dict:
+    memory = LongTermMemoryStore(memory_path)
     compact_result = memory.compact()
     clean_result = clean_generated_files()
     return {
