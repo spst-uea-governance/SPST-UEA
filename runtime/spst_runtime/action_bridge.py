@@ -20,7 +20,7 @@ def main(argv: list[str] | None = None) -> int:
     execute = subparsers.add_parser("execute-profile")
     execute.add_argument("--receipt-id", required=True)
     execute.add_argument("--profile", required=True, choices=VERIFICATION_PROFILE_NAMES)
-    execute.add_argument("--workspace-root", required=True)
+    execute.add_argument("--repository-root", required=True)
 
     prepare = subparsers.add_parser("prepare-external")
     prepare.add_argument("--receipt-id", required=True)
@@ -44,30 +44,39 @@ def main(argv: list[str] | None = None) -> int:
     read_only = args.command in {"verify", "receipt-status"}
     ledger = ActionManifestLedger(args.session_db, read_only=read_only)
 
-    if args.command == "execute-profile":
-        result = ledger.run_fixed_profile(
-            args.receipt_id,
-            args.profile,
-            workspace_root=args.workspace_root,
-        )
-    elif args.command == "prepare-external":
-        result = ledger.prepare_external_action(
-            args.receipt_id,
-            operation=args.operation,
-            tool_name=args.tool_name,
-            arguments_sha256=args.arguments_sha256,
-            workspace_root=args.workspace_root,
-        )
-    elif args.command == "approve":
-        result = ledger.record_approval(
-            args.action_id,
-            approved=args.decision == "approve",
-            actor=args.actor,
-        )
-    elif args.command == "verify":
-        result = ledger.verify(args.action_id)
-    else:
-        result = ledger.summarize_receipt(args.receipt_id)
+    try:
+        if args.command == "execute-profile":
+            result = ledger.run_fixed_profile(
+                args.receipt_id,
+                args.profile,
+                repository_root=args.repository_root,
+            )
+        elif args.command == "prepare-external":
+            result = ledger.prepare_external_action(
+                args.receipt_id,
+                operation=args.operation,
+                tool_name=args.tool_name,
+                arguments_sha256=args.arguments_sha256,
+                workspace_root=args.workspace_root,
+            )
+        elif args.command == "approve":
+            result = ledger.record_approval(
+                args.action_id,
+                approved=args.decision == "approve",
+                actor=args.actor,
+            )
+        elif args.command == "verify":
+            result = ledger.verify(args.action_id)
+        else:
+            result = ledger.summarize_receipt(args.receipt_id)
+    except (PermissionError, ValueError) as error:
+        result = {
+            "schema": "spst-action-bridge-error-v1",
+            "status": "rejected",
+            "reason": str(error),
+        }
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 2
 
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

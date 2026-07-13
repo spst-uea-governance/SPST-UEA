@@ -9,11 +9,19 @@ from typing import Any
 from spst_runtime.engines.governance_engine import GovernanceEngine
 from spst_runtime.persistence.sqlite_repository import SQLiteRepository
 from spst_runtime.providers.tool_provider import ToolProvider
+from spst_runtime.repository_identity import (
+    RepositoryIdentityError,
+    capture_repository_identity,
+    validate_repository_identity,
+)
 from spst_runtime.routing_receipt import RoutingReceiptLedger
 from spst_runtime.verification_profiles import (
+    PROFILE_CONTRACT_VERSION,
     QUALITY_PROFILE_NAMES,
     SNAPSHOT_PROFILE_NAMES,
     command_for,
+    profile_contract_for,
+    resolve_execution_root,
 )
 
 
@@ -25,6 +33,15 @@ ACTION_EVIDENCE_PREFIX = "action_evidence:v1:"
 ACTION_APPROVAL_PREFIX = "action_approval:v1:"
 FIXED_EXECUTOR = "spst-fixed-profile-v1"
 EXTERNAL_EXECUTOR = "external-codex-tool-unobserved"
+REPOSITORY_TRANSITION_SCHEMA = "spst-action-repository-transition-v1"
+REPOSITORY_TRANSITION_CONTRACT_VERSION = 1
+FIXED_PROFILE_CONTRACT_FIELDS = (
+    "profile_contract_version",
+    "profile_contract_sha256",
+    "repository_sha256",
+    "execution_root",
+    "execution_root_sha256",
+)
 
 R0_EXTERNAL_OPERATIONS = frozenset({"read", "inspect", "analyze", "status"})
 R1_EXTERNAL_OPERATIONS = frozenset(
@@ -69,6 +86,110 @@ def _command_digest(profile: str) -> str:
     if command is None:
         raise ValueError("verification_profile_not_permitted")
     return _canonical_hash({"command": list(command)})
+
+
+def _profile_contract(profile: str) -> dict[str, Any]:
+    contract = profile_contract_for(profile)
+    if contract is None:
+        raise ValueError("verification_profile_not_permitted")
+    return contract
+
+
+def _profile_contract_digest(profile: str) -> str:
+    return _canonical_hash(_profile_contract(profile))
+
+
+def _profile_arguments_digest(profile: str) -> str:
+    return _canonical_hash(
+        {
+            "profile": profile,
+            "profile_contract_sha256": _profile_contract_digest(profile),
+        }
+    )
+
+
+def _repository_transition_digest(
+    action_id: str, transition: dict[str, Any]
+) -> str:
+    return _canonical_hash({"action_id": action_id, "transition": transition})
+
+
+def _validate_manifest_repository_transition(
+    transition: object,
+    *,
+    action_kind: object,
+) -> tuple[bool, str | None]:
+    if not isinstance(transition, dict):
+        return False, "repository_transition_contract_invalid"
+    if (
+        transition.get("schema") != REPOSITORY_TRANSITION_SCHEMA
+        or transition.get("contract_version")
+        != REPOSITORY_TRANSITION_CONTRACT_VERSION
+    ):
+        return False, "repository_transition_contract_invalid"
+    before = transition.get("before_repository_identity")
+    if not isinstance(before, dict):
+        return False, "before_repository_identity_invalid"
+    valid, reason = validate_repository_identity(before)
+    if not valid:
+        return False, reason or "before_repository_identity_invalid"
+    if transition.get("parent_repository_identity_sha256") != before.get(
+        "identity_sha256"
+    ):
+        return False, "parent_before_repository_identity_mismatch"
+    if action_kind == "fixed_profile":
+        if (
+            transition.get("after_repository_identity_source") != "action_evidence"
+            or transition.get("expected_effect") != "preserve"
+        ):
+            return False, "repository_transition_contract_invalid"
+    elif action_kind == "external_tool":
+        if (
+            transition.get("after_repository_identity_source")
+            != "external_execution_unobserved"
+            or transition.get("expected_effect") != "unobserved"
+        ):
+            return False, "repository_transition_contract_invalid"
+    else:
+        return False, "action_kind_invalid"
+    return True, None
+
+
+def _validate_evidence_repository_transition(
+    action_id: str,
+    transition: object,
+) -> tuple[bool, str | None]:
+    if not isinstance(transition, dict):
+        return False, "repository_transition_evidence_missing"
+    if (
+        transition.get("schema") != REPOSITORY_TRANSITION_SCHEMA
+        or transition.get("contract_version")
+        != REPOSITORY_TRANSITION_CONTRACT_VERSION
+        or not _is_sha256(transition.get("parent_repository_identity_sha256"))
+        or not _is_sha256(transition.get("before_repository_identity_sha256"))
+        or transition.get("expected_effect") != "preserve"
+    ):
+        return False, "repository_transition_evidence_invalid"
+    capture_status = transition.get("after_capture_status")
+    after = transition.get("after_repository_identity")
+    if capture_status == "captured":
+        valid, reason = validate_repository_identity(after)
+        if not valid:
+            return False, reason or "after_repository_identity_invalid"
+        if transition.get("after_capture_reason") is not None:
+            return False, "repository_transition_evidence_invalid"
+    elif capture_status == "failed":
+        if after is not None or not str(transition.get("after_capture_reason") or ""):
+            return False, "repository_transition_evidence_invalid"
+    else:
+        return False, "repository_transition_evidence_invalid"
+    transition_sha256 = transition.get("transition_sha256")
+    if not _is_sha256(transition_sha256):
+        return False, "repository_transition_digest_invalid"
+    content = {key: value for key, value in transition.items() if key != "transition_sha256"}
+    if transition_sha256 != _repository_transition_digest(action_id, content):
+        return False, "repository_transition_digest_mismatch"
+    return True, None
 
 
 def _risk_for_profile(profile: str) -> dict[str, Any]:
@@ -161,6 +282,8 @@ def validate_action_manifest(manifest: dict[str, Any]) -> tuple[bool, str | None
         try:
             expected_risk = _risk_for_profile(profile)
             expected_command = _command_digest(profile)
+            expected_contract = _profile_contract(profile)
+            expected_contract_digest = _profile_contract_digest(profile)
         except ValueError:
             return False, "verification_profile_not_permitted"
         if (
@@ -170,6 +293,27 @@ def validate_action_manifest(manifest: dict[str, Any]) -> tuple[bool, str | None
             or risk != expected_risk
         ):
             return False, "fixed_profile_binding_mismatch"
+        contract_version = action.get("profile_contract_version")
+        contract_fields_present = any(
+            key in action
+            for key in FIXED_PROFILE_CONTRACT_FIELDS
+            if key != "profile_contract_version"
+        )
+        if contract_version is None and contract_fields_present:
+            return False, "fixed_profile_contract_mismatch"
+        if contract_version is not None and (
+            contract_version != PROFILE_CONTRACT_VERSION
+            or action.get("profile_contract_sha256")
+            != expected_contract_digest
+            or action.get("arguments_sha256") != _profile_arguments_digest(profile)
+            or action.get("execution_root")
+            != expected_contract["execution_root"]
+            or not _is_sha256(action.get("repository_sha256"))
+            or not _is_sha256(action.get("execution_root_sha256"))
+            or action.get("execution_root_sha256")
+            != action.get("workspace_sha256")
+        ):
+            return False, "fixed_profile_contract_mismatch"
     elif kind == "external_tool":
         operation = str(action.get("operation") or "")
         if (
@@ -180,6 +324,15 @@ def validate_action_manifest(manifest: dict[str, Any]) -> tuple[bool, str | None
             return False, "external_action_binding_mismatch"
     else:
         return False, "action_kind_invalid"
+
+    transition = payload.get("repository_transition")
+    if transition is not None:
+        transition_valid, transition_reason = _validate_manifest_repository_transition(
+            transition,
+            action_kind=kind,
+        )
+        if not transition_valid:
+            return False, transition_reason
 
     if risk.get("level") not in {"R0", "R1", "R2"}:
         return False, "action_risk_invalid"
@@ -242,6 +395,32 @@ def _validate_evidence(evidence: dict[str, Any]) -> tuple[bool, str | None]:
         or not _is_sha256(payload.get("workspace_sha256"))
     ):
         return False, "action_evidence_binding_incomplete"
+    contract_version = payload.get("profile_contract_version")
+    contract_fields_present = any(
+        key in payload
+        for key in FIXED_PROFILE_CONTRACT_FIELDS
+        if key != "profile_contract_version"
+    )
+    if contract_version is None and contract_fields_present:
+        return False, "action_evidence_profile_contract_incomplete"
+    if contract_version is not None and (
+        contract_version != PROFILE_CONTRACT_VERSION
+        or not _is_sha256(payload.get("profile_contract_sha256"))
+        or not _is_sha256(payload.get("repository_sha256"))
+        or not _is_sha256(payload.get("execution_root_sha256"))
+        or payload.get("execution_root_sha256")
+        != payload.get("workspace_sha256")
+        or not isinstance(payload.get("execution_root"), str)
+    ):
+        return False, "action_evidence_profile_contract_incomplete"
+    transition = payload.get("repository_transition")
+    if transition is not None:
+        transition_valid, transition_reason = _validate_evidence_repository_transition(
+            str(payload.get("action_id") or ""),
+            transition,
+        )
+        if not transition_valid:
+            return False, transition_reason
     return True, None
 
 
@@ -266,9 +445,12 @@ class ActionManifestLedger:
         receipt_id: str,
         profile: str,
         *,
-        workspace_root: str,
+        repository_root: str,
     ) -> dict[str, Any]:
-        workspace = self._workspace(workspace_root)
+        repository, execution_root = resolve_execution_root(profile, repository_root)
+        before_repository_identity = capture_repository_identity(repository)
+        contract = _profile_contract(profile)
+        contract_digest = _profile_contract_digest(profile)
         risk = _risk_for_profile(profile)
         action = {
             "kind": "fixed_profile",
@@ -276,11 +458,23 @@ class ActionManifestLedger:
             "tool_name": "verify.local",
             "profile": profile,
             "executor": FIXED_EXECUTOR,
-            "arguments_sha256": _canonical_hash({"profile": profile}),
+            "profile_contract_version": PROFILE_CONTRACT_VERSION,
+            "profile_contract_sha256": contract_digest,
+            "arguments_sha256": _profile_arguments_digest(profile),
             "command_sha256": _command_digest(profile),
-            "workspace_sha256": _workspace_digest(workspace),
+            "repository_sha256": _workspace_digest(repository),
+            "execution_root": contract["execution_root"],
+            "execution_root_sha256": _workspace_digest(execution_root),
+            "workspace_sha256": _workspace_digest(execution_root),
         }
-        return self._prepare(receipt_id, action, risk)
+        return self._prepare(
+            receipt_id,
+            action,
+            risk,
+            before_repository_identity=before_repository_identity,
+            after_repository_identity_source="action_evidence",
+            expected_effect="preserve",
+        )
 
     def prepare_external_action(
         self,
@@ -292,6 +486,7 @@ class ActionManifestLedger:
         workspace_root: str,
     ) -> dict[str, Any]:
         workspace = self._workspace(workspace_root)
+        before_repository_identity = capture_repository_identity(workspace)
         normalized_operation = operation.strip().lower()
         normalized_tool = tool_name.strip()
         if not normalized_tool:
@@ -309,24 +504,38 @@ class ActionManifestLedger:
             "command_sha256": None,
             "workspace_sha256": _workspace_digest(workspace),
         }
-        return self._prepare(receipt_id, action, risk)
+        return self._prepare(
+            receipt_id,
+            action,
+            risk,
+            before_repository_identity=before_repository_identity,
+            after_repository_identity_source="external_execution_unobserved",
+            expected_effect="unobserved",
+        )
 
     def run_fixed_profile(
         self,
         receipt_id: str,
         profile: str,
         *,
-        workspace_root: str,
+        repository_root: str,
     ) -> dict[str, Any]:
         manifest = self.prepare_fixed_profile(
             receipt_id,
             profile,
-            workspace_root=workspace_root,
+            repository_root=repository_root,
         )
-        verification = self.execute(manifest["action_id"], workspace_root=workspace_root)
+        verification = self.execute(
+            manifest["action_id"], repository_root=repository_root
+        )
         return {"manifest": manifest, "verification": verification}
 
-    def execute(self, action_id: str, *, workspace_root: str) -> dict[str, Any]:
+    def execute(
+        self,
+        action_id: str,
+        *,
+        repository_root: str | None = None,
+    ) -> dict[str, Any]:
         self._require_writable()
         current = self.verify(action_id)
         if current.get("execution_verified"):
@@ -347,19 +556,84 @@ class ActionManifestLedger:
         if action["kind"] != "fixed_profile":
             return {**current, "reason": "external_execution_unobserved"}
 
-        workspace = self._workspace(workspace_root)
-        if _workspace_digest(workspace) != action["workspace_sha256"]:
-            return {**current, "reason": "workspace_binding_mismatch"}
+        if repository_root is None:
+            return {**current, "reason": "repository_root_required"}
+        try:
+            repository, execution_root = resolve_execution_root(
+                str(action["profile"]), repository_root
+            )
+        except ValueError as error:
+            return {**current, "reason": str(error)}
+
+        execution_root_digest = _workspace_digest(execution_root)
+        if action.get("profile_contract_version") is None:
+            if execution_root_digest != action["workspace_sha256"]:
+                return {**current, "reason": "legacy_execution_root_mismatch"}
+        elif _workspace_digest(repository) != action.get("repository_sha256"):
+            return {**current, "reason": "repository_binding_mismatch"}
+        elif (
+            execution_root_digest != action.get("execution_root_sha256")
+            or execution_root_digest != action.get("workspace_sha256")
+        ):
+            return {**current, "reason": "execution_root_binding_mismatch"}
+        manifest_transition = manifest["payload"].get("repository_transition")
+        if manifest_transition is not None:
+            try:
+                current_before = capture_repository_identity(repository)
+            except RepositoryIdentityError as error:
+                return {
+                    **current,
+                    "reason": f"before_repository_identity_capture_failed:{error}",
+                }
+            expected_before = manifest_transition["before_repository_identity"]
+            if (
+                current_before.get("identity_sha256")
+                != expected_before.get("identity_sha256")
+            ):
+                return {**current, "reason": "before_repository_identity_mismatch"}
         if self._load(_evidence_key(action_id)) is not None:
             raise ValueError("action_already_executed")
 
-        raw = ToolProvider(workspace_root=str(workspace)).execute_verification_profile(
-            str(action["profile"]),
-            governance_authorized=True,
+        raw = ToolProvider(
+            workspace_root=str(execution_root)
+        ).execute_verification_profile(
+            str(action["profile"]), governance_authorized=True
         )
         output_digest = raw.get("output_digest")
         if not _is_sha256(output_digest):
             output_digest = hashlib.sha256(b"").hexdigest()
+        transition_evidence: dict[str, Any] | None = None
+        if manifest_transition is not None:
+            after_repository_identity: dict[str, Any] | None
+            after_capture_status = "captured"
+            after_capture_reason: str | None = None
+            try:
+                after_repository_identity = capture_repository_identity(repository)
+            except RepositoryIdentityError as error:
+                after_repository_identity = None
+                after_capture_status = "failed"
+                after_capture_reason = str(error)
+            transition_content: dict[str, Any] = {
+                "schema": REPOSITORY_TRANSITION_SCHEMA,
+                "contract_version": REPOSITORY_TRANSITION_CONTRACT_VERSION,
+                "parent_repository_identity_sha256": manifest_transition[
+                    "parent_repository_identity_sha256"
+                ],
+                "before_repository_identity_sha256": manifest_transition[
+                    "before_repository_identity"
+                ]["identity_sha256"],
+                "after_repository_identity": after_repository_identity,
+                "after_capture_status": after_capture_status,
+                "after_capture_reason": after_capture_reason,
+                "expected_effect": manifest_transition["expected_effect"],
+            }
+            transition_evidence = {
+                **transition_content,
+                "transition_sha256": _repository_transition_digest(
+                    action_id,
+                    transition_content,
+                ),
+            }
         manifest_binding = self._record_binding(_manifest_key(action_id), manifest)
         payload = {
             "action_id": action_id,
@@ -377,6 +651,11 @@ class ActionManifestLedger:
             "output_digest": output_digest,
             "execution_verified": True,
         }
+        if transition_evidence is not None:
+            payload["repository_transition"] = transition_evidence
+        for key in FIXED_PROFILE_CONTRACT_FIELDS:
+            if key in action:
+                payload[key] = action[key]
         signed: dict[str, Any] = {"schema": ACTION_EVIDENCE_SCHEMA, "payload": payload}
         evidence_id = _canonical_hash(signed)
         evidence: dict[str, Any] = {**signed, "evidence_id": evidence_id}
@@ -476,6 +755,51 @@ class ActionManifestLedger:
             )
 
         payload = manifest["payload"]
+        manifest_transition = payload.get("repository_transition")
+        if manifest_transition is None:
+            repository_transition: dict[str, Any] = {
+                "contract_version": None,
+                "status": "legacy_unbound",
+                "transition_verified": False,
+                "before_repository_identity": None,
+                "after_repository_identity": None,
+                "reason": "repository_transition_unbound",
+            }
+        else:
+            parent_repository = parent.get("repository", {})
+            if (
+                parent_repository.get("bound") is not True
+                or parent_repository.get("binding_verified") is not True
+                or parent_repository.get("identity_sha256")
+                != manifest_transition.get("parent_repository_identity_sha256")
+            ):
+                return self._failure(
+                    action_id,
+                    "parent_repository_identity_binding_mismatch",
+                    provenance=provenance,
+                )
+            repository_transition = {
+                "contract_version": manifest_transition["contract_version"],
+                "status": (
+                    "external_execution_unobserved"
+                    if payload["action"]["kind"] == "external_tool"
+                    else "awaiting_execution_evidence"
+                ),
+                "transition_verified": False,
+                "parent_repository_identity_sha256": manifest_transition[
+                    "parent_repository_identity_sha256"
+                ],
+                "before_repository_identity": manifest_transition[
+                    "before_repository_identity"
+                ],
+                "after_repository_identity": None,
+                "expected_effect": manifest_transition["expected_effect"],
+                "reason": (
+                    "external_execution_unobserved"
+                    if payload["action"]["kind"] == "external_tool"
+                    else "execution_evidence_missing"
+                ),
+            }
         result: dict[str, Any] = {
             "verified": False,
             "manifest_verified": True,
@@ -487,6 +811,7 @@ class ActionManifestLedger:
             "risk": payload["risk"],
             "manifest_status": payload["status"],
             "governance": payload["governance"],
+            "repository_transition": repository_transition,
             "approval": {"status": "not_required"},
             "provenance": provenance,
             "binding": {"manifest": manifest_binding, "parent_receipt": parent_binding},
@@ -544,6 +869,7 @@ class ActionManifestLedger:
             return {**result, "reason": str(error)}
         evidence_payload = evidence["payload"]
         action = payload["action"]
+        evidence_transition = evidence_payload.get("repository_transition")
         if (
             evidence_payload.get("action_id") != action_id
             or evidence_payload.get("parent_receipt_id") != parent_claim["receipt_id"]
@@ -553,6 +879,28 @@ class ActionManifestLedger:
             or evidence_payload.get("profile") != action.get("profile")
             or evidence_payload.get("command_sha256") != action.get("command_sha256")
             or evidence_payload.get("workspace_sha256") != action.get("workspace_sha256")
+            or any(
+                key in action and evidence_payload.get(key) != action.get(key)
+                for key in FIXED_PROFILE_CONTRACT_FIELDS
+            )
+            or (
+                manifest_transition is None
+                and evidence_transition is not None
+            )
+            or (
+                manifest_transition is not None
+                and (
+                    not isinstance(evidence_transition, dict)
+                    or evidence_transition.get("parent_repository_identity_sha256")
+                    != manifest_transition.get("parent_repository_identity_sha256")
+                    or evidence_transition.get("before_repository_identity_sha256")
+                    != manifest_transition.get("before_repository_identity", {}).get(
+                        "identity_sha256"
+                    )
+                    or evidence_transition.get("expected_effect")
+                    != manifest_transition.get("expected_effect")
+                )
+            )
             or evidence_binding["sequence"] <= manifest_binding["sequence"]
         ):
             return {**result, "reason": "action_evidence_binding_mismatch"}
@@ -566,13 +914,58 @@ class ActionManifestLedger:
             "executor": evidence_payload["executor"],
             "binding": evidence_binding,
         }
+        if action.get("profile_contract_version") is not None:
+            execution["profile_contract"] = {
+                key: action[key]
+                for key in FIXED_PROFILE_CONTRACT_FIELDS
+            }
+        transition_reason: str | None = None
+        transition_expected_effect_met = True
+        if manifest_transition is not None and isinstance(evidence_transition, dict):
+            after = evidence_transition.get("after_repository_identity")
+            after_captured = evidence_transition.get("after_capture_status") == "captured"
+            before_identity_sha256 = manifest_transition[
+                "before_repository_identity"
+            ]["identity_sha256"]
+            after_identity_sha256 = (
+                after.get("identity_sha256") if isinstance(after, dict) else None
+            )
+            state_changed = (
+                after_captured and after_identity_sha256 != before_identity_sha256
+            )
+            if not after_captured:
+                transition_status = "after_capture_failed"
+                transition_reason = "after_repository_identity_unresolved"
+                transition_expected_effect_met = False
+            elif state_changed:
+                transition_status = "unexpected_change"
+                transition_reason = "unexpected_repository_mutation"
+                transition_expected_effect_met = False
+            else:
+                transition_status = "preserved"
+            repository_transition = {
+                **repository_transition,
+                "status": transition_status,
+                "transition_verified": after_captured,
+                "after_repository_identity": after,
+                "after_capture_status": evidence_transition["after_capture_status"],
+                "after_capture_reason": evidence_transition["after_capture_reason"],
+                "transition_sha256": evidence_transition["transition_sha256"],
+                "state_changed": state_changed if after_captured else None,
+                "expected_effect_met": transition_expected_effect_met,
+                "reason": transition_reason,
+            }
         return {
             **result,
             "verified": True,
             "execution_verified": True,
-            "successful": evidence_payload["status"] == "completed",
-            "reason": None,
+            "successful": (
+                evidence_payload["status"] == "completed"
+                and transition_expected_effect_met
+            ),
+            "reason": transition_reason,
             "execution": execution,
+            "repository_transition": repository_transition,
         }
 
     def summarize_receipt(self, receipt_id: str) -> dict[str, Any]:
@@ -601,12 +994,34 @@ class ActionManifestLedger:
                 "operation": item.get("action", {}).get("operation"),
                 "tool_name": item.get("action", {}).get("tool_name"),
                 "profile": item.get("action", {}).get("profile"),
+                "profile_contract_version": item.get("action", {}).get(
+                    "profile_contract_version"
+                ),
+                "execution_root": item.get("action", {}).get("execution_root"),
                 "risk_level": item.get("risk", {}).get("level"),
                 "manifest_status": item.get("manifest_status"),
                 "approval_status": item.get("approval", {}).get("status"),
                 "execution_status": item.get("execution", {}).get("status"),
                 "execution_verified": bool(item.get("execution_verified")),
                 "successful": bool(item.get("successful")),
+                "repository_transition_status": item.get(
+                    "repository_transition", {}
+                ).get("status"),
+                "repository_transition_verified": bool(
+                    item.get("repository_transition", {}).get("transition_verified")
+                ),
+                "before_repository_identity_sha256": (
+                    item.get("repository_transition", {}).get(
+                        "before_repository_identity"
+                    )
+                    or {}
+                ).get("identity_sha256"),
+                "after_repository_identity_sha256": (
+                    item.get("repository_transition", {}).get(
+                        "after_repository_identity"
+                    )
+                    or {}
+                ).get("identity_sha256"),
                 "reason": item.get("reason"),
             }
             for item in valid
@@ -631,6 +1046,40 @@ class ActionManifestLedger:
             "external_unobserved_actions": sum(
                 1 for item in valid if item.get("reason") == "external_execution_unobserved"
             ),
+            "repository_transition_bound_actions": sum(
+                1
+                for item in valid
+                if item.get("repository_transition", {}).get("contract_version")
+                == REPOSITORY_TRANSITION_CONTRACT_VERSION
+            ),
+            "repository_transition_verified_actions": sum(
+                1
+                for item in valid
+                if item.get("repository_transition", {}).get("transition_verified")
+                is True
+            ),
+            "repository_transition_preserved_actions": sum(
+                1
+                for item in valid
+                if item.get("repository_transition", {}).get("status") == "preserved"
+            ),
+            "repository_transition_changed_actions": sum(
+                1
+                for item in valid
+                if item.get("repository_transition", {}).get("status")
+                == "unexpected_change"
+            ),
+            "repository_transition_unresolved_actions": sum(
+                1
+                for item in valid
+                if item.get("repository_transition", {}).get("status")
+                in {
+                    "legacy_unbound",
+                    "awaiting_execution_evidence",
+                    "after_capture_failed",
+                    "external_execution_unobserved",
+                }
+            ),
             "actions": actions,
             "global_codex_tool_coverage": None,
             "global_coverage_reason": "codex_tool_call_denominator_unavailable",
@@ -646,11 +1095,27 @@ class ActionManifestLedger:
         receipt_id: str,
         action: dict[str, Any],
         risk: dict[str, Any],
+        *,
+        before_repository_identity: dict[str, Any],
+        after_repository_identity_source: str,
+        expected_effect: str,
     ) -> dict[str, Any]:
         self._require_writable()
         parent = self.routing.verify(receipt_id)
         if not parent.get("verified"):
             raise ValueError(f"parent_receipt_unverified:{parent.get('reason')}")
+        valid, reason = validate_repository_identity(before_repository_identity)
+        if not valid:
+            raise ValueError(f"before_repository_identity_invalid:{reason}")
+        parent_repository = parent.get("repository", {})
+        if (
+            parent_repository.get("bound") is not True
+            or parent_repository.get("binding_verified") is not True
+        ):
+            raise ValueError("parent_repository_identity_unbound")
+        parent_identity_sha256 = parent_repository.get("identity_sha256")
+        if parent_identity_sha256 != before_repository_identity["identity_sha256"]:
+            raise ValueError("parent_repository_identity_mismatch")
         nonce = secrets.token_hex(16)
         governance_payload = self._governance_payload(action, risk, nonce)
         decision = self.governance_engine.decide(
@@ -685,6 +1150,14 @@ class ActionManifestLedger:
                 "receipt_chain_hash": binding["receipt_chain_hash"],
             },
             "action": action,
+            "repository_transition": {
+                "schema": REPOSITORY_TRANSITION_SCHEMA,
+                "contract_version": REPOSITORY_TRANSITION_CONTRACT_VERSION,
+                "parent_repository_identity_sha256": parent_identity_sha256,
+                "before_repository_identity": before_repository_identity,
+                "after_repository_identity_source": after_repository_identity_source,
+                "expected_effect": expected_effect,
+            },
             "risk": risk,
             "governance": {
                 "authorized": bool(decision.get("authorized")),
@@ -805,6 +1278,11 @@ class ActionManifestLedger:
             "failed_actions": 0,
             "pending_human_approval": 0,
             "external_unobserved_actions": 0,
+            "repository_transition_bound_actions": 0,
+            "repository_transition_verified_actions": 0,
+            "repository_transition_preserved_actions": 0,
+            "repository_transition_changed_actions": 0,
+            "repository_transition_unresolved_actions": 0,
             "actions": [],
             "global_codex_tool_coverage": None,
             "global_coverage_reason": "codex_tool_call_denominator_unavailable",

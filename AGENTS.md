@@ -24,10 +24,10 @@ These instructions apply to the entire repository.
 Run commands from `runtime/` unless noted otherwise:
 
 - `python -m pytest -q`
-- `python -m spst_runtime.chat_bridge "<sanitized-contract>" --profile auto`
-- `python -m spst_runtime.chat_bridge --verify-receipt <receipt-id>`
-- `python -m spst_runtime.chat_bridge --status`
-- `python -m spst_runtime.action_bridge execute-profile --receipt-id <receipt-id> --profile git_status --workspace-root ..`
+- `python -m spst_runtime.chat_bridge "<sanitized-contract>" --profile auto --repository-root ..`
+- `python -m spst_runtime.chat_bridge --verify-receipt <receipt-id> --repository-root ..`
+- `python -m spst_runtime.chat_bridge --status --repository-root ..`
+- `python -m spst_runtime.action_bridge execute-profile --receipt-id <receipt-id> --profile git_status --repository-root ..`
 - `python -m spst_runtime.action_bridge verify --action-id <action-id>`
 - `python -m spst_runtime.action_bridge receipt-status --receipt-id <receipt-id>`
 - `python -m pip install -e ".[dev]"`
@@ -44,19 +44,29 @@ Run commands from `runtime/` unless noted otherwise:
 - Preserve Honesty First: distinguish verified evidence, local inference, and
   aspirational roadmap language.
 - For SPST-UEA-related user requests, run
-  `python -m spst_runtime.chat_bridge "<sanitized-contract>" --profile auto`
+  `python -m spst_runtime.chat_bridge "<sanitized-contract>" --profile auto --repository-root ..`
   from `runtime/` before answering when execution is useful. Let deterministic
   risk and continuity floors select `light`, `standard`, or `strict`.
+- For repository work, `--repository-root` is mandatory and must name the Git
+  top level. A v3 receipt binds the captured HEAD plus canonical index,
+  tracked-file, and non-ignored untracked-file bytes. Verify it again with the
+  same option to distinguish a valid historical binding from a current match.
 - Do not pass secrets, credentials, private attachment bodies, or other raw
   sensitive content to the bridge. Routed prompts are persisted in local
   session state in every profile and additionally in policy-filtered long-term
   memory for `standard` and `strict`.
 - Do not claim that a task traversed SPST-UEA unless its routing receipt passes
   `--verify-receipt`. Use `--status` for a read-only health path.
-- A verified receipt proves routing, profile, trace, governance, memory action,
-  session binding, and provenance. Bind supported post-route `git`, `pytest`,
-  `ruff`, and `mypy` profiles through `spst_runtime.action_bridge` when
-  action-level execution evidence is required.
+- A verified v3 receipt proves routing, profile, trace, governance, memory
+  action, session binding, provenance, and the recorded repository identity.
+  `current_match: true` additionally proves that a read-only recapture matches.
+  This is byte-level Git state, not semantic code equivalence. Bind supported
+  post-route `git`, `pytest`, `ruff`, and `mypy` profiles through
+  `spst_runtime.action_bridge` when action-level execution evidence is required.
+- New Action Manifests must bind the parent Receipt identity to
+  `before_repository_identity`. Fixed execution evidence must capture
+  `after_repository_identity`; an unexpected change or unresolved after-state
+  is not a successful action. External tools remain after-state-unobserved.
 - Treat R2 and unresolved external Action Manifests as HITL-pending. An approval
   record does not make an external Codex tool execution observable or verified.
 - Do not claim that `apply_patch`, arbitrary shell, browser, or connector calls

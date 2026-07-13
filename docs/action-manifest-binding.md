@@ -9,12 +9,14 @@ local actions without pretending that SPST-UEA can observe every Codex tool.
 
 ```text
 verified routing receipt
+  -> receipt repository identity
   -> immutable action manifest
+  -> before_repository_identity
   -> derived R0 / R1 / R2 risk
   -> governance decision
   -> optional append-only human approval
   -> fixed, shell-free runtime execution
-  -> compact execution evidence
+  -> compact execution evidence + after_repository_identity
   -> read-only verification from receipt or action id
 ```
 
@@ -23,15 +25,42 @@ provenance chain as the parent routing receipt. Each child record binds the
 parent receipt or preceding record by identifier, record hash, chain hash, and
 provenance sequence.
 
+## Repository Transition Contract
+
+New manifests require a repository-bound v3 parent receipt. At prepare time,
+the runtime captures `before_repository_identity` and rejects the manifest if
+it differs from the parent receipt identity. Immediately before fixed-profile
+execution, the runtime recaptures the repository and refuses to run if the
+state changed after manifest preparation.
+
+The immutable manifest cannot truthfully contain a future after-state. It
+therefore binds `after_repository_identity_source: action_evidence`; the actual
+`after_repository_identity` is stored in the HMAC-chained evidence record that
+binds the action id and manifest record hash. Read-only verification assembles:
+
+```text
+parent Receipt identity == Manifest before identity
+Manifest before identity == immediate pre-execution identity
+Manifest -> Action Evidence -> after identity
+```
+
+All current fixed profiles have `expected_effect: preserve`. A changed
+after-state remains execution evidence, but reports
+`unexpected_repository_mutation` and cannot be successful. Failure to capture
+the after-state is recorded as `after_repository_identity_unresolved`, not
+silently treated as success. Legacy manifests without this contract remain
+verifiable as `legacy_unbound`, but new actions cannot be prepared from v1/v2
+receipts that lack repository identity.
+
 ## Runtime-Executed Profiles
 
 Only the existing fixed verification profiles can produce
 `execution_verified: true`:
 
-| Profile | Risk | Notes |
-|---|---|---|
-| `git_head`, `git_status`, `git_diff_check` | `R0` | Derived read-only inspection |
-| `pytest`, `ruff`, `mypy` | `R1` | Local quality execution; tools may create reversible caches |
+| Profile | Risk | Profile-owned execution root | Notes |
+|---|---|---|---|
+| `git_head`, `git_status`, `git_diff_check` | `R0` | repository root | Derived read-only inspection |
+| `pytest`, `ruff`, `mypy` | `R1` | `runtime/` | Local quality execution; tools may create reversible caches |
 
 Run one profile through the bound executor:
 
@@ -39,20 +68,31 @@ Run one profile through the bound executor:
 python -m spst_runtime.action_bridge execute-profile `
   --receipt-id <receipt-id> `
   --profile git_status `
-  --workspace-root ..
+  --repository-root ..
 ```
 
-The persisted evidence contains the profile, return code, duration, output
-digest, command digest, workspace digest, executor identity, and provenance
-bindings. It does not persist raw stdout, stderr, arbitrary command text, or the
-workspace path. A failed command can have a verified execution binding while
-`successful` remains false.
+The caller supplies only the repository boundary. The immutable profile
+definition selects the execution root: Git profiles run at the repository root,
+while `pytest`, `ruff`, and `mypy` run from `runtime/`. The bridge rejects a
+runtime directory or unrelated directory presented as the repository root with
+`spst-action-bridge-error-v1` / `repository_root_invalid`, before creating a
+manifest.
+
+The persisted evidence contains the profile contract version, relative
+execution root, repository and resolved-root digests, return code, duration,
+output digest, command digest, executor identity, and provenance bindings. It
+does not persist raw stdout, stderr, arbitrary command text, or the absolute
+repository path. A failed command can have a verified execution binding while
+`successful` remains false. Legacy manifests remain verifiable; an unexecuted
+legacy fixed profile can run only when its stored workspace digest matches the
+root resolved by the current profile definition.
 
 ## External Codex Tools and HITL
 
 SPST-UEA cannot intercept Codex App tools such as `apply_patch`, arbitrary
 shell calls, browser actions, or connector calls. Such an operation can be
-prepared as a manifest using only hashes:
+prepared as a manifest using only hashes. Its workspace must be the same Git
+top level bound by the parent receipt:
 
 ```powershell
 python -m spst_runtime.action_bridge prepare-external `
@@ -78,7 +118,7 @@ The actor label is stored only as a digest and is an attestation, not an
 authenticated human identity. Approval does not make an unobserved external
 tool execution verifiable. Its status remains
 `external_execution_unobserved`, and it is excluded from verified execution
-counts.
+counts. Its before-state is bound, but no after-state is fabricated.
 
 ## Read-Only Verification
 
@@ -88,7 +128,7 @@ database:
 ```powershell
 python -m spst_runtime.action_bridge verify --action-id <action-id>
 python -m spst_runtime.action_bridge receipt-status --receipt-id <receipt-id>
-python -m spst_runtime.chat_bridge --verify-receipt <receipt-id>
+python -m spst_runtime.chat_bridge --verify-receipt <receipt-id> --repository-root ..
 ```
 
 Receipt verification now includes an `actions` summary. The summary counts
@@ -96,10 +136,17 @@ only valid manifest bindings and independently distinguishes prepared,
 HITL-pending, externally unobserved, execution-verified, and successful
 actions. `global_codex_tool_coverage` remains `null` because the runtime has no
 denominator for Codex tool calls that bypass the action bridge.
+The summary separately counts transition-bound, after-state-verified,
+preserved, changed, and unresolved actions.
 
 ## Honesty and Security Boundaries
 
 - A manifest proves an immutable planned-action binding, not execution.
+- A v3 parent receipt, Manifest before-state, and Evidence after-state form a
+  verified sequence for runtime fixed profiles. They do not observe transient
+  changes that occur and are fully reverted between captures.
+- Ignored files and OS metadata excluded by the repository identity contract
+  are also outside transition coverage.
 - `execution_verified: true` requires the runtime fixed-profile executor and a
   valid compact evidence record after the manifest.
 - External operation names and argument digests are caller attestations. They

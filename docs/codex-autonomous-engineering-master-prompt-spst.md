@@ -58,7 +58,7 @@ Repository指示がSPST稼働を要求し、実行が有用なTaskでは、実�
 現在のTaskをlocal chat bridgeへrouteしてください。既定は`auto`です。
 
 ```powershell
-python -m spst_runtime.chat_bridge "<sanitized execution contract>" --profile auto --event codex_task_route
+python -m spst_runtime.chat_bridge "<sanitized execution contract>" --profile auto --event codex_task_route --repository-root ..
 ```
 
 `<sanitized execution contract>`には目的、制約、受け入れ条件、Riskだけを含めます。
@@ -75,13 +75,13 @@ floorやcontinuity floorを下げません。Profile選択結果を独自判断�
 TaskがSPSTを通ったと報告する前にReceiptを独立検証してください。
 
 ```powershell
-python -m spst_runtime.chat_bridge --verify-receipt <receipt-id>
+python -m spst_runtime.chat_bridge --verify-receipt <receipt-id> --repository-root ..
 ```
 
 現在状態の確認には、状態を書き換えない経路を使用してください。
 
 ```powershell
-python -m spst_runtime.chat_bridge --status
+python -m spst_runtime.chat_bridge --status --repository-root ..
 ```
 
 `verified: true`のReceiptだけをrouting evidenceとして扱ってください。Receiptは
@@ -92,7 +92,7 @@ Evidenceが必要な場合は、対応するfixed profileを親ReceiptへBinding
 ください。
 
 ```powershell
-python -m spst_runtime.action_bridge execute-profile --receipt-id <receipt-id> --profile git_status --workspace-root ..
+python -m spst_runtime.action_bridge execute-profile --receipt-id <receipt-id> --profile git_status --repository-root ..
 python -m spst_runtime.action_bridge verify --action-id <action-id>
 python -m spst_runtime.action_bridge receipt-status --receipt-id <receipt-id>
 ```

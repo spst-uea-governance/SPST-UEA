@@ -46,10 +46,12 @@ and duplicate compaction use the same auditable retirement mechanism.
 
 ## Receipt and Measurement Boundary
 
-`spst-routing-receipt-v2` binds the selected profile and memory action. The
-verifier remains compatible with persisted `spst-routing-receipt-v1` records.
-Status reports verified `profile_counts` and `memory_action_counts`; invalid or
-tampered receipts do not contribute.
+`spst-routing-receipt-v2` binds the selected profile and memory action for
+non-repository turns. Supplying `--repository-root` emits v3 and additionally
+binds HEAD plus canonical Git worktree identity. The verifier remains
+compatible with persisted v1/v2 records. Status reports verified
+`profile_counts`, `memory_action_counts`, and repository-bound counts; invalid
+or tampered receipts do not contribute.
 
 These counts measure orchestration behavior, not GPT answer quality. SPST-UEA
 still cannot observe Codex tasks that bypass the bridge, and it cannot infer a

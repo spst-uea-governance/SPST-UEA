@@ -1,15 +1,26 @@
 import asyncio
 import hashlib
 import json
+from pathlib import Path
 from typing import Any
 
 from spst_runtime.always_on import CONFIG
 from spst_runtime.persistence.sqlite_repository import SQLiteRepository
+from spst_runtime.repository_identity import (
+    compare_repository_identity,
+    validate_repository_identity,
+)
 
 
 ROUTING_RECEIPT_SCHEMA_V1 = "spst-routing-receipt-v1"
 ROUTING_RECEIPT_SCHEMA_V2 = "spst-routing-receipt-v2"
-ROUTING_RECEIPT_SCHEMA = ROUTING_RECEIPT_SCHEMA_V2
+ROUTING_RECEIPT_SCHEMA_V3 = "spst-routing-receipt-v3"
+ROUTING_RECEIPT_SCHEMA = ROUTING_RECEIPT_SCHEMA_V3
+ROUTING_RECEIPT_SCHEMAS = (
+    ROUTING_RECEIPT_SCHEMA_V3,
+    ROUTING_RECEIPT_SCHEMA_V2,
+    ROUTING_RECEIPT_SCHEMA_V1,
+)
 ROUTING_RECEIPT_PREFIX = "routing_receipt:v"
 SESSION_STATE_KEY = "codex_chat_session"
 COMPLETE_TRACE = (
@@ -29,7 +40,14 @@ def _canonical_hash(value: dict[str, Any]) -> str:
 
 
 def _receipt_key(receipt_id: str, schema: str) -> str:
-    version = "v2" if schema == ROUTING_RECEIPT_SCHEMA_V2 else "v1"
+    versions = {
+        ROUTING_RECEIPT_SCHEMA_V1: "v1",
+        ROUTING_RECEIPT_SCHEMA_V2: "v2",
+        ROUTING_RECEIPT_SCHEMA_V3: "v3",
+    }
+    version = versions.get(schema)
+    if version is None:
+        raise ValueError("Unsupported routing receipt schema.")
     return f"routing_receipt:{version}:{receipt_id}"
 
 
@@ -102,8 +120,9 @@ def build_profiled_routing_receipt(
     session_state_hash: str,
     execution_profile: dict[str, Any],
     memory_binding: dict[str, Any],
+    repository_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Bind adaptive execution and memory policy without invalidating v1 receipts."""
+    """Bind adaptive execution, memory policy, and optional repository identity."""
     trace = tuple(str(step) for step in pipeline.get("last_trace", []))
     if trace != COMPLETE_TRACE:
         raise ValueError("Routing receipts require the complete SPST trace.")
@@ -144,14 +163,21 @@ def build_profiled_routing_receipt(
             "state_record_hash": session_state_hash,
         },
     }
-    signed_content = {"schema": ROUTING_RECEIPT_SCHEMA_V2, "payload": payload}
+    schema = ROUTING_RECEIPT_SCHEMA_V2
+    if repository_identity is not None:
+        valid, reason = validate_repository_identity(repository_identity)
+        if not valid:
+            raise ValueError(f"Routing receipt repository identity is invalid: {reason}")
+        payload["repository"] = repository_identity
+        schema = ROUTING_RECEIPT_SCHEMA_V3
+    signed_content = {"schema": schema, "payload": payload}
     return {**signed_content, "receipt_id": _canonical_hash(signed_content)}
 
 
 def validate_routing_receipt(receipt: dict[str, Any]) -> tuple[bool, str | None]:
     """Validate the self-binding fields before checking persisted provenance."""
     schema = receipt.get("schema")
-    if schema not in {ROUTING_RECEIPT_SCHEMA_V1, ROUTING_RECEIPT_SCHEMA_V2}:
+    if schema not in ROUTING_RECEIPT_SCHEMAS:
         return False, "receipt_schema_mismatch"
     payload = receipt.get("payload")
     receipt_id = receipt.get("receipt_id")
@@ -197,6 +223,10 @@ def validate_routing_receipt(receipt: dict[str, Any]) -> tuple[bool, str | None]
                 return False, "memory_binding_missing"
         else:
             return False, "memory_binding_status_invalid"
+        if schema == ROUTING_RECEIPT_SCHEMA_V3:
+            valid, reason = validate_repository_identity(payload.get("repository"))
+            if not valid:
+                return False, reason
     state_hash = session.get("state_record_hash")
     if not isinstance(state_hash, str) or len(state_hash) != 64:
         return False, "session_state_binding_missing"
@@ -219,10 +249,12 @@ class RoutingReceiptLedger:
             raise ValueError("Routing receipt already exists and cannot be rewritten.")
         asyncio.run(self.repository.save(key, receipt))
 
-    def verify(self, receipt_id: str) -> dict[str, Any]:
+    def verify(
+        self, receipt_id: str, *, repository_root: str | Path | None = None
+    ) -> dict[str, Any]:
         receipt = None
         key = ""
-        for schema in (ROUTING_RECEIPT_SCHEMA_V2, ROUTING_RECEIPT_SCHEMA_V1):
+        for schema in ROUTING_RECEIPT_SCHEMAS:
             candidate_key = _receipt_key(receipt_id, schema)
             candidate = asyncio.run(self.repository.load(candidate_key))
             if candidate is not None:
@@ -279,12 +311,25 @@ class RoutingReceiptLedger:
                 "provenance": provenance,
             }
 
+        if receipt["schema"] == ROUTING_RECEIPT_SCHEMA_V3:
+            repository = compare_repository_identity(
+                receipt["payload"]["repository"], repository_root
+            )
+        else:
+            repository = {
+                "bound": False,
+                "binding_verified": False,
+                "current_match": None,
+                "reason": "legacy_receipt_repository_unbound",
+            }
+
         return {
             "verified": True,
             "receipt_id": receipt_id,
             "schema": receipt["schema"],
             "route": receipt["payload"]["route"],
             "session": receipt["payload"]["session"],
+            "repository": repository,
             "provenance": provenance,
             "binding": {
                 "receipt_sequence": receipt_entry["sequence"],
@@ -294,12 +339,19 @@ class RoutingReceiptLedger:
             },
         }
 
-    def summarize(self, session_turn_count: int) -> dict[str, Any]:
+    def summarize(
+        self, session_turn_count: int, *, repository_root: str | Path | None = None
+    ) -> dict[str, Any]:
         records = asyncio.run(self.repository.load_prefix(ROUTING_RECEIPT_PREFIX))
         receipts = list(records.values())
         receipts.sort(key=lambda item: int(item.get("payload", {}).get("session", {}).get("turn", 0)))
         verification = [self.verify(str(receipt.get("receipt_id", ""))) for receipt in receipts]
         verified = sum(1 for result in verification if result.get("verified"))
+        repository_bound = sum(
+            1
+            for result in verification
+            if result.get("verified") and result.get("repository", {}).get("bound") is True
+        )
         verified_turns = {
             int(result["session"]["turn"])
             for result in verification
@@ -329,11 +381,14 @@ class RoutingReceiptLedger:
         eligible_turns = max(session_turn_count - start_turn + 1, 0) if start_turn else 0
         latest = receipts[-1] if receipts else None
         latest_id = str(latest.get("receipt_id")) if latest else None
-        latest_result = self.verify(latest_id) if latest_id else None
+        latest_result = (
+            self.verify(latest_id, repository_root=repository_root) if latest_id else None
+        )
         return {
             "receipt_schema": ROUTING_RECEIPT_SCHEMA,
             "total_receipts": len(receipts),
             "verified_receipts": verified,
+            "repository_bound_receipts": repository_bound,
             "verified_turns": len(verified_turns),
             "profile_counts": profile_counts,
             "memory_action_counts": memory_action_counts,
@@ -345,6 +400,11 @@ class RoutingReceiptLedger:
             "latest_receipt_id": latest_id,
             "latest_receipt_verified": (
                 bool(latest_result and latest_result.get("verified")) if latest else None
+            ),
+            "latest_repository_current_match": (
+                latest_result.get("repository", {}).get("current_match")
+                if latest_result
+                else None
             ),
             "global_codex_task_coverage": None,
             "global_coverage_reason": "codex_task_denominator_unavailable",

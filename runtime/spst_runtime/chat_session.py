@@ -101,6 +101,7 @@ def record_turn(
     session_path: str | None = None,
     memory_path: str | None = None,
     execution_profile: dict[str, Any] | None = None,
+    repository_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     store = ChatSessionStore(session_path)
     state = store.load()
@@ -211,6 +212,7 @@ def record_turn(
         session_state_hash=SQLiteRepository.record_hash(state),
         execution_profile=profile,
         memory_binding=memory_binding,
+        repository_identity=repository_identity,
     )
     RoutingReceiptLedger(store.path).persist(receipt)
     receipt["verification"] = RoutingReceiptLedger(store.path, read_only=True).verify(

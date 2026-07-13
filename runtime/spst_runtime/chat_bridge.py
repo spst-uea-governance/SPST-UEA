@@ -5,6 +5,7 @@ from pathlib import Path
 from spst_runtime.adaptive_profile import RequestedProfile, select_execution_profile
 from spst_runtime.cli import run_dispatch, run_loop
 from spst_runtime.chat_session import ChatSessionStore, record_turn, summarize_session
+from spst_runtime.repository_identity import capture_repository_identity
 from spst_runtime.routing_receipt import ROUTING_RECEIPT_SCHEMA, RoutingReceiptLedger
 
 
@@ -16,9 +17,13 @@ def run_chat_turn(
     profile: RequestedProfile = "auto",
     session_path: str | None = None,
     memory_path: str | None = None,
+    repository_root: str | None = None,
 ) -> dict:
     """Run one Codex-mediated chat turn through SPST-UEA without an API key."""
 
+    repository_identity = (
+        capture_repository_identity(repository_root) if repository_root is not None else None
+    )
     selected_profile = select_execution_profile(prompt, event=event, requested=profile)
     profile_payload = selected_profile.as_dict()
     loop = run_loop(steps)
@@ -35,6 +40,7 @@ def run_chat_turn(
         session_path=session_path,
         memory_path=memory_path,
         execution_profile=profile_payload,
+        repository_identity=repository_identity,
     )
 
     return {
@@ -45,6 +51,7 @@ def run_chat_turn(
             "event": event,
             "steps": steps,
             "execution_profile": profile_payload,
+            "repository_bound": repository_identity is not None,
         },
         "runtime": {
             "loop": loop,
@@ -73,6 +80,7 @@ def _empty_routing_status(turn_count: int) -> dict:
         "verified_turns": 0,
         "profile_counts": {},
         "memory_action_counts": {},
+        "repository_bound_receipts": 0,
         "failed_receipts": 0,
         "receipt_epoch_start_turn": None,
         "eligible_turns": 0,
@@ -80,6 +88,7 @@ def _empty_routing_status(turn_count: int) -> dict:
         "receipt_coverage": None,
         "latest_receipt_id": None,
         "latest_receipt_verified": None,
+        "latest_repository_current_match": None,
         "global_codex_task_coverage": None,
         "global_coverage_reason": "codex_task_denominator_unavailable",
         "task_quality_delta": None,
@@ -87,13 +96,17 @@ def _empty_routing_status(turn_count: int) -> dict:
     }
 
 
-def get_chat_status(session_path: str | None = None) -> dict:
+def get_chat_status(
+    session_path: str | None = None, repository_root: str | None = None
+) -> dict:
     store = ChatSessionStore(session_path, read_only=True)
     database_exists = Path(store.path).expanduser().is_file()
     state = store.load()
     turn_count = int(state.get("turn_count", 0))
     routing = (
-        RoutingReceiptLedger(store.path, read_only=True).summarize(turn_count)
+        RoutingReceiptLedger(store.path, read_only=True).summarize(
+            turn_count, repository_root=repository_root
+        )
         if database_exists
         else _empty_routing_status(turn_count)
     )
@@ -127,11 +140,17 @@ def get_chat_status(session_path: str | None = None) -> dict:
     }
 
 
-def verify_chat_receipt(receipt_id: str, session_path: str | None = None) -> dict:
+def verify_chat_receipt(
+    receipt_id: str,
+    session_path: str | None = None,
+    repository_root: str | None = None,
+) -> dict:
     store = ChatSessionStore(session_path, read_only=True)
     if not Path(store.path).expanduser().is_file():
         return {"verified": False, "receipt_id": receipt_id, "reason": "receipt_missing"}
-    verification = RoutingReceiptLedger(store.path, read_only=True).verify(receipt_id)
+    verification = RoutingReceiptLedger(store.path, read_only=True).verify(
+        receipt_id, repository_root=repository_root
+    )
     if verification.get("verified"):
         from spst_runtime.action_manifest import ActionManifestLedger
 
@@ -165,6 +184,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Override the local long-term memory database path for routed turns.",
     )
     parser.add_argument(
+        "--repository-root",
+        default=None,
+        help=(
+            "Bind a routed turn to the exact Git HEAD and canonical worktree state; "
+            "on read-only verification, compare that recorded identity with this repository."
+        ),
+    )
+    parser.add_argument(
         "--status",
         action="store_true",
         help="Read persisted status without creating or changing database state.",
@@ -178,13 +205,23 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.status:
-        print(json.dumps(get_chat_status(args.session_db), indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                get_chat_status(args.session_db, args.repository_root),
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 0
 
     if args.verify_receipt:
         print(
             json.dumps(
-                verify_chat_receipt(args.verify_receipt, args.session_db),
+                verify_chat_receipt(
+                    args.verify_receipt,
+                    args.session_db,
+                    args.repository_root,
+                ),
                 indent=2,
                 sort_keys=True,
             )
@@ -203,6 +240,7 @@ def main(argv: list[str] | None = None) -> int:
                 profile=args.profile,
                 session_path=args.session_db,
                 memory_path=args.memory_db,
+                repository_root=args.repository_root,
             ),
             indent=2,
             sort_keys=True,

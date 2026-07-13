@@ -66,6 +66,18 @@ and memory lifecycle boundaries, use
 routing receipt through an immutable Action Manifest, derived risk decision,
 optional HITL record, compact execution evidence, and the SQLite HMAC
 provenance chain. Receipt verification can then list its child actions.
+Each fixed profile owns its repository-relative execution root; callers select
+the repository boundary, not an arbitrary command working directory.
+
+Repository tasks should route with `chat_bridge --repository-root <git-top-level>`.
+The resulting v3 Routing Receipt includes a path-free identity for the exact
+HEAD, index, tracked files, and non-ignored untracked files. Read-only receipt
+verification separates an intact historical binding from a live
+`current_match`; this is byte-level Git state and not semantic equivalence.
+New fixed-profile Action Manifests carry that identity forward as a verified
+before/after repository transition. Unexpected worktree mutation is retained
+as evidence but rejected as a successful action; external Codex tools still
+cannot claim an observed after-state.
 
 Only runtime-executed fixed profiles can be marked `execution_verified`.
 External Codex tools remain explicitly unobserved even when their planned

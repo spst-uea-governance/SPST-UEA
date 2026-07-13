@@ -9,7 +9,7 @@ SPST-UEA is configured for always-on operation in this Codex thread.
 - Mode: `codex-chat-mediated`
 - Runtime provider: `codex-mediated-local`
 - API key required: no
-- Default entry point: `python -m spst_runtime.chat_bridge "<prompt>"`
+- Repository entry point: `python -m spst_runtime.chat_bridge "<prompt>" --repository-root ..`
 - Browser endpoint: `/api/run` also routes through the chat bridge.
 
 ## Operational Rule
@@ -41,7 +41,7 @@ and persisted session-state hash. The receipt is stored in the session SQLite
 provenance chain and can be checked independently:
 
 ```powershell
-python -m spst_runtime.chat_bridge --verify-receipt <receipt-id>
+python -m spst_runtime.chat_bridge --verify-receipt <receipt-id> --repository-root ..
 ```
 
 `python -m spst_runtime.chat_bridge --status` uses an immutable SQLite
@@ -52,10 +52,12 @@ coverage remains `null` because SPST-UEA cannot observe tasks that bypass the
 bridge. `task_quality_delta` also remains `null` until the same task has
 independently verified normal and SPST-routed outcomes.
 
-New turns use `spst-routing-receipt-v2` and bind an adaptive `light`,
-`standard`, or `strict` execution profile. Existing v1 receipts remain
-verifiable. See `docs/adaptive-task-profiles.md` for the risk floors and memory
-lifecycle.
+Repository-bound turns use `spst-routing-receipt-v3` and bind HEAD plus a
+canonical index/tracked/untracked worktree digest alongside the adaptive
+`light`, `standard`, or `strict` profile. `binding_verified` protects the
+recorded historical identity; `current_match` requires a read-only recapture
+with `--repository-root`. Existing unbound v1/v2 receipts remain verifiable.
+See `docs/adaptive-task-profiles.md` for risk floors and memory lifecycle.
 
 Supported post-route local verification commands can be attached as immutable
 Action Manifests and compact execution evidence with
