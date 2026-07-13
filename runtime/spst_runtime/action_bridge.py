@@ -34,6 +34,15 @@ def main(argv: list[str] | None = None) -> int:
     approve.add_argument("--decision", choices=("approve", "reject"), required=True)
     approve.add_argument("--actor", required=True)
 
+    attest = subparsers.add_parser("attest-external")
+    attest.add_argument("--action-id", required=True)
+    attest.add_argument(
+        "--result-status", choices=("completed", "failed"), required=True
+    )
+    attest.add_argument("--returncode", type=int, required=True)
+    attest.add_argument("--result-evidence-sha256", required=True)
+    attest.add_argument("--workspace-root", required=True)
+
     verify = subparsers.add_parser("verify")
     verify.add_argument("--action-id", required=True)
 
@@ -64,6 +73,14 @@ def main(argv: list[str] | None = None) -> int:
                 args.action_id,
                 approved=args.decision == "approve",
                 actor=args.actor,
+            )
+        elif args.command == "attest-external":
+            result = ledger.record_external_attestation(
+                args.action_id,
+                result_status=args.result_status,
+                returncode=args.returncode,
+                result_evidence_sha256=args.result_evidence_sha256,
+                workspace_root=args.workspace_root,
             )
         elif args.command == "verify":
             result = ledger.verify(args.action_id)

@@ -120,6 +120,35 @@ tool execution verifiable. Its status remains
 `external_execution_unobserved`, and it is excluded from verified execution
 counts. Its before-state is bound, but no after-state is fabricated.
 
+After the external tool returns, the caller may append a bounded result
+attestation. For R2 actions, the approval record must already be present and
+approved:
+
+```powershell
+python -m spst_runtime.action_bridge attest-external `
+  --action-id <action-id> `
+  --result-status completed `
+  --returncode 0 `
+  --result-evidence-sha256 <canonical-result-bundle-digest> `
+  --workspace-root ..
+```
+
+The runtime validates the workspace binding, captures the repository identity
+at attestation time, and appends the caller-supplied status, return code, and
+result digest to the HMAC provenance chain. The digest can represent a
+canonical bundle such as a Git object identifier plus command-output digest,
+but the runtime cannot prove that the caller constructed it truthfully.
+
+The resulting status is `external_execution_attested_unverified`, with
+`external_attestation.integrity_verified: true` and
+`source_authenticated: false`. `execution_verified`, `verified`, and
+`successful` remain false. The recorded after-state is an attestation-time
+snapshot; `causal_link_verified` and `execution_window_verified` remain false,
+so it does not prove that the external action caused the observed change or
+that no transient changes occurred. Duplicate attestations, workspace
+mismatches, inconsistent result/return-code pairs, missing R2 approval, and
+tampered records are rejected.
+
 ## Read-Only Verification
 
 Verify one action or list child actions for a receipt without changing the
@@ -137,7 +166,10 @@ HITL-pending, externally unobserved, execution-verified, and successful
 actions. `global_codex_tool_coverage` remains `null` because the runtime has no
 denominator for Codex tool calls that bypass the action bridge.
 The summary separately counts transition-bound, after-state-verified,
-preserved, changed, and unresolved actions.
+preserved, changed, attested, and unresolved actions. External attestations
+have separate `external_attested_actions` and
+`repository_transition_attested_actions` counters and remain unresolved for
+verified-transition purposes.
 
 ## Honesty and Security Boundaries
 
@@ -151,6 +183,9 @@ preserved, changed, and unresolved actions.
   valid compact evidence record after the manifest.
 - External operation names and argument digests are caller attestations. They
   never become verified execution evidence.
+- External result digests and attestation-time repository snapshots add
+  tamper-evident supplemental evidence, but they do not authenticate the
+  caller, observe the tool invocation, or establish a causal transition.
 - An HMAC approval record proves local record integrity, not the real-world
   identity of the human actor.
 - The fixed executor uses no shell and has bounded profiles, but it is not an

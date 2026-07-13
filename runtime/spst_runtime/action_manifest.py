@@ -28,11 +28,14 @@ from spst_runtime.verification_profiles import (
 ACTION_MANIFEST_SCHEMA = "spst-action-manifest-v1"
 ACTION_EVIDENCE_SCHEMA = "spst-action-evidence-v1"
 ACTION_APPROVAL_SCHEMA = "spst-action-approval-v1"
+ACTION_EXTERNAL_ATTESTATION_SCHEMA = "spst-external-action-attestation-v1"
 ACTION_MANIFEST_PREFIX = "action_manifest:v1:"
 ACTION_EVIDENCE_PREFIX = "action_evidence:v1:"
 ACTION_APPROVAL_PREFIX = "action_approval:v1:"
+ACTION_EXTERNAL_ATTESTATION_PREFIX = "action_external_attestation:v1:"
 FIXED_EXECUTOR = "spst-fixed-profile-v1"
 EXTERNAL_EXECUTOR = "external-codex-tool-unobserved"
+EXTERNAL_ATTESTATION_SOURCE = "caller-supplied-external-result"
 REPOSITORY_TRANSITION_SCHEMA = "spst-action-repository-transition-v1"
 REPOSITORY_TRANSITION_CONTRACT_VERSION = 1
 FIXED_PROFILE_CONTRACT_FIELDS = (
@@ -192,6 +195,42 @@ def _validate_evidence_repository_transition(
     return True, None
 
 
+def _validate_external_attestation_repository_transition(
+    action_id: str,
+    transition: object,
+) -> tuple[bool, str | None]:
+    if not isinstance(transition, dict):
+        return False, "external_attestation_repository_state_missing"
+    if (
+        transition.get("schema") != REPOSITORY_TRANSITION_SCHEMA
+        or transition.get("contract_version")
+        != REPOSITORY_TRANSITION_CONTRACT_VERSION
+        or not _is_sha256(transition.get("parent_repository_identity_sha256"))
+        or not _is_sha256(transition.get("before_repository_identity_sha256"))
+        or transition.get("after_capture_status") != "captured"
+        or transition.get("after_capture_reason") is not None
+        or transition.get("expected_effect") != "unobserved"
+        or transition.get("observation_scope") != "attestation_time_only"
+        or transition.get("causal_link_verified") is not False
+        or transition.get("execution_window_verified") is not False
+    ):
+        return False, "external_attestation_repository_state_invalid"
+    valid, reason = validate_repository_identity(
+        transition.get("after_repository_identity")
+    )
+    if not valid:
+        return False, reason or "after_repository_identity_invalid"
+    transition_sha256 = transition.get("transition_sha256")
+    if not _is_sha256(transition_sha256):
+        return False, "external_attestation_transition_digest_invalid"
+    content = {
+        key: value for key, value in transition.items() if key != "transition_sha256"
+    }
+    if transition_sha256 != _repository_transition_digest(action_id, content):
+        return False, "external_attestation_transition_digest_mismatch"
+    return True, None
+
+
 def _risk_for_profile(profile: str) -> dict[str, Any]:
     if profile in SNAPSHOT_PROFILE_NAMES or profile == "git_diff_check":
         return {
@@ -244,6 +283,10 @@ def _evidence_key(action_id: str) -> str:
 
 def _approval_key(action_id: str) -> str:
     return f"{ACTION_APPROVAL_PREFIX}{action_id}"
+
+
+def _external_attestation_key(action_id: str) -> str:
+    return f"{ACTION_EXTERNAL_ATTESTATION_PREFIX}{action_id}"
 
 
 def validate_action_manifest(manifest: dict[str, Any]) -> tuple[bool, str | None]:
@@ -421,6 +464,76 @@ def _validate_evidence(evidence: dict[str, Any]) -> tuple[bool, str | None]:
         )
         if not transition_valid:
             return False, transition_reason
+    return True, None
+
+
+def _validate_external_attestation(
+    attestation: dict[str, Any],
+) -> tuple[bool, str | None]:
+    if attestation.get("schema") != ACTION_EXTERNAL_ATTESTATION_SCHEMA:
+        return False, "external_attestation_schema_mismatch"
+    payload = attestation.get("payload")
+    attestation_id = attestation.get("attestation_id")
+    if not isinstance(payload, dict) or not isinstance(attestation_id, str):
+        return False, "external_attestation_incomplete"
+    expected = _canonical_hash(
+        {"schema": ACTION_EXTERNAL_ATTESTATION_SCHEMA, "payload": payload}
+    )
+    if attestation_id != expected:
+        return False, "external_attestation_digest_mismatch"
+    if (
+        payload.get("executor") != EXTERNAL_EXECUTOR
+        or payload.get("attestation_source") != EXTERNAL_ATTESTATION_SOURCE
+        or payload.get("source_authenticated") is not False
+        or payload.get("execution_verified") is not False
+        or payload.get("result_status") not in {"completed", "failed"}
+        or not isinstance(payload.get("returncode"), int)
+        or isinstance(payload.get("returncode"), bool)
+    ):
+        return False, "external_attestation_claim_invalid"
+    if not _is_sha256(payload.get("action_id")) or not _is_sha256(
+        payload.get("parent_receipt_id")
+    ):
+        return False, "external_attestation_binding_incomplete"
+    if (
+        payload["result_status"] == "completed" and payload["returncode"] != 0
+    ) or (
+        payload["result_status"] == "failed" and payload["returncode"] == 0
+    ):
+        return False, "external_attestation_result_inconsistent"
+    if any(
+        not _is_sha256(payload.get(key))
+        for key in (
+            "manifest_record_hash",
+            "manifest_chain_hash",
+            "result_evidence_sha256",
+            "arguments_sha256",
+            "workspace_sha256",
+        )
+    ) or not isinstance(payload.get("manifest_sequence"), int):
+        return False, "external_attestation_binding_incomplete"
+    approval_values = (
+        payload.get("approval_record_id"),
+        payload.get("approval_record_hash"),
+        payload.get("approval_chain_hash"),
+        payload.get("approval_sequence"),
+    )
+    approval_present = tuple(value is not None for value in approval_values)
+    if any(approval_present) and not all(approval_present):
+        return False, "external_attestation_approval_binding_incomplete"
+    if all(approval_present) and (
+        not all(_is_sha256(value) for value in approval_values[:3])
+        or not isinstance(approval_values[3], int)
+    ):
+        return False, "external_attestation_approval_binding_incomplete"
+    transition_valid, transition_reason = (
+        _validate_external_attestation_repository_transition(
+            str(payload.get("action_id") or ""),
+            payload.get("repository_transition"),
+        )
+    )
+    if not transition_valid:
+        return False, transition_reason
     return True, None
 
 
@@ -703,6 +816,141 @@ class ActionManifestLedger:
         asyncio.run(self.repository.save(_approval_key(action_id), approval))
         return approval
 
+    def record_external_attestation(
+        self,
+        action_id: str,
+        *,
+        result_status: str,
+        returncode: int,
+        result_evidence_sha256: str,
+        workspace_root: str,
+    ) -> dict[str, Any]:
+        """Record tamper-evident post-hoc evidence without verifying execution."""
+
+        self._require_writable()
+        if result_status not in {"completed", "failed"}:
+            raise ValueError("external_attestation_status_invalid")
+        if not isinstance(returncode, int) or isinstance(returncode, bool):
+            raise ValueError("external_attestation_returncode_invalid")
+        if (result_status == "completed" and returncode != 0) or (
+            result_status == "failed" and returncode == 0
+        ):
+            raise ValueError("external_attestation_result_inconsistent")
+        if not _is_sha256(result_evidence_sha256):
+            raise ValueError("external_attestation_result_digest_invalid")
+
+        current = self.verify(action_id)
+        if not current.get("manifest_verified"):
+            raise ValueError(f"action_manifest_unverified:{current.get('reason')}")
+        manifest = self._load(_manifest_key(action_id))
+        if manifest is None:
+            raise ValueError("action_manifest_missing")
+        action = manifest["payload"]["action"]
+        if action.get("kind") != "external_tool":
+            raise ValueError("external_attestation_requires_external_action")
+        if current.get("reason") == "pending_human_approval":
+            raise ValueError("external_attestation_requires_approval")
+        if current.get("reason") == "rejected_by_human":
+            raise ValueError("external_attestation_rejected_by_human")
+        if current.get("reason") == "governance_denied":
+            raise ValueError("external_attestation_governance_denied")
+        if manifest["payload"]["risk"].get("requires_human_approval") is True and (
+            current.get("approval", {}).get("decision") != "approved"
+        ):
+            raise ValueError("external_attestation_requires_approval")
+        key = _external_attestation_key(action_id)
+        if self._load(key) is not None:
+            raise ValueError("external_attestation_already_recorded")
+
+        workspace = self._workspace(workspace_root)
+        if _workspace_digest(workspace) != action.get("workspace_sha256"):
+            raise ValueError("external_attestation_workspace_mismatch")
+        try:
+            after_repository_identity = capture_repository_identity(workspace)
+        except RepositoryIdentityError as error:
+            raise ValueError(
+                f"external_attestation_after_identity_capture_failed:{error}"
+            ) from error
+
+        manifest_transition = manifest["payload"].get("repository_transition")
+        if not isinstance(manifest_transition, dict):
+            raise ValueError("external_attestation_repository_transition_unbound")
+        manifest_binding = self._record_binding(_manifest_key(action_id), manifest)
+        approval_binding = current.get("approval", {}).get("binding")
+        approval = self._load(_approval_key(action_id))
+        transition_content: dict[str, Any] = {
+            "schema": REPOSITORY_TRANSITION_SCHEMA,
+            "contract_version": REPOSITORY_TRANSITION_CONTRACT_VERSION,
+            "parent_repository_identity_sha256": manifest_transition[
+                "parent_repository_identity_sha256"
+            ],
+            "before_repository_identity_sha256": manifest_transition[
+                "before_repository_identity"
+            ]["identity_sha256"],
+            "after_repository_identity": after_repository_identity,
+            "after_capture_status": "captured",
+            "after_capture_reason": None,
+            "expected_effect": "unobserved",
+            "observation_scope": "attestation_time_only",
+            "causal_link_verified": False,
+            "execution_window_verified": False,
+        }
+        transition = {
+            **transition_content,
+            "transition_sha256": _repository_transition_digest(
+                action_id,
+                transition_content,
+            ),
+        }
+        payload = {
+            "action_id": action_id,
+            "parent_receipt_id": manifest["payload"]["parent_receipt"]["receipt_id"],
+            "manifest_record_hash": manifest_binding["record_hash"],
+            "manifest_sequence": manifest_binding["sequence"],
+            "manifest_chain_hash": manifest_binding["chain_hash"],
+            "approval_record_hash": (
+                approval_binding.get("record_hash")
+                if isinstance(approval_binding, dict)
+                else None
+            ),
+            "approval_record_id": (
+                approval.get("approval_record_id")
+                if isinstance(approval, dict)
+                else None
+            ),
+            "approval_chain_hash": (
+                approval_binding.get("chain_hash")
+                if isinstance(approval_binding, dict)
+                else None
+            ),
+            "approval_sequence": (
+                approval_binding.get("sequence")
+                if isinstance(approval_binding, dict)
+                else None
+            ),
+            "executor": EXTERNAL_EXECUTOR,
+            "attestation_source": EXTERNAL_ATTESTATION_SOURCE,
+            "source_authenticated": False,
+            "execution_verified": False,
+            "result_status": result_status,
+            "returncode": returncode,
+            "result_evidence_sha256": result_evidence_sha256.lower(),
+            "arguments_sha256": action["arguments_sha256"],
+            "workspace_sha256": action["workspace_sha256"],
+            "repository_transition": transition,
+        }
+        signed: dict[str, Any] = {
+            "schema": ACTION_EXTERNAL_ATTESTATION_SCHEMA,
+            "payload": payload,
+        }
+        attestation_id = _canonical_hash(signed)
+        attestation: dict[str, Any] = {
+            **signed,
+            "attestation_id": attestation_id,
+        }
+        asyncio.run(self.repository.save(key, attestation))
+        return self.verify(action_id)
+
     def verify(self, action_id: str) -> dict[str, Any]:
         if self.read_only and not Path(self.path).expanduser().is_file():
             return self._failure(action_id, "action_manifest_missing")
@@ -855,7 +1103,128 @@ class ActionManifestLedger:
                 return {**result, "reason": "rejected_by_human"}
 
         if payload["action"]["kind"] == "external_tool":
-            return {**result, "reason": "external_execution_unobserved"}
+            attestation = self._load(_external_attestation_key(action_id))
+            if attestation is None:
+                return {**result, "reason": "external_execution_unobserved"}
+            if not isinstance(manifest_transition, dict):
+                return {
+                    **result,
+                    "reason": "external_attestation_repository_transition_unbound",
+                }
+            attestation_valid, attestation_reason = _validate_external_attestation(
+                attestation
+            )
+            if not attestation_valid:
+                return {**result, "reason": attestation_reason}
+            try:
+                attestation_binding = self._record_binding(
+                    _external_attestation_key(action_id),
+                    attestation,
+                )
+            except ValueError as error:
+                return {**result, "reason": str(error)}
+            attestation_payload = attestation["payload"]
+            action = payload["action"]
+            transition = attestation_payload["repository_transition"]
+            approval_binding = result.get("approval", {}).get("binding")
+            approval_record_hash = (
+                approval_binding.get("record_hash")
+                if isinstance(approval_binding, dict)
+                else None
+            )
+            approval_record_id = (
+                approval.get("approval_record_id")
+                if isinstance(approval, dict)
+                else None
+            )
+            approval_chain_hash = (
+                approval_binding.get("chain_hash")
+                if isinstance(approval_binding, dict)
+                else None
+            )
+            approval_sequence = (
+                approval_binding.get("sequence")
+                if isinstance(approval_binding, dict)
+                else None
+            )
+            if (
+                attestation_payload.get("action_id") != action_id
+                or attestation_payload.get("parent_receipt_id")
+                != parent_claim["receipt_id"]
+                or attestation_payload.get("manifest_record_hash")
+                != manifest_binding["record_hash"]
+                or attestation_payload.get("manifest_sequence")
+                != manifest_binding["sequence"]
+                or attestation_payload.get("manifest_chain_hash")
+                != manifest_binding["chain_hash"]
+                or attestation_payload.get("approval_record_hash")
+                != approval_record_hash
+                or attestation_payload.get("approval_record_id")
+                != approval_record_id
+                or attestation_payload.get("approval_chain_hash")
+                != approval_chain_hash
+                or attestation_payload.get("approval_sequence") != approval_sequence
+                or attestation_payload.get("arguments_sha256")
+                != action.get("arguments_sha256")
+                or attestation_payload.get("workspace_sha256")
+                != action.get("workspace_sha256")
+                or transition.get("parent_repository_identity_sha256")
+                != manifest_transition.get("parent_repository_identity_sha256")
+                or transition.get("before_repository_identity_sha256")
+                != manifest_transition.get("before_repository_identity", {}).get(
+                    "identity_sha256"
+                )
+                or attestation_binding["sequence"] <= manifest_binding["sequence"]
+                or (
+                    approval_sequence is not None
+                    and attestation_binding["sequence"] <= approval_sequence
+                )
+            ):
+                return {**result, "reason": "external_attestation_binding_mismatch"}
+            after = transition["after_repository_identity"]
+            before_identity_sha256 = manifest_transition[
+                "before_repository_identity"
+            ]["identity_sha256"]
+            state_changed = after["identity_sha256"] != before_identity_sha256
+            transition_status = (
+                "external_after_state_attested_changed"
+                if state_changed
+                else "external_after_state_attested_preserved"
+            )
+            reason = "external_execution_attested_unverified"
+            return {
+                **result,
+                "reason": reason,
+                "external_attestation": {
+                    "attestation_id": attestation["attestation_id"],
+                    "integrity_verified": True,
+                    "source_authenticated": False,
+                    "execution_verified": False,
+                    "result_status": attestation_payload["result_status"],
+                    "returncode": attestation_payload["returncode"],
+                    "result_evidence_sha256": attestation_payload[
+                        "result_evidence_sha256"
+                    ],
+                    "executor": attestation_payload["executor"],
+                    "binding": attestation_binding,
+                },
+                "repository_transition": {
+                    **repository_transition,
+                    "status": transition_status,
+                    "transition_verified": False,
+                    "attestation_integrity_verified": True,
+                    "after_repository_identity": after,
+                    "after_capture_status": transition["after_capture_status"],
+                    "after_capture_reason": transition["after_capture_reason"],
+                    "transition_sha256": transition["transition_sha256"],
+                    "state_changed": state_changed,
+                    "expected_effect_met": None,
+                    "observation_scope": transition["observation_scope"],
+                    "causal_link_verified": False,
+                    "execution_window_verified": False,
+                    "reason": reason,
+                },
+            }
 
         evidence = self._load(_evidence_key(action_id))
         if evidence is None:
@@ -1004,6 +1373,12 @@ class ActionManifestLedger:
                 "execution_status": item.get("execution", {}).get("status"),
                 "execution_verified": bool(item.get("execution_verified")),
                 "successful": bool(item.get("successful")),
+                "external_attestation_integrity_verified": bool(
+                    item.get("external_attestation", {}).get("integrity_verified")
+                ),
+                "external_attestation_status": item.get(
+                    "external_attestation", {}
+                ).get("result_status"),
                 "repository_transition_status": item.get(
                     "repository_transition", {}
                 ).get("status"),
@@ -1046,6 +1421,12 @@ class ActionManifestLedger:
             "external_unobserved_actions": sum(
                 1 for item in valid if item.get("reason") == "external_execution_unobserved"
             ),
+            "external_attested_actions": sum(
+                1
+                for item in valid
+                if item.get("external_attestation", {}).get("integrity_verified")
+                is True
+            ),
             "repository_transition_bound_actions": sum(
                 1
                 for item in valid
@@ -1069,6 +1450,14 @@ class ActionManifestLedger:
                 if item.get("repository_transition", {}).get("status")
                 == "unexpected_change"
             ),
+            "repository_transition_attested_actions": sum(
+                1
+                for item in valid
+                if item.get("repository_transition", {}).get(
+                    "attestation_integrity_verified"
+                )
+                is True
+            ),
             "repository_transition_unresolved_actions": sum(
                 1
                 for item in valid
@@ -1078,6 +1467,8 @@ class ActionManifestLedger:
                     "awaiting_execution_evidence",
                     "after_capture_failed",
                     "external_execution_unobserved",
+                    "external_after_state_attested_changed",
+                    "external_after_state_attested_preserved",
                 }
             ),
             "actions": actions,
@@ -1278,10 +1669,12 @@ class ActionManifestLedger:
             "failed_actions": 0,
             "pending_human_approval": 0,
             "external_unobserved_actions": 0,
+            "external_attested_actions": 0,
             "repository_transition_bound_actions": 0,
             "repository_transition_verified_actions": 0,
             "repository_transition_preserved_actions": 0,
             "repository_transition_changed_actions": 0,
+            "repository_transition_attested_actions": 0,
             "repository_transition_unresolved_actions": 0,
             "actions": [],
             "global_codex_tool_coverage": None,

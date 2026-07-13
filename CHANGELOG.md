@@ -14,6 +14,9 @@
   independently verifiable before/after worktree transitions in fixed-profile
   execution evidence, failing closed on pre-execution drift or unresolved
   after-state capture.
+- Added post-hoc external result attestations that bind a caller-supplied
+  result digest and attestation-time repository identity to provenance without
+  claiming authenticated or execution-verified external tool coverage.
 
 ## 0.1.1 Runtime Completion
 

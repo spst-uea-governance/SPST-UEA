@@ -9,6 +9,7 @@ import pytest
 from spst_runtime.action_manifest import (
     ACTION_APPROVAL_PREFIX,
     ACTION_EVIDENCE_PREFIX,
+    ACTION_EXTERNAL_ATTESTATION_PREFIX,
     ACTION_MANIFEST_PREFIX,
     ActionManifestLedger,
     validate_action_manifest,
@@ -704,6 +705,230 @@ def test_r2_external_action_is_held_for_hitl_and_never_claimed_as_executed(tmp_p
         key.startswith(ACTION_EVIDENCE_PREFIX)
         for key in ledger.records().keys()
     )
+
+
+def test_approved_r2_external_result_attestation_binds_after_state_without_claiming_execution(
+    tmp_path: Path,
+):
+    repository = _init_repository(tmp_path)
+    turn, session_path = _routed_turn(tmp_path, repository_root=repository)
+    ledger = ActionManifestLedger(str(session_path))
+    manifest = ledger.prepare_external_action(
+        turn["routing_receipt"]["receipt_id"],
+        operation="commit",
+        tool_name="codex.shell_command",
+        arguments_sha256=hashlib.sha256(b"git commit audited changes").hexdigest(),
+        workspace_root=str(repository),
+    )
+    action_id = manifest["action_id"]
+    ledger.record_approval(action_id, approved=True, actor="test-human")
+
+    (repository / "tracked.txt").write_text("after\n", encoding="utf-8")
+    _git(repository, "add", "tracked.txt")
+    _git(repository, "commit", "-qm", "external result")
+    result_digest = hashlib.sha256(b"commit-object-and-output-bundle").hexdigest()
+
+    verification = ledger.record_external_attestation(
+        action_id,
+        result_status="completed",
+        returncode=0,
+        result_evidence_sha256=result_digest,
+        workspace_root=str(repository),
+    )
+
+    assert verification["verified"] is False
+    assert verification["execution_verified"] is False
+    assert verification["successful"] is False
+    assert verification["reason"] == "external_execution_attested_unverified"
+    assert verification["external_attestation"]["integrity_verified"] is True
+    assert verification["external_attestation"]["source_authenticated"] is False
+    assert verification["external_attestation"]["result_status"] == "completed"
+    assert verification["external_attestation"]["result_evidence_sha256"] == result_digest
+    transition = verification["repository_transition"]
+    assert transition["status"] == "external_after_state_attested_changed"
+    assert transition["transition_verified"] is False
+    assert transition["causal_link_verified"] is False
+    assert transition["state_changed"] is True
+    assert transition["after_repository_identity"]["head_revision"] == _git(
+        repository, "rev-parse", "HEAD"
+    )
+
+    summary = ledger.summarize_receipt(turn["routing_receipt"]["receipt_id"])
+    assert summary["external_attested_actions"] == 1
+    assert summary["external_unobserved_actions"] == 0
+    assert summary["execution_verified_actions"] == 0
+    assert summary["successful_actions"] == 0
+    assert summary["repository_transition_attested_actions"] == 1
+    assert summary["repository_transition_unresolved_actions"] == 1
+    assert summary["global_codex_tool_coverage"] is None
+
+
+def test_external_attestation_rejects_missing_hitl_workspace_mismatch_and_duplicate(
+    tmp_path: Path,
+):
+    repository = _init_repository(tmp_path)
+    turn, session_path = _routed_turn(tmp_path, repository_root=repository)
+    ledger = ActionManifestLedger(str(session_path))
+    manifest = ledger.prepare_external_action(
+        turn["routing_receipt"]["receipt_id"],
+        operation="commit",
+        tool_name="codex.shell_command",
+        arguments_sha256="a" * 64,
+        workspace_root=str(repository),
+    )
+    action_id = manifest["action_id"]
+
+    with pytest.raises(ValueError, match="external_attestation_requires_approval"):
+        ledger.record_external_attestation(
+            action_id,
+            result_status="completed",
+            returncode=0,
+            result_evidence_sha256="b" * 64,
+            workspace_root=str(repository),
+        )
+    assert not any(
+        key.startswith(ACTION_EXTERNAL_ATTESTATION_PREFIX)
+        for key in ledger.records()
+    )
+
+    ledger.record_approval(action_id, approved=True, actor="test-human")
+    alternate = _init_repository(tmp_path / "alternate")
+    with pytest.raises(ValueError, match="external_attestation_workspace_mismatch"):
+        ledger.record_external_attestation(
+            action_id,
+            result_status="completed",
+            returncode=0,
+            result_evidence_sha256="b" * 64,
+            workspace_root=str(alternate),
+        )
+
+    ledger.record_external_attestation(
+        action_id,
+        result_status="completed",
+        returncode=0,
+        result_evidence_sha256="b" * 64,
+        workspace_root=str(repository),
+    )
+    with pytest.raises(ValueError, match="external_attestation_already_recorded"):
+        ledger.record_external_attestation(
+            action_id,
+            result_status="completed",
+            returncode=0,
+            result_evidence_sha256="b" * 64,
+            workspace_root=str(repository),
+        )
+
+
+def test_external_attestation_rejects_fixed_action_invalid_result_and_tampering(
+    tmp_path: Path,
+):
+    repository = _init_repository(tmp_path)
+    turn, session_path = _routed_turn(tmp_path, repository_root=repository)
+    ledger = ActionManifestLedger(str(session_path))
+    fixed = ledger.prepare_fixed_profile(
+        turn["routing_receipt"]["receipt_id"],
+        "git_status",
+        repository_root=str(repository),
+    )
+    with pytest.raises(ValueError, match="external_attestation_requires_external_action"):
+        ledger.record_external_attestation(
+            fixed["action_id"],
+            result_status="completed",
+            returncode=0,
+            result_evidence_sha256="c" * 64,
+            workspace_root=str(repository),
+        )
+
+    external = ledger.prepare_external_action(
+        turn["routing_receipt"]["receipt_id"],
+        operation="workspace_edit",
+        tool_name="codex.apply_patch",
+        arguments_sha256="d" * 64,
+        workspace_root=str(repository),
+    )
+    action_id = external["action_id"]
+    with pytest.raises(ValueError, match="external_attestation_result_inconsistent"):
+        ledger.record_external_attestation(
+            action_id,
+            result_status="completed",
+            returncode=1,
+            result_evidence_sha256="e" * 64,
+            workspace_root=str(repository),
+        )
+
+    ledger.record_external_attestation(
+        action_id,
+        result_status="failed",
+        returncode=1,
+        result_evidence_sha256="e" * 64,
+        workspace_root=str(repository),
+    )
+    _tamper_record(
+        session_path,
+        f"{ACTION_EXTERNAL_ATTESTATION_PREFIX}{action_id}",
+        lambda record: record["payload"].__setitem__(
+            "result_evidence_sha256", "f" * 64
+        ),
+    )
+
+    verification = ledger.verify(action_id)
+
+    assert verification["verified"] is False
+    assert verification["execution_verified"] is False
+    assert verification["reason"] in {
+        "state_hash_mismatch",
+        "external_attestation_digest_mismatch",
+    }
+
+
+def test_action_bridge_records_external_attestation_without_execution_claim(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    repository = _init_repository(tmp_path)
+    turn, session_path = _routed_turn(tmp_path, repository_root=repository)
+    ledger = ActionManifestLedger(str(session_path))
+    manifest = ledger.prepare_external_action(
+        turn["routing_receipt"]["receipt_id"],
+        operation="workspace_edit",
+        tool_name="codex.apply_patch",
+        arguments_sha256="1" * 64,
+        workspace_root=str(repository),
+    )
+
+    returncode = action_bridge_main(
+        [
+            "--session-db",
+            str(session_path),
+            "attest-external",
+            "--action-id",
+            manifest["action_id"],
+            "--result-status",
+            "completed",
+            "--returncode",
+            "0",
+            "--result-evidence-sha256",
+            "2" * 64,
+            "--workspace-root",
+            str(repository),
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert returncode == 0
+    assert payload["execution_verified"] is False
+    assert payload["reason"] == "external_execution_attested_unverified"
+    assert payload["external_attestation"]["integrity_verified"] is True
+    assert (
+        payload["repository_transition"]["status"]
+        == "external_after_state_attested_preserved"
+    )
+
+    before = _file_manifest(session_path)
+    read_only = ActionManifestLedger(str(session_path), read_only=True).verify(
+        manifest["action_id"]
+    )
+    assert _file_manifest(session_path) == before
+    assert read_only["external_attestation"]["integrity_verified"] is True
 
 
 def test_tampered_human_approval_cannot_authorize_external_action(tmp_path: Path):

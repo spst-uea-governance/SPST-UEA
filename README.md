@@ -81,7 +81,10 @@ cannot claim an observed after-state.
 
 Only runtime-executed fixed profiles can be marked `execution_verified`.
 External Codex tools remain explicitly unobserved even when their planned
-manifest and human approval are recorded. See
+manifest and human approval are recorded. A post-hoc external result
+attestation can bind a caller-supplied result digest and the repository state
+captured at attestation time to the provenance chain, but it remains
+source-unauthenticated and does not become verified execution. See
 `docs/action-manifest-binding.md` for commands and evidence boundaries.
 
 ## Current Runtime Status

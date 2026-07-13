@@ -69,6 +69,10 @@ Run commands from `runtime/` unless noted otherwise:
   is not a successful action. External tools remain after-state-unobserved.
 - Treat R2 and unresolved external Action Manifests as HITL-pending. An approval
   record does not make an external Codex tool execution observable or verified.
+- A completed external tool may append an `attest-external` result digest and
+  attestation-time repository snapshot only after applicable HITL approval.
+  Treat this as tamper-evident caller attestation: keep execution, source
+  identity, execution window, and causal linkage explicitly unverified.
 - Do not claim that `apply_patch`, arbitrary shell, browser, or connector calls
   were cryptographically execution-bound. The repository cannot intercept
   those Codex App tools; report them as outside verified action coverage and
