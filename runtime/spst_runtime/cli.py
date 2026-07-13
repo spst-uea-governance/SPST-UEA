@@ -22,10 +22,15 @@ def run_loop(steps: int) -> dict:
     }
 
 
-def run_dispatch(event_type: str, prompt: str | None = None, use_gpt: bool = False) -> dict:
+def run_dispatch(
+    event_type: str,
+    prompt: str | None = None,
+    use_gpt: bool = False,
+    extra_payload: dict | None = None,
+) -> dict:
     adapter = OpenAIModelAdapter() if use_gpt else LocalCodexAdapter() if prompt else None
     engine = RuntimeEngine(pipeline=StateTransitionPipeline(model_adapter=adapter))
-    payload = {"prompt": prompt} if prompt else {}
+    payload = {**(extra_payload or {}), **({"prompt": prompt} if prompt else {})}
     state = engine.dispatch(Event(type=event_type, payload=payload))
     return state.metadata
 

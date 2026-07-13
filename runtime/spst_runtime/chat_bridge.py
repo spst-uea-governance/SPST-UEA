@@ -2,6 +2,7 @@ import argparse
 import json
 from pathlib import Path
 
+from spst_runtime.adaptive_profile import RequestedProfile, select_execution_profile
 from spst_runtime.cli import run_dispatch, run_loop
 from spst_runtime.chat_session import ChatSessionStore, record_turn, summarize_session
 from spst_runtime.routing_receipt import ROUTING_RECEIPT_SCHEMA, RoutingReceiptLedger
@@ -12,13 +13,20 @@ def run_chat_turn(
     steps: int = 3,
     event: str = "chat_turn",
     *,
+    profile: RequestedProfile = "auto",
     session_path: str | None = None,
     memory_path: str | None = None,
 ) -> dict:
     """Run one Codex-mediated chat turn through SPST-UEA without an API key."""
 
+    selected_profile = select_execution_profile(prompt, event=event, requested=profile)
+    profile_payload = selected_profile.as_dict()
     loop = run_loop(steps)
-    pipeline = run_dispatch(event, prompt=prompt)
+    pipeline = run_dispatch(
+        event,
+        prompt=prompt,
+        extra_payload={"execution_profile": profile_payload},
+    )
     session = record_turn(
         prompt,
         event,
@@ -26,6 +34,7 @@ def run_chat_turn(
         steps=steps,
         session_path=session_path,
         memory_path=memory_path,
+        execution_profile=profile_payload,
     )
 
     return {
@@ -35,11 +44,13 @@ def run_chat_turn(
             "prompt": prompt,
             "event": event,
             "steps": steps,
+            "execution_profile": profile_payload,
         },
         "runtime": {
             "loop": loop,
             "pipeline": pipeline,
         },
+        "execution_profile": profile_payload,
         "session": {
             "turn_count": session["turn_count"],
             "goals": session["goals"],
@@ -48,6 +59,7 @@ def run_chat_turn(
             "amplification": session["amplification"],
             "memory": session["memory"],
             "latest_audit": session["audit"][-1],
+            "execution_profile": profile_payload,
         },
         "routing_receipt": session["routing_receipt"],
     }
@@ -59,6 +71,8 @@ def _empty_routing_status(turn_count: int) -> dict:
         "total_receipts": 0,
         "verified_receipts": 0,
         "verified_turns": 0,
+        "profile_counts": {},
+        "memory_action_counts": {},
         "failed_receipts": 0,
         "receipt_epoch_start_turn": None,
         "eligible_turns": 0,
@@ -128,6 +142,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--steps", type=int, default=3)
     parser.add_argument("--event", default="chat_turn")
     parser.add_argument(
+        "--profile",
+        choices=("auto", "light", "standard", "strict"),
+        default="auto",
+        help="Select adaptive SPST execution intensity; risk floors cannot be downgraded.",
+    )
+    parser.add_argument(
         "--session-db",
         default=None,
         help="Override the local chat session database path.",
@@ -173,6 +193,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.prompt,
                 args.steps,
                 args.event,
+                profile=args.profile,
                 session_path=args.session_db,
                 memory_path=args.memory_db,
             ),

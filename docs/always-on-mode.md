@@ -34,7 +34,7 @@ A healthy always-on turn includes:
 - intelligence `amplification.amplification_score`
 - long-term `memory.stats.total_records`
 
-Every completed bridge turn also emits a `spst-routing-receipt-v1` document. The
+Every completed bridge turn also emits a versioned routing receipt. The
 receipt binds the prompt digest (never the prompt body), event, mode, provider,
 complete seven-stage trace, governance decision, session turn, memory record,
 and persisted session-state hash. The receipt is stored in the session SQLite
@@ -51,3 +51,8 @@ receipt coverage from the first receipt-enabled turn. Overall Codex-task
 coverage remains `null` because SPST-UEA cannot observe tasks that bypass the
 bridge. `task_quality_delta` also remains `null` until the same task has
 independently verified normal and SPST-routed outcomes.
+
+New turns use `spst-routing-receipt-v2` and bind an adaptive `light`,
+`standard`, or `strict` execution profile. Existing v1 receipts remain
+verifiable. See `docs/adaptive-task-profiles.md` for the risk floors and memory
+lifecycle.

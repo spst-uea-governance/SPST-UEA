@@ -26,6 +26,7 @@ def _run_isolated_turn(tmp_path: Path, prompt: str = "route this task") -> tuple
         prompt,
         steps=1,
         event="receipt_test",
+        profile="standard",
         session_path=str(session_path),
         memory_path=str(tmp_path / "memory.db"),
     )
@@ -37,7 +38,7 @@ def test_routed_turn_emits_persisted_verifiable_receipt(tmp_path: Path):
     result, session_path = _run_isolated_turn(tmp_path, prompt)
     receipt = result["routing_receipt"]
 
-    assert receipt["schema"] == "spst-routing-receipt-v1"
+    assert receipt["schema"] == "spst-routing-receipt-v2"
     assert receipt["payload"]["route"]["prompt_sha256"] == hashlib.sha256(
         prompt.encode("utf-8")
     ).hexdigest()
@@ -53,7 +54,7 @@ def test_routed_turn_emits_persisted_verifiable_receipt(tmp_path: Path):
     ]
     assert receipt["payload"]["governance"]["authorized"] is True
     assert receipt["payload"]["session"]["turn"] == 1
-    assert receipt["payload"]["session"]["memory_record_id"]
+    assert receipt["payload"]["session"]["memory_binding"]["record_id"]
     assert receipt["verification"]["verified"] is True
 
     independent = verify_chat_receipt(receipt["receipt_id"], str(session_path))
@@ -95,7 +96,7 @@ def test_multiple_receipts_for_one_turn_do_not_inflate_coverage(tmp_path: Path):
         pipeline=result["runtime"]["pipeline"],
         session_turn=1,
         session_state_hash=original["payload"]["session"]["state_record_hash"],
-        memory_record_id=original["payload"]["session"]["memory_record_id"],
+        memory_record_id=original["payload"]["session"]["memory_binding"]["record_id"],
     )
     RoutingReceiptLedger(str(session_path)).persist(alternate)
 
@@ -130,7 +131,7 @@ def test_missing_or_tampered_receipt_is_not_verified(tmp_path: Path):
         "reason": "receipt_missing",
     }
 
-    receipt_key = f"routing_receipt:v1:{receipt_id}"
+    receipt_key = f"routing_receipt:v2:{receipt_id}"
     conn = sqlite3.connect(session_path)
     try:
         serialized = conn.execute(
@@ -172,3 +173,27 @@ def test_read_only_repository_rejects_writes(tmp_path: Path):
     reader = SQLiteRepository(str(path), read_only=True)
     with pytest.raises(PermissionError, match="read-only"):
         asyncio.run(reader.save(SESSION_KEY, {"turn_count": 99}))
+
+
+def test_legacy_v1_receipt_remains_verifiable_after_profiled_v2_upgrade(tmp_path: Path):
+    result, session_path = _run_isolated_turn(tmp_path)
+    receipt = result["routing_receipt"]
+
+    assert receipt["schema"] == "spst-routing-receipt-v2"
+
+    legacy = build_routing_receipt(
+        prompt="legacy receipt",
+        event="receipt_test",
+        steps=1,
+        pipeline=result["runtime"]["pipeline"],
+        session_turn=1,
+        session_state_hash=receipt["payload"]["session"]["state_record_hash"],
+        memory_record_id=receipt["payload"]["session"]["memory_binding"]["record_id"],
+    )
+    RoutingReceiptLedger(str(session_path)).persist(legacy)
+
+    verification = RoutingReceiptLedger(str(session_path), read_only=True).verify(
+        legacy["receipt_id"]
+    )
+    assert legacy["schema"] == "spst-routing-receipt-v1"
+    assert verification["verified"] is True

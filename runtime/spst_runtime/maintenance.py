@@ -32,10 +32,12 @@ def clean_generated_files() -> dict:
 
 def run_maintenance(memory_path: str | None = None) -> dict:
     memory = LongTermMemoryStore(memory_path)
+    expiration_result = memory.expire_stale()
     compact_result = memory.compact()
     clean_result = clean_generated_files()
     return {
         "memory_compaction": compact_result,
+        "memory_expiration": expiration_result,
         "generated_cleanup": clean_result,
         "memory_stats": memory.stats(),
     }

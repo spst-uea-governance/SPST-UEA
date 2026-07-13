@@ -7,8 +7,10 @@ from spst_runtime.always_on import CONFIG
 from spst_runtime.persistence.sqlite_repository import SQLiteRepository
 
 
-ROUTING_RECEIPT_SCHEMA = "spst-routing-receipt-v1"
-ROUTING_RECEIPT_PREFIX = "routing_receipt:v1:"
+ROUTING_RECEIPT_SCHEMA_V1 = "spst-routing-receipt-v1"
+ROUTING_RECEIPT_SCHEMA_V2 = "spst-routing-receipt-v2"
+ROUTING_RECEIPT_SCHEMA = ROUTING_RECEIPT_SCHEMA_V2
+ROUTING_RECEIPT_PREFIX = "routing_receipt:v"
 SESSION_STATE_KEY = "codex_chat_session"
 COMPLETE_TRACE = (
     "observe",
@@ -26,8 +28,9 @@ def _canonical_hash(value: dict[str, Any]) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
-def _receipt_key(receipt_id: str) -> str:
-    return f"{ROUTING_RECEIPT_PREFIX}{receipt_id}"
+def _receipt_key(receipt_id: str, schema: str) -> str:
+    version = "v2" if schema == ROUTING_RECEIPT_SCHEMA_V2 else "v1"
+    return f"routing_receipt:{version}:{receipt_id}"
 
 
 def build_routing_receipt(
@@ -82,22 +85,79 @@ def build_routing_receipt(
             "state_record_hash": session_state_hash,
         },
     }
-    signed_content = {"schema": ROUTING_RECEIPT_SCHEMA, "payload": payload}
+    signed_content = {"schema": ROUTING_RECEIPT_SCHEMA_V1, "payload": payload}
     return {
         **signed_content,
         "receipt_id": _canonical_hash(signed_content),
     }
 
 
+def build_profiled_routing_receipt(
+    *,
+    prompt: str,
+    event: str,
+    steps: int,
+    pipeline: dict[str, Any],
+    session_turn: int,
+    session_state_hash: str,
+    execution_profile: dict[str, Any],
+    memory_binding: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind adaptive execution and memory policy without invalidating v1 receipts."""
+    trace = tuple(str(step) for step in pipeline.get("last_trace", []))
+    if trace != COMPLETE_TRACE:
+        raise ValueError("Routing receipts require the complete SPST trace.")
+    governance = pipeline.get("governance", {})
+    if not isinstance(governance, dict) or governance.get("authorized") is not True:
+        raise ValueError("Routing receipts require an authorized governance decision.")
+    model_inference = pipeline.get("model_inference", {})
+    model_provider = model_inference.get("provider") if isinstance(model_inference, dict) else None
+    if model_provider != CONFIG.provider:
+        raise ValueError("Routing receipts require the configured Codex-mediated provider.")
+
+    payload = {
+        "route": {
+            "event": event,
+            "mode": CONFIG.mode,
+            "provider": CONFIG.provider,
+            "requires_api_key": CONFIG.requires_api_key,
+            "steps": steps,
+            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            "execution_profile": execution_profile,
+        },
+        "pipeline": {
+            "trace": list(trace),
+            "version": pipeline.get("version"),
+            "model_provider": model_provider,
+            "evidence_id": pipeline.get("evidence", {}).get("id"),
+            "reflection_approved": pipeline.get("reflection", {}).get("approved"),
+        },
+        "governance": {
+            "authorized": True,
+            "approval_id": governance.get("approval_id"),
+            "requires_human_approval": governance.get("requires_human_approval", False),
+            "trust_level": governance.get("trust_level"),
+        },
+        "session": {
+            "turn": session_turn,
+            "memory_binding": memory_binding,
+            "state_record_hash": session_state_hash,
+        },
+    }
+    signed_content = {"schema": ROUTING_RECEIPT_SCHEMA_V2, "payload": payload}
+    return {**signed_content, "receipt_id": _canonical_hash(signed_content)}
+
+
 def validate_routing_receipt(receipt: dict[str, Any]) -> tuple[bool, str | None]:
     """Validate the self-binding fields before checking persisted provenance."""
-    if receipt.get("schema") != ROUTING_RECEIPT_SCHEMA:
+    schema = receipt.get("schema")
+    if schema not in {ROUTING_RECEIPT_SCHEMA_V1, ROUTING_RECEIPT_SCHEMA_V2}:
         return False, "receipt_schema_mismatch"
     payload = receipt.get("payload")
     receipt_id = receipt.get("receipt_id")
     if not isinstance(payload, dict) or not isinstance(receipt_id, str):
         return False, "receipt_incomplete"
-    expected = _canonical_hash({"schema": ROUTING_RECEIPT_SCHEMA, "payload": payload})
+    expected = _canonical_hash({"schema": schema, "payload": payload})
     if receipt_id != expected:
         return False, "receipt_digest_mismatch"
 
@@ -120,8 +180,23 @@ def validate_routing_receipt(receipt: dict[str, Any]) -> tuple[bool, str | None]
         return False, "governance_not_authorized"
     if not isinstance(session.get("turn"), int) or int(session["turn"]) < 1:
         return False, "session_turn_invalid"
-    if not session.get("memory_record_id"):
-        return False, "memory_binding_missing"
+    if schema == ROUTING_RECEIPT_SCHEMA_V1:
+        if not session.get("memory_record_id"):
+            return False, "memory_binding_missing"
+    else:
+        profile = route.get("execution_profile", {})
+        memory_binding = session.get("memory_binding", {})
+        if profile.get("name") not in {"light", "standard", "strict"}:
+            return False, "execution_profile_invalid"
+        binding_status = memory_binding.get("status")
+        if binding_status == "skipped_by_light_profile":
+            if profile.get("name") != "light" or memory_binding.get("record_id") is not None:
+                return False, "light_memory_binding_invalid"
+        elif binding_status == "persisted_and_policy_filtered":
+            if not memory_binding.get("record_id"):
+                return False, "memory_binding_missing"
+        else:
+            return False, "memory_binding_status_invalid"
     state_hash = session.get("state_record_hash")
     if not isinstance(state_hash, str) or len(state_hash) != 64:
         return False, "session_state_binding_missing"
@@ -138,15 +213,22 @@ class RoutingReceiptLedger:
         valid, reason = validate_routing_receipt(receipt)
         if not valid:
             raise ValueError(f"Cannot persist invalid routing receipt: {reason}")
-        key = _receipt_key(str(receipt["receipt_id"]))
+        key = _receipt_key(str(receipt["receipt_id"]), str(receipt["schema"]))
         existing = asyncio.run(self.repository.load(key))
         if existing is not None:
             raise ValueError("Routing receipt already exists and cannot be rewritten.")
         asyncio.run(self.repository.save(key, receipt))
 
     def verify(self, receipt_id: str) -> dict[str, Any]:
-        key = _receipt_key(receipt_id)
-        receipt = asyncio.run(self.repository.load(key))
+        receipt = None
+        key = ""
+        for schema in (ROUTING_RECEIPT_SCHEMA_V2, ROUTING_RECEIPT_SCHEMA_V1):
+            candidate_key = _receipt_key(receipt_id, schema)
+            candidate = asyncio.run(self.repository.load(candidate_key))
+            if candidate is not None:
+                key = candidate_key
+                receipt = candidate
+                break
         if receipt is None:
             return {"verified": False, "receipt_id": receipt_id, "reason": "receipt_missing"}
 
@@ -200,6 +282,7 @@ class RoutingReceiptLedger:
         return {
             "verified": True,
             "receipt_id": receipt_id,
+            "schema": receipt["schema"],
             "route": receipt["payload"]["route"],
             "session": receipt["payload"]["session"],
             "provenance": provenance,
@@ -221,6 +304,21 @@ class RoutingReceiptLedger:
             for result in verification
             if result.get("verified") and isinstance(result.get("session", {}).get("turn"), int)
         }
+        profile_counts: dict[str, int] = {}
+        memory_action_counts: dict[str, int] = {}
+        for result in verification:
+            if not result.get("verified"):
+                continue
+            profile_name = (
+                result.get("route", {}).get("execution_profile", {}).get("name")
+                or "legacy_unprofiled"
+            )
+            memory_action = (
+                result.get("session", {}).get("memory_binding", {}).get("status")
+                or "legacy_persisted"
+            )
+            profile_counts[profile_name] = profile_counts.get(profile_name, 0) + 1
+            memory_action_counts[memory_action] = memory_action_counts.get(memory_action, 0) + 1
         turns = [
             int(receipt["payload"]["session"]["turn"])
             for receipt in receipts
@@ -236,6 +334,8 @@ class RoutingReceiptLedger:
             "total_receipts": len(receipts),
             "verified_receipts": verified,
             "verified_turns": len(verified_turns),
+            "profile_counts": profile_counts,
+            "memory_action_counts": memory_action_counts,
             "failed_receipts": len(receipts) - verified,
             "receipt_epoch_start_turn": start_turn,
             "eligible_turns": eligible_turns,

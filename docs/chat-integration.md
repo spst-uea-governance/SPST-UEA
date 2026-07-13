@@ -33,6 +33,15 @@ The status `receipt_coverage` measures verified routing only from the first
 receipt-enabled turn. It must not be presented as the percentage of all Codex
 tasks because tasks outside the bridge have no observable denominator.
 
+The default profile is adaptive:
+
+```powershell
+python -m spst_runtime.chat_bridge "<prompt>" --profile auto
+```
+
+Use an explicit profile for reproducible experiments. A requested lower
+profile never overrides the deterministic risk or continuity floor.
+
 ## Boundary
 
 This does not give the local runtime direct access to the Codex chat model. Instead, Codex receives the chat message, invokes SPST-UEA locally, and reports the result back in the same conversation.

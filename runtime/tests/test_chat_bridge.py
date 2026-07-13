@@ -7,6 +7,7 @@ def test_run_chat_turn_uses_no_key_mode(tmp_path: Path):
     result = run_chat_turn(
         "hello",
         steps=1,
+        profile="standard",
         session_path=str(tmp_path / "chat.db"),
         memory_path=str(tmp_path / "memory.db"),
     )

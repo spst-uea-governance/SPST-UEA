@@ -7,9 +7,12 @@ from spst_runtime.always_on import CONFIG
 from spst_runtime.engines.governance_engine import GovernanceEngine
 from spst_runtime.evaluation.metrics import EvaluationResult
 from spst_runtime.intelligence_amplifier import IntelligenceAmplifier
-from spst_runtime.memory.long_term_memory import LongTermMemoryStore
+from spst_runtime.memory.long_term_memory import (
+    CURRENT_MEMORY_POLICY_VERSION,
+    LongTermMemoryStore,
+)
 from spst_runtime.persistence.sqlite_repository import SQLiteRepository
-from spst_runtime.routing_receipt import RoutingReceiptLedger, build_routing_receipt
+from spst_runtime.routing_receipt import RoutingReceiptLedger, build_profiled_routing_receipt
 
 
 SESSION_KEY = "codex_chat_session"
@@ -54,7 +57,9 @@ def evaluate_session(state: dict[str, Any]) -> dict[str, Any]:
     recent_audit = state.get("audit", [])[-10:]
     authorized_ratio = 1.0
     if recent_audit:
-        authorized_ratio = sum(1 for item in recent_audit if item.get("authorized")) / len(recent_audit)
+        authorized_ratio = sum(1 for item in recent_audit if item.get("authorized")) / len(
+            recent_audit
+        )
 
     result = EvaluationResult(
         identity_continuity=1.0 if state.get("mode") == CONFIG.mode else 0.0,
@@ -77,6 +82,7 @@ def summarize_session(state: dict[str, Any]) -> dict[str, Any]:
         "audit_count": len(audit),
         "memory_count": state.get("memory", {}).get("stats", {}).get("total_records", 0),
         "last_prompt": prompts[-1] if prompts else None,
+        "execution_profile": state.get("execution_profile", {}).get("name"),
         "next_actions": [
             "preserve_no_key_codex_mediated_boundary",
             "continue_recording_governance_audit",
@@ -94,6 +100,7 @@ def record_turn(
     steps: int = 3,
     session_path: str | None = None,
     memory_path: str | None = None,
+    execution_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     store = ChatSessionStore(session_path)
     state = store.load()
@@ -106,24 +113,77 @@ def record_turn(
     authorized = governance.authorize(action)
 
     state["turn_count"] = int(state.get("turn_count", 0)) + 1
-    memory_store = LongTermMemoryStore(memory_path)
-    memory_record = memory_store.remember(
-        prompt,
-        kind="episodic",
-        tags=["chat_turn", event, CONFIG.mode],
-        salience=0.9 if any(token in prompt for token in ("記憶", "完全", "常時", "設計", "実装")) else 0.6,
-        created_turn=state["turn_count"],
-        metadata={"event": event, "trace": pipeline.get("last_trace", [])},
-    )
-    retrieved = memory_store.search(prompt, limit=5)
-    state["memory"] = {
-        "stats": memory_store.stats(),
-        "retrieved": retrieved,
-        "latest_record_id": memory_record.id,
-        "consolidation": memory_store.consolidate(),
+    profile = execution_profile or {
+        "name": "standard",
+        "memory_mode": "filtered_long_term",
+        "governance_mode": "standard",
+        "memory_ttl_seconds": 30 * 24 * 60 * 60,
+        "minimum_memory_confidence": 0.5,
+        "reasons": ["compatibility_default"],
     }
+    if profile.get("memory_mode") == "session_only":
+        previous_memory = state.get("memory", {})
+        state["memory"] = {
+            "stats": previous_memory.get(
+                "stats", {"total_records": 0, "by_kind": {}, "latest_turn": 0}
+            ),
+            "retrieved": [],
+            "latest_record_id": None,
+            "consolidation": previous_memory.get("consolidation", {}),
+            "turn_policy": {
+                "action": "skipped_by_light_profile",
+                "policy_version": CURRENT_MEMORY_POLICY_VERSION,
+            },
+        }
+        memory_binding = {
+            "status": "skipped_by_light_profile",
+            "record_id": None,
+            "policy_version": CURRENT_MEMORY_POLICY_VERSION,
+        }
+    else:
+        memory_store = LongTermMemoryStore(memory_path)
+        memory_record = memory_store.remember(
+            prompt,
+            kind="episodic",
+            tags=["chat_turn", event, CONFIG.mode, str(profile.get("name"))],
+            salience=0.9 if profile.get("name") == "strict" else 0.6,
+            created_turn=state["turn_count"],
+            confidence=0.8 if profile.get("name") == "strict" else 0.65,
+            policy_version=CURRENT_MEMORY_POLICY_VERSION,
+            ttl_seconds=profile.get("memory_ttl_seconds"),
+            metadata={
+                "event": event,
+                "trace": pipeline.get("last_trace", []),
+                "execution_profile": profile.get("name"),
+            },
+        )
+        retrieved = memory_store.search(
+            prompt,
+            limit=5,
+            min_confidence=float(profile.get("minimum_memory_confidence", 0.5)),
+            policy_version=CURRENT_MEMORY_POLICY_VERSION,
+        )
+        state["memory"] = {
+            "stats": memory_store.stats(),
+            "retrieved": retrieved,
+            "latest_record_id": memory_record.id,
+            "consolidation": memory_store.consolidate(),
+            "turn_policy": {
+                "action": "persisted_and_policy_filtered",
+                "policy_version": CURRENT_MEMORY_POLICY_VERSION,
+                "minimum_confidence": profile.get("minimum_memory_confidence"),
+                "ttl_seconds": profile.get("memory_ttl_seconds"),
+            },
+        }
+        memory_binding = {
+            "status": "persisted_and_policy_filtered",
+            "record_id": memory_record.id,
+            "policy_version": CURRENT_MEMORY_POLICY_VERSION,
+        }
+
     state["mode"] = CONFIG.mode
     state["provider"] = CONFIG.provider
+    state["execution_profile"] = profile
     state.setdefault("prompts", []).append(prompt)
     state["prompts"] = state["prompts"][-20:]
     state.setdefault("audit", []).append(
@@ -133,6 +193,8 @@ def record_turn(
             "authorized": authorized,
             "trace": pipeline.get("last_trace", []),
             "version": pipeline.get("version"),
+            "execution_profile": profile.get("name"),
+            "memory_action": memory_binding["status"],
         }
     )
     state["audit"] = state["audit"][-50:]
@@ -140,14 +202,15 @@ def record_turn(
     state["evaluation"] = evaluate_session(state)
     state["summary"] = summarize_session(state)
     store.save(state)
-    receipt = build_routing_receipt(
+    receipt = build_profiled_routing_receipt(
         prompt=prompt,
         event=event,
         steps=steps,
         pipeline=pipeline,
         session_turn=state["turn_count"],
         session_state_hash=SQLiteRepository.record_hash(state),
-        memory_record_id=memory_record.id,
+        execution_profile=profile,
+        memory_binding=memory_binding,
     )
     RoutingReceiptLedger(store.path).persist(receipt)
     receipt["verification"] = RoutingReceiptLedger(store.path, read_only=True).verify(

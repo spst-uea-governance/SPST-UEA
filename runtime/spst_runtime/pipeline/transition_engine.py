@@ -55,7 +55,10 @@ class TransitionEngine:
 
     def _observe(self, state: Any, event: Any) -> None:
         state.metadata["last_event_type"] = getattr(event, "type", None)
-        state.metadata["last_event_payload"] = deepcopy(getattr(event, "payload", {}) or {})
+        payload = deepcopy(getattr(event, "payload", {}) or {})
+        state.metadata["last_event_payload"] = payload
+        if payload.get("execution_profile"):
+            state.metadata["execution_profile"] = deepcopy(payload["execution_profile"])
 
     def _retrieve(self, state: Any, event: Any) -> None:
         state.metadata.setdefault("retrieved_context", [])
