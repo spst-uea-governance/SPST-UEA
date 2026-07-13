@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Added receipt-bound Action Manifests with derived risk, append-only HITL
+  decisions, fixed-profile execution evidence, provenance verification, and
+  explicit exclusion of unobserved external Codex tools.
+
 ## 0.1.1 Runtime Completion
 
 - Added lifecycle, scheduler, checkpoint, recovery, migration, SDK, and benchmark support.

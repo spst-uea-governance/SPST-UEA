@@ -56,3 +56,10 @@ New turns use `spst-routing-receipt-v2` and bind an adaptive `light`,
 `standard`, or `strict` execution profile. Existing v1 receipts remain
 verifiable. See `docs/adaptive-task-profiles.md` for the risk floors and memory
 lifecycle.
+
+Supported post-route local verification commands can be attached as immutable
+Action Manifests and compact execution evidence with
+`spst_runtime.action_bridge`. Receipt verification lists those child actions.
+This does not create visibility into Codex tools that bypass the bridge;
+`global_codex_tool_coverage` therefore remains `null`. See
+`docs/action-manifest-binding.md`.

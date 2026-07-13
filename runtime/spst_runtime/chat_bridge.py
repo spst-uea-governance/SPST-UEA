@@ -131,7 +131,14 @@ def verify_chat_receipt(receipt_id: str, session_path: str | None = None) -> dic
     store = ChatSessionStore(session_path, read_only=True)
     if not Path(store.path).expanduser().is_file():
         return {"verified": False, "receipt_id": receipt_id, "reason": "receipt_missing"}
-    return RoutingReceiptLedger(store.path, read_only=True).verify(receipt_id)
+    verification = RoutingReceiptLedger(store.path, read_only=True).verify(receipt_id)
+    if verification.get("verified"):
+        from spst_runtime.action_manifest import ActionManifestLedger
+
+        verification["actions"] = ActionManifestLedger(
+            store.path, read_only=True
+        ).summarize_receipt(receipt_id)
+    return verification
 
 
 def main(argv: list[str] | None = None) -> int:

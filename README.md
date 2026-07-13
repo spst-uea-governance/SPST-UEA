@@ -55,6 +55,23 @@ commands.
 
 Before changing behavior, read `AGENTS.md`, `docs/spst-uea-covenant.md`, and `docs/codex-handoff.md`. Implementation work should preserve module boundaries, keep providers behind adapters, and avoid bypassing governance for convenience.
 
+For a standalone Codex instruction set that connects software-engineering
+autonomy to adaptive `light` / `standard` / `strict` routing, verified receipts,
+and memory lifecycle boundaries, use
+`docs/codex-autonomous-engineering-master-prompt-spst.md`.
+
+## Receipt-Bound Actions
+
+`spst_runtime.action_bridge` binds supported fixed local actions to a verified
+routing receipt through an immutable Action Manifest, derived risk decision,
+optional HITL record, compact execution evidence, and the SQLite HMAC
+provenance chain. Receipt verification can then list its child actions.
+
+Only runtime-executed fixed profiles can be marked `execution_verified`.
+External Codex tools remain explicitly unobserved even when their planned
+manifest and human approval are recorded. See
+`docs/action-manifest-binding.md` for commands and evidence boundaries.
+
 ## Current Runtime Status
 
 The runtime can be executed locally from `runtime/`:

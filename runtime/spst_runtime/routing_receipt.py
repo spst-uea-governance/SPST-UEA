@@ -288,6 +288,7 @@ class RoutingReceiptLedger:
             "provenance": provenance,
             "binding": {
                 "receipt_sequence": receipt_entry["sequence"],
+                "receipt_record_hash": receipt_entry["record_hash"],
                 "receipt_chain_hash": receipt_entry["chain_hash"],
                 "session_sequence": session_bindings[-1]["sequence"],
             },
