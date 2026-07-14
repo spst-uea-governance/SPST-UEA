@@ -1,33 +1,17 @@
 import argparse
 import json
-import shutil
-from pathlib import Path
 
 from spst_runtime.memory.long_term_memory import LongTermMemoryStore
 
 
-RUNTIME_DIR = Path(__file__).resolve().parents[1]
-PROJECT_DIR = RUNTIME_DIR.parent
-
-
 def clean_generated_files() -> dict:
-    removed_files = 0
-    removed_dirs = 0
-    for path in PROJECT_DIR.rglob("*"):
-        if not path.exists():
-            continue
-        if path.is_file() and (path.suffix == ".pyc" or ".pytest_cache" in path.parts):
-            path.unlink()
-            removed_files += 1
-    for directory in sorted(PROJECT_DIR.rglob("__pycache__"), key=lambda item: len(item.parts), reverse=True):
-        if directory.exists():
-            shutil.rmtree(directory)
-            removed_dirs += 1
-    pytest_cache = RUNTIME_DIR / ".pytest_cache"
-    if pytest_cache.exists():
-        shutil.rmtree(pytest_cache)
-        removed_dirs += 1
-    return {"removed_files": removed_files, "removed_dirs": removed_dirs}
+    """Refuse to treat repository caches or source files as runtime-owned data."""
+    return {
+        "status": "skipped",
+        "reason": "repository_source_cleanup_disabled",
+        "removed_files": 0,
+        "removed_dirs": 0,
+    }
 
 
 def run_maintenance(memory_path: str | None = None) -> dict:

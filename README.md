@@ -15,6 +15,14 @@ modification of model weights or official benchmark truth.
 
 The normative constitutional charter is `docs/spst-uea-covenant.md`.
 
+## Project Maturity
+
+This repository is an **experimental reference implementation**. It has no
+tagged stable release and is not a production security certification. Runtime
+receipts, tests, and provenance records demonstrate bounded implementation
+properties; they do not demonstrate model-weight changes, general GPT quality
+improvement, causal superiority, or complete coverage of external Codex tools.
+
 ## Quick Start
 
 ```bash
@@ -36,12 +44,17 @@ python -m mypy spst_runtime
 
 `Runtime CI / test` creates a protected SQLite sentinel outside the checkout,
 records its SHA-256, checks import isolation, runs the Full suite, and verifies
-that the hash did not change. It also rejects any `spst_cockpit.db`, provenance
-key, or SQLite sidecar created in `runtime/`. Keep this existing job name as a
-required pull-request status check so a guard failure blocks merge.
+that the hash did not change. The suite records branch coverage and rejects a
+result below the measured 80% floor. It also rejects any `spst_cockpit.db`,
+provenance key, or SQLite sidecar created in `runtime/`. Keep this existing job
+name as a required pull-request status check so a guard failure blocks merge.
 
 See `docs/live-db-hash-guard.md` for the profile contract and local reproduction
 commands.
+
+The workflow file is Repository evidence, not proof that a hosted branch rule
+currently requires the check. Hosted enforcement must be verified separately
+against the GitHub ruleset and a real failing pull request.
 
 ## Repository Map
 

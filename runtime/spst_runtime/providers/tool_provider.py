@@ -17,9 +17,7 @@ class ToolProvider(ToolAdapter):
     workspace_root: str | None = None
 
     def __post_init__(self) -> None:
-        self.dynamic_dir = Path(__file__).resolve().parents[1] / "tools" / "dynamic"
-        self.dynamic_dir.mkdir(parents=True, exist_ok=True)
-        self._dynamic_tools: dict[str, Path] = {}
+        self._dynamic_tools: dict[str, str] = {}
         self._workspace_root = Path(self.workspace_root or Path.cwd()).resolve()
 
     def run(self, tool: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -64,17 +62,19 @@ class ToolProvider(ToolAdapter):
 
     def generate_dynamic_tool(self, task: str, prompt: str) -> dict[str, Any]:
         safe_name = self._safe_tool_name(task)
-        tool_path = self.dynamic_dir / f"{safe_name}.py"
         source = self._render_dynamic_tool_source(safe_name)
-        tool_path.write_text(source, encoding="utf-8")
         validation = self._validate_dynamic_tool_source(source)
         if validation["ok"]:
-            self._dynamic_tools[safe_name] = tool_path
+            self._dynamic_tools[safe_name] = source
         return {
             "tool": "generate_dynamic_tool",
             "tool_name": safe_name,
             "status": "mounted" if validation["ok"] else "rejected",
-            "path": str(tool_path),
+            "path": None,
+            "artifact": {
+                "storage": "in_memory",
+                "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+            },
             "validation": validation,
             "prompt_fingerprint": self._fingerprint(prompt),
             "sandbox": self.sandbox_name,

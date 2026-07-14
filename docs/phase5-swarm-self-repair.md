@@ -21,3 +21,9 @@ envelope, requests governance authorization, runs diagnosis and repair actions,
 and normalizes the reflection state before commit.
 
 No external API key or networked tool execution is required.
+
+Generated verifier source is validated and retained only in the owning
+`ToolProvider` process with a SHA-256 artifact digest. It is not written into
+the installed package or Repository source tree. Runtime maintenance likewise
+does not scan or delete Repository caches, bytecode, or user files; it is
+limited to the configured memory lifecycle.

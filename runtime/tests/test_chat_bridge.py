@@ -19,6 +19,8 @@ def test_run_chat_turn_uses_no_key_mode(tmp_path: Path):
     assert result["session"]["summary"]["status"] == "stable"
     assert result["session"]["amplification"]["amplification_score"] > 0
     assert result["session"]["memory"]["stats"]["total_records"] >= 1
+    assert result["session"]["memory"]["retrieval_health"]["eligible_records"] >= 1
+    assert result["session"]["summary"]["memory_quarantined_count"] == 0
     assert result["routing_receipt"]["verification"]["verified"] is True
 
 

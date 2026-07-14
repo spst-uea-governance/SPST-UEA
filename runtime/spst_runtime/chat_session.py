@@ -40,6 +40,13 @@ class ChatSessionStore:
                 "stats": {"total_records": 0, "by_kind": {}, "latest_turn": 0},
                 "retrieved": [],
                 "latest_record_id": None,
+                "retrieval_health": {
+                    "policy_version": CURRENT_MEMORY_POLICY_VERSION,
+                    "eligible_records": 0,
+                    "ineligible_records": 0,
+                    "quarantined_records": 0,
+                    "reason_counts": {},
+                },
             },
         }
 
@@ -75,12 +82,16 @@ def summarize_session(state: dict[str, Any]) -> dict[str, Any]:
     prompts = state.get("prompts", [])
     audit = state.get("audit", [])
     evaluation = state.get("evaluation", evaluate_session(state))
+    memory = state.get("memory", {})
+    retrieval_health = memory.get("retrieval_health", {})
     return {
         "status": "stable" if evaluation.get("esi", 0.0) >= 0.95 else "watch",
         "turn_count": state.get("turn_count", 0),
         "recent_prompt_count": len(prompts[-5:]),
         "audit_count": len(audit),
-        "memory_count": state.get("memory", {}).get("stats", {}).get("total_records", 0),
+        "memory_count": memory.get("stats", {}).get("total_records", 0),
+        "memory_eligible_count": retrieval_health.get("eligible_records", 0),
+        "memory_quarantined_count": retrieval_health.get("quarantined_records", 0),
         "last_prompt": prompts[-1] if prompts else None,
         "execution_profile": state.get("execution_profile", {}).get("name"),
         "next_actions": [
@@ -131,6 +142,7 @@ def record_turn(
             "retrieved": [],
             "latest_record_id": None,
             "consolidation": previous_memory.get("consolidation", {}),
+            "retrieval_health": previous_memory.get("retrieval_health", {}),
             "turn_policy": {
                 "action": "skipped_by_light_profile",
                 "policy_version": CURRENT_MEMORY_POLICY_VERSION,
@@ -164,11 +176,19 @@ def record_turn(
             min_confidence=float(profile.get("minimum_memory_confidence", 0.5)),
             policy_version=CURRENT_MEMORY_POLICY_VERSION,
         )
+        retrieval_health = memory_store.retrieval_health(
+            min_confidence=float(profile.get("minimum_memory_confidence", 0.5)),
+            policy_version=CURRENT_MEMORY_POLICY_VERSION,
+        )
         state["memory"] = {
             "stats": memory_store.stats(),
             "retrieved": retrieved,
             "latest_record_id": memory_record.id,
-            "consolidation": memory_store.consolidate(),
+            "consolidation": memory_store.consolidate(
+                min_confidence=float(profile.get("minimum_memory_confidence", 0.5)),
+                policy_version=CURRENT_MEMORY_POLICY_VERSION,
+            ),
+            "retrieval_health": retrieval_health,
             "turn_policy": {
                 "action": "persisted_and_policy_filtered",
                 "policy_version": CURRENT_MEMORY_POLICY_VERSION,

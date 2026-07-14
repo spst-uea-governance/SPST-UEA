@@ -4,8 +4,9 @@ build-backend="setuptools.build_meta"
 
 [project]
 name="spst-runtime"
-version="0.1.0"
+version="0.1.1"
 description="Reference runtime for SPST-UEA"
+license={text="Apache-2.0"}
 requires-python=">=3.11"
 dependencies=[
   "pydantic>=2",
@@ -16,6 +17,7 @@ dependencies=[
 dev=[
   "pytest>=8",
   "pytest-asyncio>=0.23",
+  "coverage[toml]>=7.6",
   "ruff>=0.6",
   "mypy>=1.10"
 ]
@@ -31,6 +33,7 @@ include=["spst_runtime*"]
 
 [tool.pytest.ini_options]
 testpaths=["tests"]
+addopts=["--strict-config", "--strict-markers"]
 markers=[
   "conformance: marks tests for SPST-UEA RFC normative conformance"
 ]
@@ -40,3 +43,14 @@ line-length=100
 
 [tool.mypy]
 python_version="3.11"
+check_untyped_defs=true
+warn_unused_configs=true
+
+[tool.coverage.run]
+branch=true
+source=["spst_runtime"]
+
+[tool.coverage.report]
+fail_under=80
+show_missing=true
+skip_covered=true

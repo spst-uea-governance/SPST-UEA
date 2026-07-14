@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from spst_runtime import __version__
 from spst_runtime.events.event import Event
 from spst_runtime.orchestrator.runtime_orchestrator import RuntimeOrchestrator
 
@@ -26,7 +27,7 @@ def run_benchmark(dispatches: int = 10) -> dict[str, Any]:
         elapsed = time.perf_counter() - started
     return {
         "specification_version": "RFC-0003/RFC-0005",
-        "runtime_version": "0.1.0",
+        "runtime_version": __version__,
         "results": {
             "dispatches": dispatches,
             "elapsed_seconds": round(elapsed, 6),

@@ -63,12 +63,18 @@ class LongTermMemoryStore:
     ) -> MemoryRecord:
         if not 0.0 <= confidence <= 1.0:
             raise ValueError("Memory confidence must be between 0.0 and 1.0.")
+        self._validate_policy_version(policy_version)
         if ttl_seconds is not None and ttl_seconds <= 0:
             raise ValueError("Memory TTL must be positive when provided.")
         reference_time = self._utc(now)
         resolved_expiry = expires_at
         if ttl_seconds is not None:
             resolved_expiry = (reference_time + timedelta(seconds=ttl_seconds)).isoformat()
+        if resolved_expiry is not None:
+            try:
+                self._parse_datetime(resolved_expiry)
+            except ValueError as error:
+                raise ValueError("Memory expires_at must be an ISO-8601 datetime.") from error
         with self.repository.locked():
             normalized = self._normalize_text(text)
             fingerprint = self._fingerprint(normalized, kind, source)
@@ -127,6 +133,11 @@ class LongTermMemoryStore:
         min_confidence: float = 0.5,
         policy_version: str | None = CURRENT_MEMORY_POLICY_VERSION,
     ) -> list[dict[str, Any]]:
+        self._validate_retrieval_controls(
+            min_confidence=min_confidence,
+            policy_version=policy_version,
+            limit=limit,
+        )
         query_terms = self._terms(query)
         scored = []
         reference_time = self._utc(now)
@@ -139,8 +150,7 @@ class LongTermMemoryStore:
             )
             if not eligible:
                 continue
-            policy_factor = 0.75 if policy_status == "legacy_unversioned" else 1.0
-            score = self._score(query_terms, record) * record.confidence * policy_factor
+            score = self._score(query_terms, record) * record.confidence
             if score > 0:
                 payload = record.as_dict()
                 payload["score"] = score
@@ -172,11 +182,16 @@ class LongTermMemoryStore:
 
     def list_active(self, *, now: datetime | None = None) -> list[MemoryRecord]:
         reference_time = self._utc(now)
-        return [
-            record
-            for record in self.list_all()
-            if record.status == ACTIVE_MEMORY_STATUS and not self._is_expired(record, reference_time)
-        ]
+        records = []
+        for record in self.list_all():
+            if record.status != ACTIVE_MEMORY_STATUS:
+                continue
+            try:
+                if not self._is_expired(record, reference_time):
+                    records.append(record)
+            except ValueError:
+                continue
+        return records
 
     def retire(
         self,
@@ -207,11 +222,24 @@ class LongTermMemoryStore:
     def expire_stale(self, *, now: datetime | None = None) -> dict[str, Any]:
         reference_time = self._utc(now)
         retired_ids = []
+        invalid_expiry_ids = []
         for record in self.list_all():
-            if record.status == ACTIVE_MEMORY_STATUS and self._is_expired(record, reference_time):
+            if record.status != ACTIVE_MEMORY_STATUS:
+                continue
+            try:
+                expired = self._is_expired(record, reference_time)
+            except ValueError:
+                invalid_expiry_ids.append(record.id)
+                continue
+            if expired:
                 self.retire(record.id, reason="retention_expired")
                 retired_ids.append(record.id)
-        return {"retired_ids": retired_ids, "retired_count": len(retired_ids)}
+        return {
+            "retired_ids": retired_ids,
+            "retired_count": len(retired_ids),
+            "invalid_expiry_ids": invalid_expiry_ids,
+            "invalid_expiry_count": len(invalid_expiry_ids),
+        }
 
     def compact(self) -> dict[str, Any]:
         records = self.list_all()
@@ -252,22 +280,113 @@ class LongTermMemoryStore:
             "removed_duplicate_ids": retired_ids,
         }
 
-    def consolidate(self) -> dict[str, Any]:
-        records = self.list_active()
-        durable_tags = sorted({tag for record in records for tag in record.tags})
-        high_salience = [record.as_dict() for record in records if record.salience >= 0.8]
+    def retrieval_health(
+        self,
+        *,
+        now: datetime | None = None,
+        min_confidence: float = 0.5,
+        policy_version: str | None = CURRENT_MEMORY_POLICY_VERSION,
+    ) -> dict[str, Any]:
+        """Report why stored records are eligible or quarantined from retrieval."""
+        self._validate_retrieval_controls(
+            min_confidence=min_confidence,
+            policy_version=policy_version,
+        )
+        reference_time = self._utc(now)
+        reason_counts: dict[str, int] = {}
+        eligible_records = 0
+        quarantined_records = 0
+        for record in self.list_all():
+            eligible, reason = self._retrieval_eligibility(
+                record,
+                now=reference_time,
+                min_confidence=min_confidence,
+                policy_version=policy_version,
+            )
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+            if eligible:
+                eligible_records += 1
+            elif reason in {"policy_version_missing", "policy_mismatch"}:
+                quarantined_records += 1
+        total_records = sum(reason_counts.values())
+        return {
+            "policy_version": policy_version,
+            "minimum_confidence": min_confidence,
+            "total_records": total_records,
+            "eligible_records": eligible_records,
+            "ineligible_records": total_records - eligible_records,
+            "quarantined_records": quarantined_records,
+            "reason_counts": dict(sorted(reason_counts.items())),
+        }
+
+    def consolidate(
+        self,
+        *,
+        now: datetime | None = None,
+        min_confidence: float = 0.5,
+        policy_version: str | None = CURRENT_MEMORY_POLICY_VERSION,
+    ) -> dict[str, Any]:
+        self._validate_retrieval_controls(
+            min_confidence=min_confidence,
+            policy_version=policy_version,
+        )
+        reference_time = self._utc(now)
+        records = self.list_active(now=reference_time)
+        eligible_records = [
+            record
+            for record in records
+            if self._retrieval_eligibility(
+                record,
+                now=reference_time,
+                min_confidence=min_confidence,
+                policy_version=policy_version,
+            )[0]
+        ]
+        durable_tags = sorted({tag for record in eligible_records for tag in record.tags})
+        high_salience = [
+            record.as_dict() for record in eligible_records if record.salience >= 0.8
+        ]
         return {
             "total_records": len(records),
+            "eligible_records": len(eligible_records),
+            "ineligible_active_records": len(records) - len(eligible_records),
             "durable_tags": durable_tags,
             "high_salience_count": len(high_salience),
             "high_salience": high_salience[-10:],
+            "retrieval_health": self.retrieval_health(
+                now=reference_time,
+                min_confidence=min_confidence,
+                policy_version=policy_version,
+            ),
         }
 
-    def crystallize_rules(self, *, limit: int = 5) -> list[dict[str, Any]]:
+    def crystallize_rules(
+        self,
+        *,
+        limit: int = 5,
+        now: datetime | None = None,
+        min_confidence: float = 0.5,
+        policy_version: str | None = CURRENT_MEMORY_POLICY_VERSION,
+    ) -> list[dict[str, Any]]:
+        self._validate_retrieval_controls(
+            min_confidence=min_confidence,
+            policy_version=policy_version,
+            limit=limit,
+        )
+        if limit == 0:
+            return []
+        reference_time = self._utc(now)
         records = [
             record
-            for record in self.list_active()
-            if record.kind != "rule_crystal" and record.salience >= 0.8
+            for record in self.list_all()
+            if record.kind != "rule_crystal"
+            and record.salience >= 0.8
+            and self._retrieval_eligibility(
+                record,
+                now=reference_time,
+                min_confidence=min_confidence,
+                policy_version=policy_version,
+            )[0]
         ]
         crystals = []
         for record in records[-limit:]:
@@ -424,17 +543,41 @@ class LongTermMemoryStore:
     ) -> tuple[bool, str]:
         if record.status != ACTIVE_MEMORY_STATUS:
             return False, "retired"
-        if self._is_expired(record, now):
+        try:
+            expired = self._is_expired(record, now)
+        except ValueError:
+            return False, "invalid_expiry"
+        if expired:
             return False, "expired"
+        if not isinstance(record.confidence, (int, float)) or not 0.0 <= record.confidence <= 1.0:
+            return False, "invalid_confidence"
         if record.confidence < min_confidence:
             return False, "below_confidence_floor"
         if policy_version is None:
             return True, "not_required"
         if record.policy_version is None:
-            return True, "legacy_unversioned"
+            return False, "policy_version_missing"
         if record.policy_version != policy_version:
             return False, "policy_mismatch"
         return True, "current"
+
+    def _validate_retrieval_controls(
+        self,
+        *,
+        min_confidence: float,
+        policy_version: str | None,
+        limit: int | None = None,
+    ) -> None:
+        if not 0.0 <= min_confidence <= 1.0:
+            raise ValueError("Memory confidence threshold must be between 0.0 and 1.0.")
+        self._validate_policy_version(policy_version)
+        if limit is not None and limit < 0:
+            raise ValueError("Memory retrieval limit cannot be negative.")
+
+    @staticmethod
+    def _validate_policy_version(policy_version: str | None) -> None:
+        if policy_version is not None and not policy_version.strip():
+            raise ValueError("Memory policy version cannot be empty.")
 
     def _is_expired(self, record: MemoryRecord, now: datetime) -> bool:
         if not record.expires_at:
