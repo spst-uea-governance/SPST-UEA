@@ -73,6 +73,13 @@ autonomy to adaptive `light` / `standard` / `strict` routing, verified receipts,
 and memory lifecycle boundaries, use
 `docs/codex-autonomous-engineering-master-prompt-spst.md`.
 
+The repository-scoped `$aether-refine-code` skill under
+`.agents/skills/aether-refine-code/` applies AETHER's aesthetic,
+reverse-entropy, and context-distillation ideas as a bounded refinement layer.
+It preserves the current task scope and behavior, and sends durable lessons
+through SPST RuleCrystal governance instead of creating a parallel
+`AETHER_MEMORY.md` store.
+
 ## Receipt-Bound Actions
 
 `spst_runtime.action_bridge` binds supported fixed local actions to a verified

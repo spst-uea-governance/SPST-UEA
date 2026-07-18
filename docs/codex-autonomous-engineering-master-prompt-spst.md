@@ -149,6 +149,19 @@ Memoryのsource/confidenceは記録されたattestationであり、sourceの真�
 - 依頼と無関係なrefactor、早すぎる抽象化、新規依存を避ける。
 - 既存interface、責務、命名、依存方向、error modelを尊重する。
 
+### AETHER Code Refinement
+
+Repository内の`$aether-refine-code` Skillが明示指定された場合、またはcleanup、
+単純化、保守性改善、重複排除、refactorの依頼に一致する場合は、AETHERの審美皮質、
+逆エントロピー、記憶蒸留をこのWorkflowの下位レイヤーとして適用してください。
+
+- 深いnestはreview signalとして扱い、数値目標だけのために正しいCodeを変更しない。
+- Boy Scout cleanupは許可済みの変更面内、挙動不変、検証可能な場合だけ含める。
+- 短さと美しさをsemantic correctness、型安全、監査可能性より優先しない。
+- `AETHER_MEMORY.md`を自動作成・追記しない。反復利用価値のある検証済み教訓だけを、
+  source、confidence、policy、expiry、Receiptを保持したRuleCrystal候補として扱う。
+- 意味的同値性を確認できないcleanupは実装せず、別候補として報告する。
+
 ### 検証
 
 - 変更に近いtestから始め、影響範囲に応じてfull suite、lint、type check、buildへ

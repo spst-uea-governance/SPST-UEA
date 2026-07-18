@@ -15,6 +15,9 @@ These instructions apply to the entire repository.
 - Treat `docs/codex-handoff.md` as the primary implementation guide.
 - Treat `docs/codex-autonomous-engineering-master-prompt-spst.md` as the
   adaptive task-execution contract for Codex-mediated work.
+- Treat `.agents/skills/aether-refine-code/` as the repository-scoped AETHER
+  refinement workflow for explicit cleanup, simplification, maintainability,
+  and refactoring tasks.
 - Read `docs/phase7-sovereign-governance-os.md` before changing federation,
   provenance, security, HITL, or MCP behavior.
 - Preserve RFC and architecture boundaries when changing runtime behavior.
@@ -43,6 +46,11 @@ Run commands from `runtime/` unless noted otherwise:
   intrinsically modified, and keep implementations legible enough to audit.
 - Preserve Honesty First: distinguish verified evidence, local inference, and
   aspirational roadmap language.
+- Apply AETHER cleanup only inside the authorized change surface and only when
+  behavior preservation is testable. Its four-level nesting rule is a review
+  signal, not permission for unrelated rewrites. Never create or append
+  `AETHER_MEMORY.md`; distill durable lessons through the governed RuleCrystal
+  path with source, confidence, policy, expiry, and Receipt attribution.
 - For SPST-UEA-related user requests, run
   `python -m spst_runtime.chat_bridge "<sanitized-contract>" --profile auto --repository-root ..`
   from `runtime/` before answering when execution is useful. Let deterministic
