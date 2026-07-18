@@ -77,6 +77,11 @@ Run local maintenance:
 python -m spst_runtime.maintenance
 ```
 
+Maintenance expires and compacts records in the configured memory database.
+It does not delete Repository caches, bytecode, source files, or ignored user
+artifacts. Dynamic verifier source is held in memory rather than written into
+the package tree.
+
 In this thread, requests addressed to SPST-UEA can be routed through that bridge by Codex.
 
 After `python -m pip install -e ".[dev]"`, the console script is also available:

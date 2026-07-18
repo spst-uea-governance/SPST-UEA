@@ -12,12 +12,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
+      CODEX_CLI_VERSION: "0.144.5"
       SPST_PROVENANCE_KEY: ci-live-db-hash-guard-public-test-key
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install pinned Codex CLI for discovery probe
+        shell: bash
+        run: >-
+          npm install
+          --prefix "$RUNNER_TEMP/codex-skill-discovery-cli"
+          --ignore-scripts
+          --no-audit
+          --no-fund
+          "@openai/codex@${CODEX_CLI_VERSION}"
+      - name: Verify fresh Codex process discovers repository skill
+        shell: bash
+        run: >-
+          python runtime/scripts/codex_skill_discovery_probe.py
+          --codex "$RUNNER_TEMP/codex-skill-discovery-cli/node_modules/.bin/codex"
+          --repository-root .
+          --isolation-root "$RUNNER_TEMP/codex-skill-discovery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          --payload-output "$RUNNER_TEMP/codex-skill-discovery-prompt-input.json"
+          --expected-cli-version "$CODEX_CLI_VERSION"
       - name: Configure isolated Live DB guard paths
         shell: bash
         run: |
@@ -38,12 +60,16 @@ jobs:
         run: |
           python -c "import spst_runtime.web"
           python scripts/live_db_hash_guard.py verify --manifest "$LIVE_DB_GUARD_MANIFEST"
-      - name: Run full runtime suite
+      - name: Run full runtime suite with branch coverage
         working-directory: runtime
-        run: python -m pytest -q
+        run: python -m coverage run -m pytest -q
       - name: Verify Live DB guard after full suite
+        if: always()
         working-directory: runtime
         run: python scripts/live_db_hash_guard.py verify --manifest "$LIVE_DB_GUARD_MANIFEST"
+      - name: Enforce branch coverage floor
+        working-directory: runtime
+        run: python -m coverage report
       - name: Run Ruff
         working-directory: runtime
         run: ruff check .

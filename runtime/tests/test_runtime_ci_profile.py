@@ -11,8 +11,10 @@ def test_runtime_ci_keeps_live_db_guard_around_import_and_full_suite():
         "Prepare Live DB hash guard",
         "Verify import isolation",
         "python -c \"import spst_runtime.web\"",
-        "python -m pytest -q",
+        "python -m coverage run -m pytest -q",
         "Verify Live DB guard after full suite",
+        "if: always()",
+        "python -m coverage report",
         "python -m mypy spst_runtime",
         "git diff --check",
     )
@@ -22,10 +24,13 @@ def test_runtime_ci_keeps_live_db_guard_around_import_and_full_suite():
         "Verify import isolation"
     )
     assert workflow.index("Verify import isolation") < workflow.index(
-        "python -m pytest -q"
+        "python -m coverage run -m pytest -q"
     )
-    assert workflow.index("python -m pytest -q") < workflow.index(
+    assert workflow.index("python -m coverage run -m pytest -q") < workflow.index(
         "Verify Live DB guard after full suite"
+    )
+    assert workflow.index("Verify Live DB guard after full suite") < workflow.index(
+        "python -m coverage report"
     )
 
 

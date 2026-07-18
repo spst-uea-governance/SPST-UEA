@@ -15,6 +15,14 @@ modification of model weights or official benchmark truth.
 
 The normative constitutional charter is `docs/spst-uea-covenant.md`.
 
+## Project Maturity
+
+This repository is an **experimental reference implementation**. It has no
+tagged stable release and is not a production security certification. Runtime
+receipts, tests, and provenance records demonstrate bounded implementation
+properties; they do not demonstrate model-weight changes, general GPT quality
+improvement, causal superiority, or complete coverage of external Codex tools.
+
 ## Quick Start
 
 ```bash
@@ -36,12 +44,17 @@ python -m mypy spst_runtime
 
 `Runtime CI / test` creates a protected SQLite sentinel outside the checkout,
 records its SHA-256, checks import isolation, runs the Full suite, and verifies
-that the hash did not change. It also rejects any `spst_cockpit.db`, provenance
-key, or SQLite sidecar created in `runtime/`. Keep this existing job name as a
-required pull-request status check so a guard failure blocks merge.
+that the hash did not change. The suite records branch coverage and rejects a
+result below the measured 80% floor. It also rejects any `spst_cockpit.db`,
+provenance key, or SQLite sidecar created in `runtime/`. Keep this existing job
+name as a required pull-request status check so a guard failure blocks merge.
 
 See `docs/live-db-hash-guard.md` for the profile contract and local reproduction
 commands.
+
+The workflow file is Repository evidence, not proof that a hosted branch rule
+currently requires the check. Hosted enforcement must be verified separately
+against the GitHub ruleset and a real failing pull request.
 
 ## Repository Map
 
@@ -54,6 +67,45 @@ commands.
 ## Codex Notes
 
 Before changing behavior, read `AGENTS.md`, `docs/spst-uea-covenant.md`, and `docs/codex-handoff.md`. Implementation work should preserve module boundaries, keep providers behind adapters, and avoid bypassing governance for convenience.
+
+For a standalone Codex instruction set that connects software-engineering
+autonomy to adaptive `light` / `standard` / `strict` routing, verified receipts,
+and memory lifecycle boundaries, use
+`docs/codex-autonomous-engineering-master-prompt-spst.md`.
+
+The repository-scoped `$aether-refine-code` skill under
+`.agents/skills/aether-refine-code/` applies AETHER's aesthetic,
+reverse-entropy, and context-distillation ideas as a bounded refinement layer.
+It preserves the current task scope and behavior, and sends durable lessons
+through SPST RuleCrystal governance instead of creating a parallel
+`AETHER_MEMORY.md` store.
+
+## Receipt-Bound Actions
+
+`spst_runtime.action_bridge` binds supported fixed local actions to a verified
+routing receipt through an immutable Action Manifest, derived risk decision,
+optional HITL record, compact execution evidence, and the SQLite HMAC
+provenance chain. Receipt verification can then list its child actions.
+Each fixed profile owns its repository-relative execution root; callers select
+the repository boundary, not an arbitrary command working directory.
+
+Repository tasks should route with `chat_bridge --repository-root <git-top-level>`.
+The resulting v3 Routing Receipt includes a path-free identity for the exact
+HEAD, index, tracked files, and non-ignored untracked files. Read-only receipt
+verification separates an intact historical binding from a live
+`current_match`; this is byte-level Git state and not semantic equivalence.
+New fixed-profile Action Manifests carry that identity forward as a verified
+before/after repository transition. Unexpected worktree mutation is retained
+as evidence but rejected as a successful action; external Codex tools still
+cannot claim an observed after-state.
+
+Only runtime-executed fixed profiles can be marked `execution_verified`.
+External Codex tools remain explicitly unobserved even when their planned
+manifest and human approval are recorded. A post-hoc external result
+attestation can bind a caller-supplied result digest and the repository state
+captured at attestation time to the provenance chain, but it remains
+source-unauthenticated and does not become verified execution. See
+`docs/action-manifest-binding.md` for commands and evidence boundaries.
 
 ## Current Runtime Status
 

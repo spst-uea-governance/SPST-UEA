@@ -1,0 +1,4 @@
+interface:
+  display_name: "AETHER Code Refinement"
+  short_description: "Refine code safely within SPST evidence boundaries"
+  default_prompt: "Use $aether-refine-code to improve this code while preserving behavior, scope, and SPST evidence boundaries."

@@ -34,6 +34,8 @@ The documentation is organized around a strict separation between:
 | `versioning.md` | Documentation and specification version policy |
 | `faq.md` | Frequently asked questions |
 | `codex-handoff.md` | Guidance for implementation agents such as Codex |
+| `codex-autonomous-engineering-master-prompt-spst.md` | Adaptive Codex engineering prompt with SPST routing, receipt, and memory rules |
+| `action-manifest-binding.md` | Receipt-bound action risk, HITL, fixed execution evidence, and coverage boundaries |
 | `phase8-capability-maximization.md` | Provider-neutral capability maximization layer |
 | `phase10-verified-local-evidence.md` | Governed local verification runner and reproducible evidence gate |
 | `phase11-reproducible-capability-evaluation.md` | Paired local capability evaluation and calibration evidence |

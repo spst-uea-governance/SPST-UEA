@@ -52,6 +52,8 @@ The persistent system is defined by the continuity of its managed state and reco
 19. `traceability.md`
 20. `versioning.md`
 21. `codex-handoff.md`
+22. `codex-autonomous-engineering-master-prompt-spst.md`
+23. `action-manifest-binding.md`
 
 ## Project Layers
 

@@ -25,13 +25,40 @@ class SQLiteRepository(PersistenceRepository):
     _path_locks: dict[str, RLock] = {}
     _initialized_paths: set[str] = set()
 
-    def __init__(self, path: str = "spst.db", *, use_legacy_default_key: bool = False):
+    def __init__(
+        self,
+        path: str = "spst.db",
+        *,
+        use_legacy_default_key: bool = False,
+        read_only: bool = False,
+    ):
         self.path = path
-        self._provenance_secret, self._provenance_key_source = self._load_provenance_secret(
-            use_legacy_default_key=use_legacy_default_key
-        )
+        self.read_only = read_only
+        if read_only:
+            self._provenance_secret, self._provenance_key_source = (
+                self._load_existing_provenance_secret()
+            )
+        else:
+            self._provenance_secret, self._provenance_key_source = self._load_provenance_secret(
+                use_legacy_default_key=use_legacy_default_key
+            )
 
     def connect(self) -> sqlite3.Connection:
+        if self.read_only:
+            if self.path == ":memory:":
+                raise ValueError("Read-only repositories require a filesystem database.")
+            database_path = Path(self.path).expanduser().resolve()
+            if not database_path.is_file():
+                raise FileNotFoundError(database_path)
+            conn = sqlite3.connect(
+                f"{database_path.as_uri()}?mode=ro&immutable=1",
+                timeout=30,
+                check_same_thread=False,
+                uri=True,
+            )
+            conn.execute("PRAGMA query_only=ON;")
+            conn.execute("PRAGMA busy_timeout=30000;")
+            return conn
         self._initialize()
         conn = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
         conn.execute("PRAGMA busy_timeout=30000;")
@@ -44,14 +71,18 @@ class SQLiteRepository(PersistenceRepository):
         conn = self.connect()
         try:
             yield conn
-            conn.commit()
+            if not self.read_only:
+                conn.commit()
         except Exception:
-            conn.rollback()
+            if not self.read_only:
+                conn.rollback()
             raise
         finally:
             conn.close()
 
     async def save(self, key: str, value: dict[str, Any]) -> None:
+        if self.read_only:
+            raise PermissionError("Cannot save through a read-only SQLiteRepository.")
         serialized = json.dumps(value, sort_keys=True)
         for attempt in range(6):
             try:
@@ -87,6 +118,15 @@ class SQLiteRepository(PersistenceRepository):
         if row is None:
             return None
         return json.loads(row[0])
+
+    async def load_prefix(self, prefix: str) -> dict[str, dict[str, Any]]:
+        """Load all state records matching a prefix without changing their order or content."""
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT key, value FROM state_store WHERE key LIKE ? ORDER BY key ASC",
+                (f"{prefix}%",),
+            ).fetchall()
+        return {str(key): json.loads(value) for key, value in rows}
 
     @contextmanager
     def locked(self) -> Iterator[None]:
@@ -155,6 +195,13 @@ class SQLiteRepository(PersistenceRepository):
                 FROM state_provenance ORDER BY sequence ASC
                 """
             ).fetchall()
+            if entries and not self._provenance_secret:
+                return {
+                    "valid": False,
+                    "entries": len(entries),
+                    "reason": "provenance_key_unavailable",
+                    "key_source": self._provenance_key_source,
+                }
             previous_hash = ""
             latest_hashes: dict[str, str] = {}
             for _, record_key, record_hash, stored_previous, chain_hash, signature in entries:
@@ -191,6 +238,32 @@ class SQLiteRepository(PersistenceRepository):
             "latest_hash": previous_hash,
             "key_source": self._provenance_key_source,
         }
+
+    def provenance_entries(self) -> list[dict[str, Any]]:
+        """Return provenance bindings for verification and receipt attestation."""
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT sequence, record_key, record_hash, previous_hash, chain_hash, signature
+                FROM state_provenance ORDER BY sequence ASC
+                """
+            ).fetchall()
+        return [
+            {
+                "sequence": int(sequence),
+                "record_key": str(record_key),
+                "record_hash": str(record_hash),
+                "previous_hash": str(previous_hash),
+                "chain_hash": str(chain_hash),
+                "signature": str(signature),
+            }
+            for sequence, record_key, record_hash, previous_hash, chain_hash, signature in rows
+        ]
+
+    @classmethod
+    def record_hash(cls, value: dict[str, Any]) -> str:
+        """Return the canonical hash used to bind a structured state record."""
+        return cls._record_hash(json.dumps(value, sort_keys=True))
 
     def rotate_provenance_key(
         self,
@@ -288,6 +361,29 @@ class SQLiteRepository(PersistenceRepository):
             self._write_key_file(local_key_file, secrets.token_hex(32))
             return self._read_key_file(local_key_file), "local_key_file"
 
+    def _load_existing_provenance_secret(self) -> tuple[bytes, str]:
+        """Load existing verification material without creating files or directories."""
+        environment_secret = os.getenv(PROVENANCE_KEY_ENV)
+        if environment_secret:
+            return environment_secret.encode("utf-8"), "environment"
+
+        configured_key_file = os.getenv(PROVENANCE_KEY_FILE_ENV)
+        if configured_key_file:
+            path = Path(configured_key_file)
+            if not path.is_file():
+                return b"", "configured_key_file_missing"
+            return self._read_key_file(path), "key_file"
+
+        if self.path == ":memory:":
+            return b"", "unavailable"
+
+        local_key_file = self._default_key_file()
+        if local_key_file.is_file():
+            return self._read_key_file(local_key_file), "local_key_file"
+        if self._database_has_provenance():
+            return LEGACY_DEFAULT_PROVENANCE_KEY.encode("utf-8"), "legacy_default"
+        return b"", "unavailable"
+
     def _default_key_file(self) -> Path:
         return Path(f"{self.path}.provenance_key").expanduser().resolve()
 
@@ -295,7 +391,13 @@ class SQLiteRepository(PersistenceRepository):
         path = Path(self.path).expanduser()
         if not path.exists():
             return False
-        conn = sqlite3.connect(str(path), timeout=30, check_same_thread=False)
+        resolved = path.resolve()
+        conn = sqlite3.connect(
+            f"{resolved.as_uri()}?mode=ro&immutable=1",
+            timeout=30,
+            check_same_thread=False,
+            uri=True,
+        )
         try:
             table = conn.execute(
                 """

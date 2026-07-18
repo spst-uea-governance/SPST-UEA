@@ -52,6 +52,8 @@ class GovernanceEngine:
 
         if action.get("type") == "local_verification":
             return self._decide_local_verification(action, covenant)
+        if action.get("type") == "bound_tool_action":
+            return self._decide_bound_tool_action(action, covenant)
         if action.get("type") == "capability_evaluation":
             return self._decide_capability_evaluation(action, covenant)
         if action.get("type") == "operational_corpus_registration":
@@ -253,6 +255,109 @@ class GovernanceEngine:
             True,
             False,
             ["verification_profile_authorized"],
+            action=action,
+            covenant=covenant,
+        )
+
+    def _decide_bound_tool_action(
+        self,
+        action: dict[str, Any],
+        covenant: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = action.get("payload", {}) or {}
+        if action.get("source") != "action_manifest_ledger":
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["action_manifest_source_required"],
+                action=action,
+                covenant=covenant,
+            )
+        if (
+            payload.get("manifest_schema") != "spst-action-manifest-v1"
+            or not payload.get("parent_receipt_verified")
+            or not action.get("provenance_verified")
+        ):
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["verified_parent_receipt_required"],
+                action=action,
+                covenant=covenant,
+            )
+
+        risk_level = payload.get("risk_level")
+        if risk_level == "R0":
+            if not payload.get("read_only") or not payload.get("analysis_only"):
+                return self._decision(
+                    "Low",
+                    False,
+                    False,
+                    ["r0_action_must_be_read_only"],
+                    action=action,
+                    covenant=covenant,
+                )
+            return self._decision(
+                "High",
+                True,
+                False,
+                ["bound_r0_action_authorized"],
+                action=action,
+                covenant=covenant,
+            )
+        if risk_level == "R1":
+            if not payload.get("local_only") or not payload.get("reversible"):
+                return self._decision(
+                    "Low",
+                    False,
+                    False,
+                    ["r1_action_must_be_local_reversible"],
+                    action=action,
+                    covenant=covenant,
+                )
+            return self._decision(
+                "High",
+                True,
+                False,
+                ["bound_r1_action_authorized"],
+                action=action,
+                covenant=covenant,
+            )
+        if risk_level == "R2":
+            if not payload.get("human_approved"):
+                return self._decision(
+                    "Low",
+                    False,
+                    True,
+                    self._dedupe(
+                        ["bound_r2_action_requires_human_approval", *covenant["reasons"]]
+                    ),
+                    action=action,
+                    covenant={
+                        **covenant,
+                        "authorized": False,
+                        "requires_human_approval": True,
+                    },
+                )
+            return self._decision(
+                "Medium",
+                True,
+                False,
+                ["bound_r2_action_human_approved"],
+                action=action,
+                covenant={
+                    **covenant,
+                    "authorized": True,
+                    "requires_human_approval": False,
+                },
+            )
+        return self._decision(
+            "Low",
+            False,
+            True,
+            ["action_risk_unresolved"],
             action=action,
             covenant=covenant,
         )

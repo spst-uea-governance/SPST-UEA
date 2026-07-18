@@ -1,0 +1,2 @@
+# Preserve imported AETHER source evidence byte-for-byte across platforms.
+/.agents/skills/aether-refine-code/references/original-system-prompt.md -text

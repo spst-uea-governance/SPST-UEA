@@ -1,5 +1,6 @@
 import asyncio
 from copy import deepcopy
+from functools import partial
 from typing import Any
 
 from spst_runtime.bus.event_bus import EventBus
@@ -65,7 +66,7 @@ class RuntimeOrchestrator:
         self.goal_manager = GoalManager(repository=self.repository)
         self.goal_engine = GoalEngine()
         self.autopoiesis_engine = AutopoiesisEngine()
-        self.maintenance_service = maintenance_service or run_maintenance
+        self.maintenance_service = maintenance_service or partial(run_maintenance, db_path)
         transition_engine = TransitionEngine(
             goal_engine=self.goal_engine,
             goal_manager=self.goal_manager,
