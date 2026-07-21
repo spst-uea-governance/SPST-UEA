@@ -7,6 +7,11 @@ from spst_runtime.adaptive_profile import RequestedProfile, select_execution_pro
 from spst_runtime.cli import run_dispatch, run_loop
 from spst_runtime.chat_session import ChatSessionStore, record_turn, summarize_session
 from spst_runtime.context_mediation import ContextBudget, ContextMediator
+from spst_runtime.evidence_context import (
+    EvidenceContextError,
+    EvidenceContextVerifier,
+    reject_unverifiable_artifact_origins,
+)
 from spst_runtime.memory.long_term_memory import LongTermMemoryStore
 from spst_runtime.repository_identity import capture_repository_identity
 from spst_runtime.routing_receipt import (
@@ -89,6 +94,30 @@ def preview_context(
             repository_identity=identity,
             origin_index=origin_index,
         )
+
+    if repository_root is None or identity is None:
+        origin_index = reject_unverifiable_artifact_origins(
+            origin_index,
+            candidates,
+            reason="artifact_repository_root_missing",
+        )
+    else:
+        try:
+            artifact_verifier = EvidenceContextVerifier(
+                repository_root=repository_root,
+                session_path=resolved_session_path,
+                repository_identity=identity,
+            )
+            origin_index = artifact_verifier.augment_origin_index(
+                origin_index,
+                candidates,
+            )
+        except EvidenceContextError:
+            origin_index = reject_unverifiable_artifact_origins(
+                origin_index,
+                candidates,
+                reason="artifact_verifier_unavailable",
+            )
 
     return mediator.build(
         query,

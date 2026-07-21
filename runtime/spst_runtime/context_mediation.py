@@ -352,6 +352,14 @@ class ContextMediator:
             return "origin_index_missing", None
         bindings = origin_index.get("bindings", {}).get(record.get("id"))
         if not isinstance(bindings, list) or not bindings:
+            artifact_rejections = origin_index.get("artifact_rejections", {})
+            artifact_reason = (
+                artifact_rejections.get(record.get("id"))
+                if isinstance(artifact_rejections, dict)
+                else None
+            )
+            if isinstance(artifact_reason, str) and artifact_reason:
+                return artifact_reason, None
             return "origin_receipt_missing", None
 
         failures: set[str] = set()
@@ -417,24 +425,70 @@ class ContextMediator:
                 continue
 
             repository = candidate.get("repository")
-            if repository_identity is not None:
-                if not isinstance(repository, dict) or repository.get("bound") is not True:
-                    failures.add("origin_repository_unbound")
+            binding_type = candidate.get("binding_type", "routing_memory")
+            artifact: dict[str, Any] = {}
+            source_binding: dict[str, Any] = {}
+            if binding_type == "evidence_context_artifact":
+                artifact_value = candidate.get("artifact")
+                source_value = candidate.get("source_binding")
+                if not isinstance(artifact_value, dict) or not self._is_sha256(
+                    artifact_value.get("artifact_sha256")
+                ):
+                    failures.add("artifact_origin_binding_invalid")
                     continue
-                if repository.get("binding_verified") is not True:
-                    failures.add("origin_repository_binding_unverified")
+                if artifact_value.get("semantic_claim") != (
+                    "asserted_not_independently_established"
+                ):
+                    failures.add("artifact_semantic_claim_invalid")
                     continue
-                if repository.get("current_match") is not True:
-                    failures.add("origin_repository_identity_mismatch")
+                if not isinstance(source_value, dict) or source_value.get("verified") is not True:
+                    failures.add("artifact_source_binding_unverified")
+                    continue
+                if source_value.get("current_match") is not True:
+                    failures.add(
+                        str(source_value.get("reason") or "artifact_source_binding_stale")
+                    )
+                    continue
+                if repository_identity is None:
+                    failures.add("artifact_repository_identity_missing")
                     continue
                 if (
-                    repository.get("current_identity_sha256")
+                    source_value.get("current_repository_identity_sha256")
                     != repository_identity.get("identity_sha256")
                 ):
-                    failures.add("origin_repository_comparison_mismatch")
+                    failures.add("artifact_source_repository_comparison_mismatch")
                     continue
+                if not isinstance(repository, dict) or repository.get("bound") is not True:
+                    failures.add("artifact_producer_repository_unbound")
+                    continue
+                if repository.get("binding_verified") is not True:
+                    failures.add("artifact_producer_repository_unverified")
+                    continue
+                artifact = artifact_value
+                source_binding = source_value
+            elif binding_type == "routing_memory":
+                if repository_identity is not None:
+                    if not isinstance(repository, dict) or repository.get("bound") is not True:
+                        failures.add("origin_repository_unbound")
+                        continue
+                    if repository.get("binding_verified") is not True:
+                        failures.add("origin_repository_binding_unverified")
+                        continue
+                    if repository.get("current_match") is not True:
+                        failures.add("origin_repository_identity_mismatch")
+                        continue
+                    if (
+                        repository.get("current_identity_sha256")
+                        != repository_identity.get("identity_sha256")
+                    ):
+                        failures.add("origin_repository_comparison_mismatch")
+                        continue
+            else:
+                failures.add("origin_binding_type_unsupported")
+                continue
 
             selected = {
+                "binding_type": binding_type,
                 "receipt_verified": True,
                 "receipt_id": candidate["receipt_id"],
                 "receipt_schema": candidate["receipt_schema"],
@@ -469,9 +523,46 @@ class ContextMediator:
                     ),
                 ),
             }
+            if binding_type == "evidence_context_artifact":
+                selected["artifact"] = self._copy_fields(
+                    artifact,
+                    (
+                        "schema",
+                        "artifact_sha256",
+                        "artifact_kind",
+                        "compiler_profile",
+                        "semantic_claim",
+                    ),
+                )
+                selected["source_binding"] = self._copy_fields(
+                    source_binding,
+                    (
+                        "schema",
+                        "kind",
+                        "source_sha256",
+                        "verified",
+                        "current_match",
+                        "reason",
+                        "compiled_repository_identity_sha256",
+                        "current_repository_identity_sha256",
+                    ),
+                )
             return None, selected
 
         priority = (
+            "artifact_source_file_digest_mismatch",
+            "artifact_source_commit_digest_mismatch",
+            "artifact_source_action_repository_stale",
+            "artifact_source_action_digest_mismatch",
+            "artifact_source_binding_stale",
+            "artifact_source_binding_unverified",
+            "artifact_source_repository_comparison_mismatch",
+            "artifact_repository_identity_missing",
+            "artifact_producer_repository_unbound",
+            "artifact_producer_repository_unverified",
+            "artifact_origin_binding_invalid",
+            "artifact_semantic_claim_invalid",
+            "origin_binding_type_unsupported",
             "origin_repository_identity_mismatch",
             "origin_repository_comparison_mismatch",
             "origin_repository_unbound",
@@ -588,6 +679,7 @@ class ContextMediator:
                     "provenance_latest_hash",
                     "current_repository_identity_sha256",
                     "index_sha256",
+                    "artifact_compiler",
                 ),
             ),
             "provenance": {
@@ -630,7 +722,11 @@ class ContextMediator:
             "id": record["id"],
             "kind": str(record.get("kind", "episodic")),
             "source": record["source"],
-            "source_trust": "attested_not_verified",
+            "source_trust": (
+                "source_verified_untrusted"
+                if origin.get("binding_type") == "evidence_context_artifact"
+                else "attested_not_verified"
+            ),
             "confidence": float(record["confidence"]),
             "policy_version": record["policy_version"],
             "created_turn": int(record.get("created_turn", 0) or 0),

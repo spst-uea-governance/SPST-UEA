@@ -77,6 +77,12 @@ Run commands from `runtime/` unless noted otherwise:
   items. `recorded_not_executed` remains scaffold evidence; only a supported
   adapter submission may report `submitted_to_provider`, which is still not a
   causal quality claim.
+- Treat evidence-derived context as a typed intermediate layer, not a second
+  memory authority. Require a verified producer Receipt plus a currently valid
+  repository-file, ancestor-commit, or execution-verified Action source. Allow
+  unrelated changes only for file-scoped bindings; fail closed when source
+  scope cannot be established. Preserve `untrusted_evidence_only` authority and
+  `asserted_not_independently_established` semantic status.
 - A verified v4 receipt proves routing, profile, trace, governance, memory
   action, mediated-context digests, session binding, provenance, and the
   recorded repository identity. v1-v3 remain narrower legacy evidence.

@@ -77,6 +77,23 @@ Preview the bounded context packet without changing session or memory state:
 python -m spst_runtime.chat_bridge --context-preview "Your query" --repository-root ..
 ```
 
+Compile an explicit repository source into the typed evidence-context layer:
+
+```powershell
+python -m spst_runtime.evidence_context_bridge compile-file `
+  --repository-root .. `
+  --producer-receipt <receipt-id> `
+  --kind code_fact `
+  --title "Bound code fact" `
+  --statement "This statement is bound to the selected source bytes." `
+  --source-file path/to/source.py
+```
+
+The compiler uses the existing long-term-memory DB, revalidates its source on
+every preview, and never upgrades the statement above untrusted evidence. See
+`../docs/evidence-derived-context.md` for file, commit, Action, TTL, and
+supersession semantics.
+
 Only memory records with a verified producer Receipt are eligible; repository
 routes additionally require the producer's exact repository identity to match.
 Relevance is recomputed under `deterministic-lexical-v2` with a fail-closed
