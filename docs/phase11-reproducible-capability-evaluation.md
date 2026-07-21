@@ -12,7 +12,7 @@ evaluate_capability request
   -> GovernanceEngine L0 preflight
   -> same ModelAdapter + same versioned local case suite
   -> baseline context / capability-maximized context
-  -> deterministic marker scorer when the adapter supports it
+  -> deterministic contract-compliance proxy when the adapter supports it
   -> calibration result, SQLite provenance, cockpit report
 ```
 
@@ -22,10 +22,16 @@ prompt digest; neither raw prompts nor model text are stored.
 
 ## Metrics and Claims
 
-Every report separates four observations:
+Every report separates five observations:
 
-- **Task quality**: paired marker-score delta, only when an adapter explicitly
-  advertises `supports_structured_evaluation`.
+- **Contract-compliance proxy**: paired marker/shape-check delta, only when an
+  adapter explicitly advertises `supports_structured_evaluation`. This can
+  detect a contract regression but is not semantic answer quality.
+- **Task quality**: unavailable in a Phase 11 report. Phase 16 can establish a
+  separately reviewed, local-corpus measurement only after same-model/same-task
+  producer bindings, arm-blinded task-specific scoring, an independent
+  evaluator identity, at least eight paired samples, a fixed uncertainty bound,
+  and a digest-bound human review.
 - **Scaffold contract**: coverage of the capability-maximization and verifier
   context. This is useful in API-key-free mode but is not a language-quality
   score.
@@ -33,18 +39,23 @@ Every report separates four observations:
 - **Calibration**: `improved`, `neutral`, `regressed`, `scaffold_only`, or
   `blocked`.
 
-`improved` is reported only for a positive observed task-quality delta. A
-regression never claims uplift and never enables automatic adoption. All
-reports retain `automatic_adoption: false` and require human interpretation.
+`improved`, `neutral`, and `regressed` describe the explicitly named proxy
+metric in Phase 11. They do not establish semantic task quality. Even a positive
+proxy delta leaves `task_quality.available: false`,
+`semantic_task_quality_established: false`, and
+`task_quality_uplift_claimed: false`. A regression never enables automatic
+adoption. All reports retain `automatic_adoption: false` and require human
+interpretation.
 
 ## API-Key-Free Boundary
 
-The default `codex-mediated-local` adapter does not advertise structured task
-scoring. Its result is therefore `scaffold_only`: it can demonstrate that the
-scaffold was constructed and observed, but it cannot claim GPT task-quality
-improvement. A structured local adapter or an explicitly configured provider
-may opt into task scoring through the vendor-neutral `ModelAdapter` capability;
-this does not change the no-key default or make an official benchmark claim.
+The default `codex-mediated-local` adapter does not advertise structured
+contract scoring. Its result is therefore `scaffold_only`: it can demonstrate
+that the scaffold was constructed and observed, but it cannot claim GPT
+task-quality improvement. A structured local adapter or an explicitly
+configured provider may opt into the contract proxy through the vendor-neutral
+`ModelAdapter` capability. It cannot promote its own result fields, marker
+stuffing, or a matching JSON key into task-quality evidence.
 
 ## Persistence and Cockpit
 
@@ -60,4 +71,8 @@ compact summary is also attached to the normal evidence ledger.
 
 The Phase 11 suite is a transparent local calibration suite, not an external
 leaderboard and not a hidden-answer benchmark. It is intended to make future
-architecture changes falsifiable before they are trusted or expanded.
+architecture changes falsifiable before they are trusted or expanded. Marker
+presence and JSON shape are deliberately classified as a proxy; they remain
+useful regression signals and are not upgraded by Phase 16. The independent
+paired path is documented in `phase16-independent-paired-quality.md` and stays
+separate from these reports.

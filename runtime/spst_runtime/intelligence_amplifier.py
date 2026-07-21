@@ -72,11 +72,22 @@ class IntelligenceAmplifier:
         if goals:
             context.append(f"active_goal:{goals[-1]}")
         context.extend(f"recent_prompt:{prompt}" for prompt in prompts[-3:])
-        for memory in session_state.get("memory", {}).get("retrieved", [])[:3]:
+        memories = self._memory_items(session_state)
+        for memory in memories[:3]:
             text = memory.get("text") or memory.get("value", {}).get("text")
             if text:
                 context.append(f"memory:{text}")
         return context
+
+    def _memory_items(self, session_state: dict[str, Any]) -> list[dict[str, Any]]:
+        packet = session_state.get("context_mediation")
+        if isinstance(packet, dict):
+            items = packet.get("items", [])
+            if packet.get("status") == "ready" and isinstance(items, list):
+                return [item for item in items if isinstance(item, dict)]
+            return []
+        legacy = session_state.get("memory", {}).get("retrieved", [])
+        return [item for item in legacy if isinstance(item, dict)] if isinstance(legacy, list) else []
 
     def _reflection_checks(self, prompt: str) -> list[str]:
         checks = [
@@ -94,7 +105,7 @@ class IntelligenceAmplifier:
             score += 0.25
         if len(prompt) > 10:
             score += 0.1
-        if session_state.get("memory", {}).get("retrieved"):
+        if self._memory_items(session_state):
             score += 0.2
         if session_state.get("turn_count", 0) > 0:
             score += 0.1

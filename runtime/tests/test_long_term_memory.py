@@ -224,3 +224,33 @@ def test_reopening_populated_memory_does_not_reindex_or_change_database(tmp_path
     after = hashlib.sha256(path.read_bytes()).hexdigest()
     assert after == before
     assert reopened.search("stable indexed memory")[0]["text"] == "stable indexed memory"
+
+
+def test_relevance_gate_rejects_unrelated_query_and_preserves_supported_identifiers(tmp_path):
+    store = LongTermMemoryStore(str(tmp_path / "memory.db"))
+    english = store.remember(
+        "Model input binding preserves the context packet digest for repository verification.",
+        confidence=0.95,
+    )
+    japanese = store.remember(
+        "リポジトリ検証では文脈パケットのダイジェストをモデル入力へ結び付ける。",
+        confidence=0.95,
+    )
+    path_record = store.remember(
+        "Inspect runtime/spst_runtime/context_mediation.py at commit "
+        "95a33a9630e23970d2316cac297c1860aa67a525.",
+        confidence=0.95,
+    )
+    store.remember(
+        "Merge GitHub pull request into master and verify Runtime CI.",
+        confidence=0.95,
+    )
+
+    assert store.search("orchid photosynthesis marine geology") == []
+    assert store.search("context packet digest repository verification")[0]["id"] == english.id
+    assert store.search("文脈パケット ダイジェスト モデル入力")[0]["id"] == japanese.id
+    assert store.search("runtime/spst_runtime/context_mediation.py")[0]["id"] == path_record.id
+    commit_result = store.search("95a33a9630e23970d2316cac297c1860aa67a525")[0]
+    assert commit_result["id"] == path_record.id
+    assert commit_result["relevance"]["profile"] == "deterministic-lexical-v2"
+    assert commit_result["relevance"]["eligible"] is True

@@ -1,12 +1,105 @@
 import argparse
 import json
+import sqlite3
 from pathlib import Path
 
 from spst_runtime.adaptive_profile import RequestedProfile, select_execution_profile
 from spst_runtime.cli import run_dispatch, run_loop
 from spst_runtime.chat_session import ChatSessionStore, record_turn, summarize_session
+from spst_runtime.context_mediation import ContextBudget, ContextMediator
+from spst_runtime.memory.long_term_memory import LongTermMemoryStore
 from spst_runtime.repository_identity import capture_repository_identity
-from spst_runtime.routing_receipt import ROUTING_RECEIPT_SCHEMA, RoutingReceiptLedger
+from spst_runtime.routing_receipt import (
+    ROUTING_RECEIPT_SCHEMA,
+    RoutingReceiptLedger,
+    empty_memory_origin_index,
+)
+
+
+def preview_context(
+    query: str,
+    *,
+    session_path: str | None = None,
+    memory_path: str | None = None,
+    repository_root: str | None = None,
+    repository_identity: dict | None = None,
+    budget: ContextBudget | None = None,
+) -> dict:
+    """Read accumulated state without mutation and build one model-facing packet."""
+
+    mediator = ContextMediator(budget)
+    identity = repository_identity
+    if identity is None and repository_root is not None:
+        identity = capture_repository_identity(repository_root)
+    session_store = ChatSessionStore(session_path, read_only=True)
+    resolved_session_path = Path(session_store.path).expanduser()
+    try:
+        status = get_chat_status(session_path)
+        origin_index = (
+            RoutingReceiptLedger(str(resolved_session_path), read_only=True).memory_origin_index(
+                identity
+            )
+            if resolved_session_path.is_file()
+            else empty_memory_origin_index(
+                current_repository_identity_sha256=(
+                    identity.get("identity_sha256") if isinstance(identity, dict) else None
+                )
+            )
+        )
+    except (FileNotFoundError, PermissionError, sqlite3.DatabaseError) as error:
+        origin_index = empty_memory_origin_index(
+            f"session_store_unavailable:{type(error).__name__}",
+            current_repository_identity_sha256=(
+                identity.get("identity_sha256") if isinstance(identity, dict) else None
+            ),
+        )
+        return mediator.unavailable(
+            query,
+            f"session_store_unavailable:{type(error).__name__}",
+            repository_identity=identity,
+            origin_index=origin_index,
+        )
+    default_memory_path = Path(__file__).resolve().parents[1] / "spst_long_term_memory.db"
+    resolved_memory_path = Path(memory_path or default_memory_path).expanduser()
+    if not resolved_memory_path.is_file():
+        return mediator.unavailable(
+            query,
+            "memory_store_missing",
+            repository_identity=identity,
+            origin_index=origin_index,
+        )
+    try:
+        store = LongTermMemoryStore(str(resolved_memory_path), read_only=True)
+        candidates = store.search(
+            query,
+            limit=min(100, mediator.budget.max_items * 4),
+            min_confidence=mediator.budget.minimum_confidence,
+            min_relevance=mediator.budget.minimum_relevance,
+            policy_version=mediator.budget.policy_version,
+        )
+        retrieval_health = store.retrieval_health(
+            min_confidence=mediator.budget.minimum_confidence,
+            policy_version=mediator.budget.policy_version,
+        )
+        memory_provenance = store.repository.verify_provenance()
+    except (FileNotFoundError, PermissionError, sqlite3.DatabaseError) as error:
+        return mediator.unavailable(
+            query,
+            f"memory_store_unavailable:{type(error).__name__}",
+            repository_identity=identity,
+            origin_index=origin_index,
+        )
+
+    return mediator.build(
+        query,
+        candidates,
+        retrieval_health=retrieval_health,
+        routing=status.get("routing", {}),
+        origin_index=origin_index,
+        memory_provenance=memory_provenance,
+        session_provenance=status.get("persistence", {}).get("provenance", {}),
+        repository_identity=identity,
+    )
 
 
 def run_chat_turn(
@@ -26,11 +119,30 @@ def run_chat_turn(
     )
     selected_profile = select_execution_profile(prompt, event=event, requested=profile)
     profile_payload = selected_profile.as_dict()
+    if profile_payload.get("memory_mode") == "session_only":
+        context_packet = ContextMediator().skipped(prompt)
+    else:
+        context_packet = preview_context(
+            prompt,
+            session_path=session_path,
+            memory_path=memory_path,
+            repository_root=repository_root,
+            repository_identity=repository_identity,
+            budget=ContextBudget(
+                minimum_confidence=max(
+                    0.7,
+                    float(profile_payload.get("minimum_memory_confidence", 0.7)),
+                )
+            ),
+        )
     loop = run_loop(steps)
     pipeline = run_dispatch(
         event,
         prompt=prompt,
-        extra_payload={"execution_profile": profile_payload},
+        extra_payload={
+            "execution_profile": profile_payload,
+            "context_packet": context_packet,
+        },
     )
     session = record_turn(
         prompt,
@@ -41,6 +153,7 @@ def run_chat_turn(
         memory_path=memory_path,
         execution_profile=profile_payload,
         repository_identity=repository_identity,
+        context_packet=context_packet,
     )
 
     return {
@@ -58,6 +171,7 @@ def run_chat_turn(
             "pipeline": pipeline,
         },
         "execution_profile": profile_payload,
+        "context_mediation": context_packet,
         "session": {
             "turn_count": session["turn_count"],
             "goals": session["goals"],
@@ -67,6 +181,7 @@ def run_chat_turn(
             "memory": session["memory"],
             "latest_audit": session["audit"][-1],
             "execution_profile": profile_payload,
+            "context_mediation": session.get("context_mediation", {}),
         },
         "routing_receipt": session["routing_receipt"],
     }
@@ -80,6 +195,10 @@ def _empty_routing_status(turn_count: int) -> dict:
         "verified_turns": 0,
         "profile_counts": {},
         "memory_action_counts": {},
+        "receipt_schema_counts": {},
+        "context_bound_receipts": 0,
+        "repository_context_bound_receipts": 0,
+        "context_unbound_receipts": 0,
         "repository_bound_receipts": 0,
         "failed_receipts": 0,
         "receipt_epoch_start_turn": None,
@@ -129,6 +248,7 @@ def get_chat_status(
         "summary": state.get("summary", summarize_session(state)),
         "amplification": state.get("amplification", {}),
         "memory": state.get("memory", {}),
+        "context_mediation": state.get("context_mediation", {}),
         "latest_audit": (state.get("audit") or [None])[-1],
         "routing": routing,
         "persistence": {
@@ -202,7 +322,21 @@ def main(argv: list[str] | None = None) -> int:
         metavar="RECEIPT_ID",
         help="Verify one persisted routing receipt through the read-only path.",
     )
+    parser.add_argument(
+        "--context-preview",
+        default=None,
+        metavar="QUERY",
+        help="Build a read-only, bounded context packet without recording a chat turn.",
+    )
+    parser.add_argument("--context-max-items", type=int, default=5)
+    parser.add_argument("--context-max-chars", type=int, default=4_000)
     args = parser.parse_args(argv)
+
+    selected_read_only_modes = sum(
+        [bool(args.status), bool(args.verify_receipt), args.context_preview is not None]
+    )
+    if selected_read_only_modes > 1:
+        parser.error("--status, --verify-receipt, and --context-preview are mutually exclusive")
 
     if args.status:
         print(
@@ -228,8 +362,30 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.context_preview is not None:
+        print(
+            json.dumps(
+                preview_context(
+                    args.context_preview,
+                    session_path=args.session_db,
+                    memory_path=args.memory_db,
+                    repository_root=args.repository_root,
+                    budget=ContextBudget(
+                        max_items=args.context_max_items,
+                        max_total_chars=args.context_max_chars,
+                        max_item_chars=min(1_500, args.context_max_chars),
+                    ),
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+
     if not args.prompt:
-        parser.error("prompt is required unless --status or --verify-receipt is used")
+        parser.error(
+            "prompt is required unless --status, --verify-receipt, or --context-preview is used"
+        )
 
     print(
         json.dumps(

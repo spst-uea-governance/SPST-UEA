@@ -46,6 +46,12 @@ blocks known literal secret patterns before storage.
 separate local calibration work. A task may also declare `expected_json_keys`
 for deterministic local JSON-contract verification.
 
+Phase 16 adds the optional private `quality_rubric` contract for bounded,
+task-specific exact-JSON scoring. When present, the producer records only the
+rubric-addressed scalar projection and binds its digest into a v3 PBIND. See
+`phase16-independent-paired-quality.md`; marker and key presence remain proxy
+metrics and are never upgraded automatically.
+
 ## L0 Shadow Boundary
 
 `OperationalShadowRunner` follows this read-only trace:
@@ -67,6 +73,11 @@ task and arm identifiers, a configuration digest, an output-artifact digest,
 contract-scoped semantic digests and resolution statuses, and a deterministic
 binding identifier. It contains no prompt or model text.
 
+For Phase 16 rubric tasks, a v3 binding additionally records runtime-generated
+run-instance and per-inference execution identities plus the rubric-scoped
+scoring-material digest. These identities distinguish actual repeated local
+executions from a report whose caller label or run ID was merely rewritten.
+
 The configuration digest excludes the candidate label itself. Renaming an
 otherwise identical run therefore does not create a distinct execution
 condition. The complete report and bindings are persisted through the existing
@@ -83,10 +94,15 @@ and other formats whose meaning cannot be safely established are recorded as
 `unresolved`; they are not inferred to be independent evidence.
 
 The runner uses the same provider for baseline and capability-maximized arms.
-Task-quality scoring is available only when the adapter explicitly advertises
-structured evaluation support. The default API-key-free
-`codex-mediated-local` adapter therefore reports `scaffold_only` and never
-claims task-quality uplift.
+When an adapter advertises structured evaluation support, required markers and
+JSON-key presence produce a `contract_compliance_proxy`. They do not make
+`task_quality` available: marker stuffing, key-only JSON wrappers, and
+provider-supplied claim fields are counterexamples that remain ineligible.
+Semantic task quality requires the Phase 16 independent, arm-blinded, paired
+outcome path with verified producer bindings, uncertainty evidence, and an
+explicit digest-bound human review. The
+default API-key-free `codex-mediated-local` adapter reports `scaffold_only` and
+never claims task-quality uplift.
 
 ## Calibration and Promotion
 
@@ -94,7 +110,8 @@ Each authorized shadow report is registered through the Phase 12
 `CalibrationRegistry`. A comparable regression produces
 `requires_human_approval: true` and `promotion.status:
 held_for_human_review`. Even neutral or improved observations are never
-automatically promoted; Phase 13 does not include a deployment or promotion
+automatically promoted; these statuses are scoped to the recorded metric and do
+not establish task quality. Phase 13 does not include a deployment or promotion
 action.
 
 ## Cockpit API

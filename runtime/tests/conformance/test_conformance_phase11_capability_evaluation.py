@@ -63,6 +63,26 @@ class RegressiveEvaluationAdapter(StructuredEvaluationAdapter):
         }
 
 
+class ClaimStuffingAdapter(StructuredEvaluationAdapter):
+    """Returns proxy markers plus forged quality fields that the runner must ignore."""
+
+    async def infer(
+        self,
+        prompt: str,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        maximized = bool((context or {}).get("capability_maximization"))
+        return {
+            "provider": "structured-local",
+            "available": True,
+            "requires_api_key": False,
+            "text": "plan analyze verify" if maximized else "irrelevant",
+            "task_score": 1.0,
+            "task_quality_uplift_claimed": True,
+            "semantic_task_quality_established": True,
+        }
+
+
 @pytest.mark.conformance
 def test_phase11_produces_paired_provider_neutral_capability_evidence():
     report = CapabilityEvaluationRunner(StructuredEvaluationAdapter()).run()
@@ -70,10 +90,21 @@ def test_phase11_produces_paired_provider_neutral_capability_evidence():
     assert report["id"].startswith("EVAL-")
     assert report["provider"]["name"] == "structured-local"
     assert report["provider"]["requires_api_key"] is False
+    assert report["provider"]["contract_scoring_supported"] is True
+    assert report["provider"]["task_scoring_supported"] is False
     assert report["suite"]["same_tasks"] is True
-    assert report["task_quality"]["available"] is True
-    assert report["task_quality"]["maximized_mean"] > report["task_quality"]["baseline_mean"]
+    assert report["contract_compliance_proxy"]["available"] is True
+    assert (
+        report["contract_compliance_proxy"]["maximized_mean"]
+        > report["contract_compliance_proxy"]["baseline_mean"]
+    )
+    assert report["task_quality"]["available"] is False
+    assert report["task_quality"]["semantic_task_quality_established"] is False
+    assert report["task_quality"]["paired_delta"] is None
     assert report["calibration"]["status"] == "improved"
+    assert report["calibration"]["measurement_class"] == "contract_compliance_proxy"
+    assert report["claims"]["task_quality_uplift_claimed"] is False
+    assert report["claims"]["quality_claim"]["eligible"] is False
     assert report["official_score_policy"]["model_weight_score_unchanged"] is True
     assert report["official_score_policy"]["official_benchmark_claimed"] is False
     assert all("text" not in case["baseline"] for case in report["cases"])
@@ -97,10 +128,26 @@ def test_phase11_no_key_adapter_reports_scaffold_only_without_uplift_claim():
 def test_phase11_calibration_detects_regression_without_auto_adoption():
     report = CapabilityEvaluationRunner(RegressiveEvaluationAdapter()).run()
 
-    assert report["task_quality"]["paired_delta"] < 0
+    assert report["contract_compliance_proxy"]["paired_delta"] < 0
+    assert report["task_quality"]["paired_delta"] is None
     assert report["calibration"]["status"] == "regressed"
     assert report["claims"]["task_quality_uplift_claimed"] is False
     assert report["calibration"]["automatic_adoption"] is False
+
+
+@pytest.mark.conformance
+def test_phase11_rejects_marker_and_claim_stuffing_as_task_quality_evidence():
+    report = CapabilityEvaluationRunner(ClaimStuffingAdapter()).run()
+
+    assert report["contract_compliance_proxy"]["paired_delta"] > 0
+    assert report["task_quality"]["available"] is False
+    assert report["task_quality"]["reason"] == (
+        "independent_blinded_paired_outcome_measurement_unavailable"
+    )
+    assert report["claims"]["task_quality_uplift_claimed"] is False
+    assert report["claims"]["quality_claim"]["status"] == "blocked"
+    assert all(case["baseline"]["task_score"] is None for case in report["cases"])
+    assert all(case["maximized"]["task_score"] is None for case in report["cases"])
 
 
 @pytest.mark.conformance

@@ -4,8 +4,13 @@ import hashlib
 import json
 from typing import Any
 
+from spst_runtime.evaluation.quality_evidence import (
+    validate_producer_scoring_material,
+)
 
-SCHEMA_VERSION = "producer-evidence-v2"
+
+SCHEMA_VERSION = "producer-evidence-v3"
+LEGACY_SCHEMA_VERSION = "producer-evidence-v2"
 ARMS = ("baseline", "maximized")
 ARTIFACT_SEMANTIC_PROFILE = "contract-json-v1"
 MAX_CANONICAL_ARTIFACT_BYTES = 1_000_000
@@ -140,8 +145,14 @@ def build_producer_evidence(report: dict[str, Any]) -> list[dict[str, Any]]:
             artifact_semantics = _artifact_semantic_binding(
                 result.get("artifact_semantics")
             )
+            scoring_material_present = "scoring_material" in result
+            scoring_material = _scoring_material_binding(
+                result.get("scoring_material")
+            )
             binding = {
-                "schema_version": SCHEMA_VERSION,
+                "schema_version": (
+                    SCHEMA_VERSION if scoring_material_present else LEGACY_SCHEMA_VERSION
+                ),
                 "producer_run_id": producer_run_id,
                 "task_id": task_id,
                 "candidate_id": candidate_id,
@@ -162,6 +173,18 @@ def build_producer_evidence(report: dict[str, Any]) -> list[dict[str, Any]]:
                     "status"
                 ),
             }
+            if scoring_material_present:
+                binding.update(
+                    {
+                        **scoring_material,
+                        "producer_run_instance_id": report.get(
+                            "producer_run_instance_id"
+                        ),
+                        "producer_execution_id": result.get(
+                            "producer_execution_id"
+                        ),
+                    }
+                )
             binding["binding_id"] = f"PBIND-{_digest(binding)[:16]}"
             bindings.append(binding)
     return sorted(bindings, key=lambda item: (str(item["task_id"]), str(item["arm"])))
@@ -294,6 +317,24 @@ def _artifact_semantic_binding(value: Any) -> dict[str, Any]:
         "status": "unresolved",
         "reason": "semantic_artifact_record_invalid",
         "semantic_digest": None,
+    }
+
+
+def _scoring_material_binding(value: Any) -> dict[str, Any]:
+    valid, reason = validate_producer_scoring_material(value)
+    material = _mapping(value)
+    if not valid:
+        return {
+            "scoring_material_status": "invalid",
+            "scoring_material_reason": reason or "scoring_material_invalid",
+            "scoring_material_digest": None,
+            "quality_rubric_digest": None,
+        }
+    return {
+        "scoring_material_status": material.get("status"),
+        "scoring_material_reason": material.get("reason"),
+        "scoring_material_digest": material.get("material_digest"),
+        "quality_rubric_digest": material.get("rubric_digest"),
     }
 
 

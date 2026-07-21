@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -14,6 +15,132 @@ FINGERPRINT_KEY = "long_term_memory:fingerprints"
 SEARCH_INDEX_TABLE = "long_term_memory_search_index"
 CURRENT_MEMORY_POLICY_VERSION = "spst-uea-covenant-v1"
 ACTIVE_MEMORY_STATUS = "active"
+MEMORY_RECORD_BINDING_SCHEMA = "spst-memory-record-binding-v1"
+RELEVANCE_PROFILE = "deterministic-lexical-v2"
+DEFAULT_MINIMUM_RELEVANCE = 0.35
+
+_ENGLISH_STOP_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "in",
+        "into",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "this",
+        "to",
+        "was",
+        "were",
+        "with",
+    }
+)
+_LATIN_TOKEN = re.compile(r"[a-z0-9]+(?:[._:/\\-][a-z0-9]+)*")
+_JAPANESE_RUN = re.compile(r"[ぁ-んァ-ヶー一-龯々]+")
+
+
+def assess_context_relevance(
+    query: str,
+    record_text: str,
+    *,
+    minimum_relevance: float = DEFAULT_MINIMUM_RELEVANCE,
+) -> dict[str, Any]:
+    """Return a deterministic lexical relevance decision without trusting caller scores."""
+
+    if not 0.0 <= minimum_relevance <= 1.0:
+        raise ValueError("Memory relevance threshold must be between 0.0 and 1.0.")
+    normalized_query = _normalize_relevance_text(query)
+    normalized_record = _normalize_relevance_text(record_text)
+    query_terms = _weighted_relevance_terms(normalized_query)
+    record_terms = _weighted_relevance_terms(normalized_record)
+    matched = set(query_terms) & set(record_terms)
+    query_weight = sum(query_terms.values())
+    matched_weight = sum(query_terms[term] for term in matched)
+    coverage = matched_weight / query_weight if query_weight else 0.0
+    match_strength = len(matched) / (len(matched) + 2.0) if matched else 0.0
+    exact_phrase = bool(
+        normalized_query
+        and len(normalized_query.replace(" ", "")) >= 4
+        and normalized_query in normalized_record
+    )
+    structured_match = any(_is_structured_term(term) for term in matched)
+    score = min(1.0, (0.75 * coverage) + (0.25 * match_strength) + (0.1 if exact_phrase else 0.0))
+    required_matches = 1 if len(query_terms) <= 1 or exact_phrase or structured_match else 2
+    eligible = bool(
+        query_terms
+        and record_terms
+        and len(matched) >= required_matches
+        and score >= minimum_relevance
+    )
+    matched_digest = hashlib.sha256("\n".join(sorted(matched)).encode("utf-8")).hexdigest()
+    return {
+        "profile": RELEVANCE_PROFILE,
+        "eligible": eligible,
+        "score": score,
+        "minimum_relevance": minimum_relevance,
+        "query_term_count": len(query_terms),
+        "matched_term_count": len(matched),
+        "required_match_count": required_matches,
+        "query_coverage": coverage,
+        "exact_phrase": exact_phrase,
+        "structured_match": structured_match,
+        "matched_terms_sha256": matched_digest,
+    }
+
+
+def _normalize_relevance_text(text: str) -> str:
+    import unicodedata
+
+    return " ".join(unicodedata.normalize("NFKC", str(text)).casefold().split())
+
+
+def _weighted_relevance_terms(text: str) -> dict[str, float]:
+    terms: dict[str, float] = {}
+
+    def add(term: str, weight: float) -> None:
+        if term and term not in _ENGLISH_STOP_WORDS:
+            terms[term] = max(terms.get(term, 0.0), weight)
+
+    for match in _LATIN_TOKEN.finditer(text):
+        token = match.group(0).strip("._:/\\-")
+        if len(token) < 2:
+            continue
+        structured = _is_structured_term(token)
+        add(token, 3.0 if structured else (1.5 if len(token) >= 8 else 1.0))
+        if structured:
+            for component in re.split(r"[._:/\\-]+", token):
+                if len(component) >= 2:
+                    add(component, 1.5 if len(component) >= 8 else 1.0)
+
+    for run in _JAPANESE_RUN.findall(text):
+        if len(run) < 2:
+            continue
+        add(run, 2.5)
+        for width, weight in ((2, 0.5), (3, 1.0)):
+            if len(run) < width:
+                continue
+            for index in range(len(run) - width + 1):
+                add(run[index : index + width], weight)
+    return terms
+
+
+def _is_structured_term(term: str) -> bool:
+    return bool(
+        any(character in term for character in "._:/\\-")
+        or (len(term) >= 7 and all(character in "0123456789abcdef" for character in term))
+    )
 
 
 @dataclass
@@ -37,13 +164,36 @@ class MemoryRecord:
         return asdict(self)
 
 
+def memory_record_binding_sha256(record: MemoryRecord | dict[str, Any]) -> str:
+    """Digest every persisted record field while excluding retrieval-only fields."""
+
+    source = record.as_dict() if isinstance(record, MemoryRecord) else record
+    field_names = tuple(MemoryRecord.__dataclass_fields__)
+    if not isinstance(source, dict) or any(field not in source for field in field_names):
+        raise ValueError("Memory record binding requires every persisted field.")
+    payload = {
+        "schema": MEMORY_RECORD_BINDING_SCHEMA,
+        "record": {field: source[field] for field in field_names},
+    }
+    serialized = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 class LongTermMemoryStore:
     """Persistent searchable memory for Codex-mediated SPST-UEA sessions."""
 
-    def __init__(self, path: str | None = None):
+    def __init__(self, path: str | None = None, *, read_only: bool = False):
         default_path = Path(__file__).resolve().parents[2] / "spst_long_term_memory.db"
-        self.repository = SQLiteRepository(path or str(default_path))
-        self._ensure_search_index()
+        self.read_only = read_only
+        self.repository = SQLiteRepository(path or str(default_path), read_only=read_only)
+        if not read_only:
+            self._ensure_search_index()
 
     def remember(
         self,
@@ -131,10 +281,12 @@ class LongTermMemoryStore:
         limit: int = 5,
         now: datetime | None = None,
         min_confidence: float = 0.5,
+        min_relevance: float = DEFAULT_MINIMUM_RELEVANCE,
         policy_version: str | None = CURRENT_MEMORY_POLICY_VERSION,
     ) -> list[dict[str, Any]]:
         self._validate_retrieval_controls(
             min_confidence=min_confidence,
+            min_relevance=min_relevance,
             policy_version=policy_version,
             limit=limit,
         )
@@ -150,10 +302,20 @@ class LongTermMemoryStore:
             )
             if not eligible:
                 continue
-            score = self._score(query_terms, record) * record.confidence
-            if score > 0:
+            relevance = assess_context_relevance(
+                query,
+                record.text,
+                minimum_relevance=min_relevance,
+            )
+            if relevance["eligible"]:
+                score = float(relevance["score"]) * record.confidence
                 payload = record.as_dict()
                 payload["score"] = score
+                payload["relevance"] = {
+                    **relevance,
+                    "retrieval_score": score,
+                    "confidence_weighted": True,
+                }
                 payload["retrieval"] = {
                     "source": record.source,
                     "confidence": record.confidence,
@@ -519,13 +681,10 @@ class LongTermMemoryStore:
         return " ".join(text.strip().split())
 
     def _terms(self, text: str) -> set[str]:
-        lowered = text.lower()
-        words = set(re.findall(r"[a-z0-9_]{2,}", lowered))
-        chars = {lowered[index : index + 2] for index in range(max(len(lowered) - 1, 0))}
-        return {term for term in words | chars if term.strip()}
+        return set(_weighted_relevance_terms(_normalize_relevance_text(text)))
 
     def _score(self, query_terms: set[str], record: MemoryRecord) -> float:
-        record_terms = self._terms(" ".join([record.text, " ".join(record.tags), record.kind, record.source]))
+        record_terms = self._terms(record.text)
         if not query_terms or not record_terms:
             return 0.0
         overlap = len(query_terms & record_terms)
@@ -565,11 +724,14 @@ class LongTermMemoryStore:
         self,
         *,
         min_confidence: float,
+        min_relevance: float = DEFAULT_MINIMUM_RELEVANCE,
         policy_version: str | None,
         limit: int | None = None,
     ) -> None:
         if not 0.0 <= min_confidence <= 1.0:
             raise ValueError("Memory confidence threshold must be between 0.0 and 1.0.")
+        if not 0.0 <= min_relevance <= 1.0:
+            raise ValueError("Memory relevance threshold must be between 0.0 and 1.0.")
         self._validate_policy_version(policy_version)
         if limit is not None and limit < 0:
             raise ValueError("Memory retrieval limit cannot be negative.")

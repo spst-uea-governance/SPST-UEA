@@ -229,11 +229,13 @@ class CockpitRuntime:
         self.last_shadow: dict[str, Any] = {}
         self.last_artifact_outcome: dict[str, Any] = {}
         self.last_promotion: dict[str, Any] = {}
+        self.last_paired_quality: dict[str, Any] = {}
 
     def status(self) -> dict:
         metadata = self.last_state.metadata
         artifact_outcomes = self.orchestrator.artifact_outcomes()
         promotions = self.orchestrator.longitudinal_promotions()
+        paired_quality = self.orchestrator.paired_quality_evaluations()
         return {
             "running": self.loop.ctx.running,
             "tick": self.loop.ctx.tick,
@@ -258,6 +260,10 @@ class CockpitRuntime:
             "promotions": {
                 "latest": self.last_promotion or promotions["latest"],
                 "coverage": promotions["coverage"],
+            },
+            "paired_quality": {
+                "latest": self.last_paired_quality or paired_quality["latest"],
+                "coverage": paired_quality["coverage"],
             },
         }
 
@@ -333,6 +339,20 @@ class CockpitRuntime:
             approved=approved,
         )
         return self.last_promotion
+
+    def paired_quality_evaluations(self) -> dict:
+        return self.orchestrator.paired_quality_evaluations()
+
+    def evaluate_paired_quality(self, payload: dict) -> dict:
+        self.last_paired_quality = self.orchestrator.evaluate_paired_quality(payload)
+        return self.last_paired_quality
+
+    def review_paired_quality(self, evaluation_id: str, payload: dict) -> dict:
+        self.last_paired_quality = self.orchestrator.review_paired_quality(
+            evaluation_id,
+            payload,
+        )
+        return self.last_paired_quality
 
     def subjects(self) -> dict:
         subjects = []
@@ -516,6 +536,9 @@ def handle_cockpit_request(
     if method == "GET" and parsed.path == "/api/promotions":
         return HTTPStatus.OK, runtime.promotions()
 
+    if method == "GET" and parsed.path == "/api/paired-quality-evaluations":
+        return HTTPStatus.OK, runtime.paired_quality_evaluations()
+
     if method == "GET" and parsed.path == "/api/memory/search":
         query = parse_qs(parsed.query).get("q", [""])[0]
         return HTTPStatus.OK, runtime.memory_search(query)
@@ -553,6 +576,15 @@ def handle_cockpit_request(
             str(payload["promotion_id"]),
             approved=bool(payload.get("approved")),
         )
+
+    if method == "POST" and parsed.path == "/api/paired-quality-evaluations":
+        payload = json.loads((body or b"{}").decode("utf-8"))
+        return HTTPStatus.OK, runtime.evaluate_paired_quality(payload)
+
+    if method == "POST" and parsed.path == "/api/paired-quality-evaluations/review":
+        payload = json.loads((body or b"{}").decode("utf-8"))
+        evaluation_id = str(payload.pop("evaluation_id", ""))
+        return HTTPStatus.OK, runtime.review_paired_quality(evaluation_id, payload)
 
     if method == "POST" and parsed.path == "/api/approval":
         payload = json.loads((body or b"{}").decode("utf-8"))
@@ -592,6 +624,7 @@ class RuntimeWebHandler(BaseHTTPRequestHandler):
             "/api/shadow-evaluations",
             "/api/artifact-outcomes",
             "/api/promotions",
+            "/api/paired-quality-evaluations",
             "/api/memory/search",
         }:
             status, payload = handle_cockpit_request("GET", self.path)

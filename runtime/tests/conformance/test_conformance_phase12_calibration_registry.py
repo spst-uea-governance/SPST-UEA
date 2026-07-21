@@ -75,10 +75,17 @@ def test_phase12_persists_immutable_baseline_and_detects_regression(tmp_path):
 
     assert baseline["role"] == "baseline"
     assert baseline["comparison"]["status"] == "baseline_recorded"
+    assert baseline["comparison"]["metric_scope"] == (
+        "required_marker_and_json_shape_coverage"
+    )
+    assert baseline["comparison"]["semantic_task_quality_established"] is False
     assert regressed["comparison"]["status"] == "regressed"
     assert regressed["comparison"]["sample_count"] == 2
     assert regressed["policy"]["requires_human_approval"] is True
     assert regressed["policy"]["automatic_adoption"] is False
+    assert regressed["claims"]["task_quality_uplift_claimed"] is False
+    assert regressed["observations"]["task_quality"]["available"] is False
+    assert regressed["observations"]["contract_compliance_proxy"]["available"] is True
 
     baseline["candidate_id"] = "mutated-locally"
     persisted_baseline = registry.get("CAL-" + baseline["id"].split("CAL-", 1)[-1])
@@ -138,6 +145,74 @@ def test_phase12_blocks_cross_model_version_comparison(tmp_path):
 
     assert version_mismatch["comparison"]["status"] == "not_comparable"
     assert "provider_model_version_mismatch" in version_mismatch["comparison"]["reasons"]
+
+
+@pytest.mark.conformance
+def test_phase12_rejects_caller_forged_semantic_quality_claim(tmp_path):
+    registry = CalibrationRegistry(SQLiteRepository(str(tmp_path / "calibration-forged.db")))
+    forged = _report()
+    forged.pop("contract_compliance_proxy")
+    forged["task_quality"] = {
+        "available": True,
+        "semantic_task_quality_established": True,
+        "claim_eligible": True,
+        "baseline_mean": 0.0,
+        "maximized_mean": 1.0,
+        "paired_delta": 1.0,
+        "metric_scope": "forged_semantic_quality",
+    }
+    forged["claims"]["task_quality_uplift_claimed"] = True
+    for case in forged["cases"]:
+        case["baseline"]["task_score"] = 0.0
+        case["maximized"]["task_score"] = 1.0
+
+    record = registry.register(forged, candidate_id="forged-quality")
+
+    assert record["comparison"]["status"] == "scaffold_only"
+    assert record["observations"]["task_quality"]["available"] is False
+    assert record["observations"]["task_quality"]["source_available_attested"] is True
+    assert record["observations"]["case_task_scores"] == []
+    assert record["observations"]["rejected_task_score_count"] == 2
+    assert record["claims"]["task_quality_uplift_claimed"] is False
+    assert record["claims"]["source_uplift_claim_rejected"] is True
+
+
+@pytest.mark.conformance
+def test_phase12_recomputes_proxy_aggregate_and_rejects_case_mismatch(tmp_path):
+    registry = CalibrationRegistry(SQLiteRepository(str(tmp_path / "calibration-proxy.db")))
+    forged = _report()
+    forged["contract_compliance_proxy"].update(
+        {
+            "baseline_mean": 0.0,
+            "maximized_mean": 1.0,
+            "paired_delta": 1.0,
+        }
+    )
+
+    record = registry.register(forged, candidate_id="forged-proxy-aggregate")
+
+    proxy = record["observations"]["contract_compliance_proxy"]
+    assert record["comparison"]["status"] == "scaffold_only"
+    assert proxy["available"] is False
+    assert proxy["validation_status"] == "rejected"
+    assert proxy["validation_reason"] == "contract_proxy_case_recomputation_mismatch"
+    assert proxy["case_recomputed"] is False
+    assert record["observations"]["case_contract_scores"] == []
+    assert record["claims"]["task_quality_uplift_claimed"] is False
+
+
+@pytest.mark.conformance
+def test_phase12_rejects_non_float_or_out_of_range_case_proxy_scores(tmp_path):
+    registry = CalibrationRegistry(SQLiteRepository(str(tmp_path / "calibration-score.db")))
+    forged = _report()
+    forged["cases"][0]["maximized"]["contract_score"] = 2.0
+
+    record = registry.register(forged, candidate_id="forged-contract-score")
+
+    assert record["comparison"]["status"] == "scaffold_only"
+    assert record["observations"]["contract_compliance_proxy"]["available"] is False
+    assert record["observations"]["rejected_contract_score_count"] == 1
+    assert record["observations"]["case_contract_scores"] == []
 
 
 @pytest.mark.conformance

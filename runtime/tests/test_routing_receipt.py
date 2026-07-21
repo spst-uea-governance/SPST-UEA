@@ -121,7 +121,7 @@ def test_repository_bound_receipt_binds_head_and_worktree_without_path_leakage(
     receipt = result["routing_receipt"]
     identity = receipt["payload"]["repository"]
 
-    assert receipt["schema"] == "spst-routing-receipt-v3"
+    assert receipt["schema"] == "spst-routing-receipt-v4"
     assert identity["schema"] == "spst-repository-identity-v1"
     assert identity["head_revision"] == _git(repository, "rev-parse", "HEAD")
     assert len(identity["worktree_sha256"]) == 64
@@ -158,9 +158,52 @@ def test_repository_bound_receipt_binds_head_and_worktree_without_path_leakage(
     assert independent["repository"]["worktree_match"] is True
     status = get_chat_status(str(session_path), str(repository))
     assert status["routing"]["repository_bound_receipts"] == 1
+    assert status["routing"]["context_bound_receipts"] == 1
+    assert status["routing"]["repository_context_bound_receipts"] == 1
     assert status["routing"]["latest_repository_current_match"] is True
     assert _file_manifest(session_path) == database_before
     assert _tree_file_manifest(repository) == repository_before
+
+
+def test_memory_origin_index_binds_record_to_verified_receipt_and_repository(
+    tmp_path: Path,
+):
+    repository = _init_repository(tmp_path)
+    result, session_path = _run_isolated_turn(
+        tmp_path / "state",
+        "index the producer-bound memory record",
+        repository_root=repository,
+    )
+    record_id = result["routing_receipt"]["payload"]["session"]["memory_binding"][
+        "record_id"
+    ]
+    before = _file_manifest(session_path)
+
+    index = RoutingReceiptLedger(str(session_path), read_only=True).memory_origin_index(
+        capture_repository_identity(repository)
+    )
+
+    assert _file_manifest(session_path) == before
+    assert index["status"] == "verified"
+    assert index["failed_receipts"] == 0
+    assert index["bound_record_count"] == 1
+    binding = index["bindings"][record_id][0]
+    assert binding["receipt_verified"] is True
+    assert binding["receipt_id"] == result["routing_receipt"]["receipt_id"]
+    assert binding["record_id"] == record_id
+    assert binding["repository"]["current_match"] is True
+    assert binding["repository"]["current_identity_sha256"] == capture_repository_identity(
+        repository
+    )["identity_sha256"]
+    unsigned = {key: value for key, value in index.items() if key != "index_sha256"}
+    assert index["index_sha256"] == hashlib.sha256(
+        json.dumps(
+            unsigned,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def test_repository_bound_receipt_preserves_historical_truth_after_worktree_changes(
@@ -251,7 +294,7 @@ def test_tampered_repository_identity_invalidates_v3_receipt(tmp_path: Path):
         repository_root=repository,
     )
     receipt_id = result["routing_receipt"]["receipt_id"]
-    receipt_key = f"routing_receipt:v3:{receipt_id}"
+    receipt_key = f"routing_receipt:v4:{receipt_id}"
     conn = sqlite3.connect(session_path)
     try:
         serialized = conn.execute(
@@ -288,6 +331,9 @@ def test_status_reads_existing_session_without_changing_any_source_file(tmp_path
     assert status["routing"]["verified_turns"] == 1
     assert status["routing"]["eligible_turns"] == 1
     assert status["routing"]["receipt_coverage"] == 1.0
+    assert status["routing"]["context_bound_receipts"] == 1
+    assert status["routing"]["context_unbound_receipts"] == 0
+    assert status["routing"]["receipt_schema_counts"] == {"spst-routing-receipt-v2": 1}
     assert status["routing"]["latest_receipt_id"] == result["routing_receipt"]["receipt_id"]
     assert status["routing"]["global_codex_task_coverage"] is None
     assert status["routing"]["global_coverage_reason"] == "codex_task_denominator_unavailable"

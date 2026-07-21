@@ -62,6 +62,10 @@ class GovernanceEngine:
             return self._decide_operational_shadow_evaluation(action, covenant)
         if action.get("type") == "artifact_outcome_evidence":
             return self._decide_artifact_outcome_evidence(action, covenant)
+        if action.get("type") == "paired_quality_evaluation":
+            return self._decide_paired_quality_evaluation(action, covenant)
+        if action.get("type") == "paired_quality_review":
+            return self._decide_paired_quality_review(action, covenant)
         if action.get("type") == "longitudinal_evidence_synthesis":
             return self._decide_longitudinal_evidence_synthesis(action, covenant)
         if action.get("type") == "longitudinal_promotion_activation":
@@ -658,6 +662,90 @@ class GovernanceEngine:
             True,
             False,
             ["longitudinal_evidence_synthesis_authorized"],
+            action=action,
+            covenant=covenant,
+        )
+
+    def _decide_paired_quality_evaluation(
+        self,
+        action: dict[str, Any],
+        covenant: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = action.get("payload", {}) or {}
+        if action.get("source") != "paired_quality_evidence_ledger":
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["paired_quality_source_required"],
+                action=action,
+                covenant=covenant,
+            )
+        required = (
+            "local_only",
+            "evidence_only",
+            "provenance_valid",
+            "contract_valid",
+            "evidence_valid",
+            "evaluator_independent",
+        )
+        missing = [name for name in required if payload.get(name) is not True]
+        if missing:
+            return self._decision(
+                "Low",
+                False,
+                False,
+                [f"paired_quality_{name}_required" for name in missing],
+                action=action,
+                covenant=covenant,
+            )
+        return self._decision(
+            "High",
+            True,
+            False,
+            ["paired_quality_evaluation_authorized"],
+            action=action,
+            covenant=covenant,
+        )
+
+    def _decide_paired_quality_review(
+        self,
+        action: dict[str, Any],
+        covenant: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = action.get("payload", {}) or {}
+        if action.get("source") != "paired_quality_evidence_ledger":
+            return self._decision(
+                "Low",
+                False,
+                False,
+                ["paired_quality_review_source_required"],
+                action=action,
+                covenant=covenant,
+            )
+        required = (
+            "local_only",
+            "evidence_only",
+            "provenance_valid",
+            "human_decision_recorded",
+            "review_valid",
+            "artifact_digest_matches",
+        )
+        missing = [name for name in required if payload.get(name) is not True]
+        if missing:
+            return self._decision(
+                "Low",
+                False,
+                False,
+                [f"paired_quality_review_{name}_required" for name in missing],
+                action=action,
+                covenant=covenant,
+            )
+        return self._decision(
+            "High",
+            True,
+            False,
+            ["paired_quality_review_authorized"],
             action=action,
             covenant=covenant,
         )

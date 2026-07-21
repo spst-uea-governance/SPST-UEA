@@ -16,6 +16,7 @@ from spst_runtime.evaluation.longitudinal_promotion import (
 )
 from spst_runtime.evaluation.operational_corpus import OperationalEvaluationCorpus
 from spst_runtime.evaluation.operational_shadow import OperationalShadowRunner
+from spst_runtime.evaluation.paired_quality import PairedQualityEvidenceLedger
 from spst_runtime.interfaces.model_adapter import ModelAdapter
 from spst_runtime.engines.verification_runner import VerificationRunner
 from spst_runtime.maintenance import run_maintenance
@@ -54,6 +55,7 @@ class RuntimeOrchestrator:
         operational_shadow_runner: OperationalShadowRunner | None = None,
         artifact_outcome_ledger: ArtifactOutcomeLedger | None = None,
         longitudinal_promotion_governance: LongitudinalPromotionGovernance | None = None,
+        paired_quality_evidence_ledger: PairedQualityEvidenceLedger | None = None,
     ):
         self.bus = bus or EventBus()
         self.repository = repository or SQLiteRepository(db_path)
@@ -112,6 +114,14 @@ class RuntimeOrchestrator:
                 self.repository,
                 self.operational_corpus,
                 self.artifact_outcome_ledger,
+                governance_engine=self.pipeline.governance_engine,
+            )
+        )
+        self.paired_quality_evidence_ledger = (
+            paired_quality_evidence_ledger
+            or PairedQualityEvidenceLedger(
+                self.repository,
+                self.operational_corpus,
                 governance_engine=self.pipeline.governance_engine,
             )
         )
@@ -332,6 +342,27 @@ class RuntimeOrchestrator:
             "latest": records[-1] if records else {},
             "records": records,
             "coverage": self.longitudinal_promotion_governance.coverage(),
+        }
+
+    def evaluate_paired_quality(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create a local producer-bound paired measurement without promotion."""
+        return self.paired_quality_evidence_ledger.evaluate(payload)
+
+    def review_paired_quality(
+        self,
+        evaluation_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Append explicit human review to one immutable scoring artifact."""
+        return self.paired_quality_evidence_ledger.review(evaluation_id, payload)
+
+    def paired_quality_evaluations(self) -> dict[str, Any]:
+        """Return paired quality evidence projections and aggregate coverage."""
+        records = self.paired_quality_evidence_ledger.history()
+        return {
+            "latest": records[-1] if records else {},
+            "records": records,
+            "coverage": self.paired_quality_evidence_ledger.coverage(),
         }
 
     def _record_operational_shadow(self, report: dict[str, Any]) -> None:

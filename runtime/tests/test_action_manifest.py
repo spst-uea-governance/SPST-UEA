@@ -580,7 +580,7 @@ def test_missing_or_tampered_parent_receipt_cannot_bind_action(tmp_path: Path):
     receipt_id = turn["routing_receipt"]["receipt_id"]
     _tamper_record(
         session_path,
-        f"routing_receipt:v3:{receipt_id}",
+        f"routing_receipt:v4:{receipt_id}",
         lambda record: record["payload"]["route"].__setitem__("event", "tampered"),
     )
     with pytest.raises(ValueError, match="parent_receipt_unverified"):

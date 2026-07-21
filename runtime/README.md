@@ -71,6 +71,22 @@ Check the persisted always-on session:
 python -m spst_runtime.chat_bridge --status
 ```
 
+Preview the bounded context packet without changing session or memory state:
+
+```bash
+python -m spst_runtime.chat_bridge --context-preview "Your query" --repository-root ..
+```
+
+Only memory records with a verified producer Receipt are eligible; repository
+routes additionally require the producer's exact repository identity to match.
+Relevance is recomputed under `deterministic-lexical-v2` with a fail-closed
+floor; a caller-supplied score cannot promote unrelated memory. A ready packet
+is projected into `spst-model-input-binding-v1`, whose digest and delivery
+status are included in the Routing Receipt. The API-key-free adapter records
+the binding as `scaffold_only` and does not claim that Codex consumed it.
+See `../docs/context-mediation.md` for the selection, provenance, budget,
+origin-binding, and instruction-authority boundaries.
+
 Run local maintenance:
 
 ```bash
@@ -83,6 +99,18 @@ artifacts. Dynamic verifier source is held in memory rather than written into
 the package tree.
 
 In this thread, requests addressed to SPST-UEA can be routed through that bridge by Codex.
+
+Task-specific quality evidence is separate from routing and contract-proxy
+metrics. The Phase 16 local API accepts only stored PBIND references, scores
+eight or more same-model/task pairs through an arm-blinded exact-JSON evaluator,
+reports a fixed 95% Hoeffding bound, and requires a digest-bound human review:
+
+- `POST /api/paired-quality-evaluations`
+- `GET /api/paired-quality-evaluations`
+- `POST /api/paired-quality-evaluations/review`
+
+See `../docs/phase16-independent-paired-quality.md`. The offline conformance
+fixture proves the mechanism only; it is not GPT-uplift evidence.
 
 After `python -m pip install -e ".[dev]"`, the console script is also available:
 

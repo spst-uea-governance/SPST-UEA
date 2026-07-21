@@ -54,6 +54,23 @@ class ShadowAdapter(ModelAdapter):
         }
 
 
+class JsonKeyOnlyAdapter(ShadowAdapter):
+    """Satisfies a shallow JSON shape without establishing answer correctness."""
+
+    async def infer(
+        self,
+        prompt: str,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        maximized = bool((context or {}).get("capability_maximization"))
+        return {
+            "provider": "shadow-local",
+            "available": True,
+            "requires_api_key": False,
+            "text": '{"result":"irrelevant wrapper"}' if maximized else "{}",
+        }
+
+
 def _task(
     task_id: str = "holdout-analysis",
     *,
@@ -114,9 +131,34 @@ def test_phase13_shadow_excludes_expired_tasks_and_never_records_raw_prompt(tmp_
     assert report["retention"]["excluded_expired_count"] == 1
     assert report["shadow"]["subject_state_committed"] is False
     assert report["shadow"]["actions_executed"] is False
-    assert report["task_quality"]["available"] is True
+    assert report["provider"]["contract_scoring_supported"] is True
+    assert report["provider"]["task_scoring_supported"] is False
+    assert report["contract_compliance_proxy"]["available"] is True
+    assert report["task_quality"]["available"] is False
+    assert report["task_quality"]["semantic_task_quality_established"] is False
+    assert report["claims"]["task_quality_uplift_claimed"] is False
     assert active_task["prompt"] not in json.dumps(report)
     assert report["claims"]["automatic_adoption"] is False
+
+
+@pytest.mark.conformance
+def test_phase13_json_key_only_success_remains_non_quality_proxy(tmp_path):
+    corpus = OperationalEvaluationCorpus(SQLiteRepository(str(tmp_path / "phase13-json.db")))
+    task = _task("json-key-wrapper")
+    task["required_markers"] = []
+    task["expected_json_keys"] = ["result"]
+    corpus.register(task)
+
+    report = OperationalShadowRunner(JsonKeyOnlyAdapter(), corpus).run(
+        candidate_id="json-wrapper"
+    )
+
+    assert report["contract_compliance_proxy"]["paired_delta"] == 1.0
+    assert report["cases"][0]["maximized"]["verification"]["status"] == "passed"
+    assert report["cases"][0]["maximized"]["artifact_semantics"]["status"] == "unresolved"
+    assert report["task_quality"]["available"] is False
+    assert report["claims"]["task_quality_uplift_claimed"] is False
+    assert report["claims"]["quality_claim"]["eligible"] is False
 
 
 @pytest.mark.conformance

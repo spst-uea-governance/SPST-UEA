@@ -8,6 +8,11 @@ from typing import Any
 
 from spst_runtime.engines.governance_engine import GovernanceEngine
 from spst_runtime.engines.security_engine import SecurityEngine
+from spst_runtime.evaluation.quality_evidence import (
+    normalize_quality_rubric,
+    quality_rubric_digest,
+    validate_quality_rubric,
+)
 from spst_runtime.persistence.sqlite_repository import SQLiteRepository
 
 
@@ -137,6 +142,18 @@ class OperationalEvaluationCorpus:
             return deepcopy(self._public_entry(entry))
         return None
 
+    def scoring_contract(self, task_id: str) -> dict[str, Any] | None:
+        """Load one active private rubric for the independent evaluator only."""
+        if self.task_contract(task_id) is None:
+            return None
+        with self.repository.locked():
+            stored = asyncio.run(self.repository.load(f"{self.TASK_KEY_PREFIX}{task_id}"))
+        if not isinstance(stored, dict):
+            return None
+        rubric = stored.get("quality_rubric")
+        valid, _ = validate_quality_rubric(rubric)
+        return deepcopy(rubric) if valid else None
+
     def load_for_shadow(
         self,
         *,
@@ -214,7 +231,12 @@ class OperationalEvaluationCorpus:
             "expected_json_keys",
             errors,
         )
-        if not required_markers and not expected_json_keys:
+        quality_rubric, rubric_error = normalize_quality_rubric(
+            source.get("quality_rubric")
+        )
+        if rubric_error is not None:
+            errors.append(rubric_error)
+        if not required_markers and not expected_json_keys and quality_rubric is None:
             errors.append("verification_contract_required")
         consent_data = consent if isinstance(consent, dict) else {}
         retention_until = consent_data.get("retention_until")
@@ -229,6 +251,7 @@ class OperationalEvaluationCorpus:
                 "split": split,
                 "required_markers": required_markers,
                 "expected_json_keys": expected_json_keys,
+                "quality_rubric": quality_rubric,
                 "prompt_digest": self._digest(prompt),
                 "consent": {
                     "granted": bool(consent_data.get("granted", False)),
@@ -246,13 +269,23 @@ class OperationalEvaluationCorpus:
             "split": task["split"],
             "required_marker_count": len(task["required_markers"]),
             "expected_json_key_count": len(task["expected_json_keys"]),
+            "quality_rubric_digest": quality_rubric_digest(
+                task.get("quality_rubric")
+            ),
         }
+        criteria = (
+            task["quality_rubric"].get("criteria", [])
+            if isinstance(task.get("quality_rubric"), dict)
+            else []
+        )
         return {
             "id": task["task_id"],
             "domain": task["domain"],
             "split": task["split"],
             "prompt_digest": task["prompt_digest"],
             "contract_hash": self._digest(contract),
+            "quality_rubric_digest": contract["quality_rubric_digest"],
+            "quality_criterion_count": len(criteria),
             "consent_scope": task["consent"]["scope"],
             "retention_until": task["consent"]["retention_until"],
         }
@@ -264,6 +297,8 @@ class OperationalEvaluationCorpus:
             "split": entry["split"],
             "prompt_digest": entry["prompt_digest"],
             "contract_hash": entry["contract_hash"],
+            "quality_rubric_digest": entry.get("quality_rubric_digest"),
+            "quality_criterion_count": int(entry.get("quality_criterion_count", 0)),
             "consent_scope": entry["consent_scope"],
             "retention_until": entry["retention_until"],
             "status": "expired" if self._is_expired(entry) else "active",

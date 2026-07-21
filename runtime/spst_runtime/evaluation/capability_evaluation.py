@@ -7,6 +7,12 @@ from typing import Any
 
 from spst_runtime.engines.capability_maximizer import CapabilityMaximizer
 from spst_runtime.engines.governance_engine import GovernanceEngine
+from spst_runtime.evaluation.quality_evidence import (
+    contract_compliance_proxy,
+    proxy_calibration,
+    quality_claim_boundary,
+    unresolved_task_quality,
+)
 from spst_runtime.interfaces.model_adapter import ModelAdapter
 
 
@@ -80,10 +86,11 @@ class CapabilityEvaluationRunner:
                 }
             )
 
-        task_quality = self._task_quality(cases, task_scoring_supported)
+        contract_proxy = contract_compliance_proxy(cases, task_scoring_supported)
+        task_quality = unresolved_task_quality(contract_proxy)
         scaffold_contract = self._scaffold_contract(cases)
         latency = self._latency(cases)
-        calibration = self._calibration(task_quality)
+        calibration = proxy_calibration(contract_proxy)
         report = {
             "suite": {
                 "version": self.SUITE_VERSION,
@@ -95,15 +102,19 @@ class CapabilityEvaluationRunner:
                 "name": self._provider_name(health),
                 "model_version": health.get("model_version"),
                 "requires_api_key": bool(health.get("requires_api_key", False)),
-                "task_scoring_supported": task_scoring_supported,
+                "contract_scoring_supported": task_scoring_supported,
+                "task_scoring_supported": False,
             },
             "paired": {
                 "same_provider": True,
                 "same_scoring_rubric": True,
+                "same_contract_proxy": True,
+                "independent_blinded_evaluator": False,
                 "baseline_mode": "normal_adapter_context",
                 "maximized_mode": "capability_maximization_context",
             },
             "cases": cases,
+            "contract_compliance_proxy": contract_proxy,
             "task_quality": task_quality,
             "scaffold_contract": scaffold_contract,
             "latency": latency,
@@ -112,19 +123,18 @@ class CapabilityEvaluationRunner:
                 "model_weight_score_unchanged": True,
                 "official_benchmark_claimed": False,
                 "claim": (
-                    "This report measures local system-conditioned evaluation evidence, "
-                    "not an official model benchmark score."
+                    "This report measures local contract-compliance proxy evidence, "
+                    "not semantic task quality or an official model benchmark score."
                 ),
             },
             "claims": {
-                "task_quality_uplift_claimed": (
-                    task_quality["available"] and calibration["status"] == "improved"
-                ),
+                "task_quality_uplift_claimed": False,
+                "quality_claim": quality_claim_boundary(contract_proxy),
                 "requires_human_interpretation": True,
                 "automatic_adoption": False,
                 "scope": (
-                    "structured_task_markers"
-                    if task_quality["available"]
+                    "contract_compliance_proxy_only"
+                    if contract_proxy["available"]
                     else "scaffold_contract_only"
                 ),
             },
@@ -169,7 +179,9 @@ class CapabilityEvaluationRunner:
                 "provider": "unknown",
                 "latency_ms": int((time.perf_counter() - started_at) * 1000),
                 "output_digest": self._digest(type(exc).__name__),
+                "contract_score": None,
                 "task_score": None,
+                "score_semantics": "contract_compliance_proxy",
                 "scaffold_contract_score": self._scaffold_score(plan),
                 "plan": self._plan_summary(plan),
             }
@@ -182,51 +194,15 @@ class CapabilityEvaluationRunner:
             "provider": result.get("provider", "unknown"),
             "latency_ms": int((time.perf_counter() - started_at) * 1000),
             "output_digest": self._digest(text),
-            "task_score": (
+            "contract_score": (
                 self._marker_score(text, case.required_markers)
                 if available and task_scoring_supported
                 else None
             ),
+            "task_score": None,
+            "score_semantics": "contract_compliance_proxy",
             "scaffold_contract_score": self._scaffold_score(plan),
             "plan": self._plan_summary(plan),
-        }
-
-    def _task_quality(
-        self,
-        cases: list[dict[str, Any]],
-        task_scoring_supported: bool,
-    ) -> dict[str, Any]:
-        baseline_scores = [case["baseline"]["task_score"] for case in cases]
-        maximized_scores = [case["maximized"]["task_score"] for case in cases]
-        available = task_scoring_supported and all(
-            isinstance(score, float) for score in [*baseline_scores, *maximized_scores]
-        )
-        if not available:
-            return {
-                "available": False,
-                "baseline_mean": None,
-                "maximized_mean": None,
-                "paired_delta": None,
-            }
-        baseline_mean = self._mean([float(score) for score in baseline_scores])
-        maximized_mean = self._mean([float(score) for score in maximized_scores])
-        return {
-            "available": True,
-            "baseline_mean": baseline_mean,
-            "maximized_mean": maximized_mean,
-            "paired_delta": round(maximized_mean - baseline_mean, 6),
-        }
-
-    def _calibration(self, task_quality: dict[str, Any]) -> dict[str, Any]:
-        if not task_quality["available"]:
-            status = "scaffold_only"
-        else:
-            delta = float(task_quality["paired_delta"])
-            status = "improved" if delta > 0 else "regressed" if delta < 0 else "neutral"
-        return {
-            "status": status,
-            "automatic_adoption": False,
-            "requires_human_interpretation": True,
         }
 
     def _scaffold_contract(self, cases: list[dict[str, Any]]) -> dict[str, float]:
@@ -269,6 +245,7 @@ class CapabilityEvaluationRunner:
         )
 
     def _denied_report(self, governance: dict[str, Any]) -> dict[str, Any]:
+        contract_proxy = contract_compliance_proxy([], False)
         report = {
             "suite": {
                 "version": self.SUITE_VERSION,
@@ -282,16 +259,13 @@ class CapabilityEvaluationRunner:
                 "requires_api_key": bool(
                     self.model_adapter.health().get("requires_api_key", False)
                 ),
+                "contract_scoring_supported": False,
                 "task_scoring_supported": False,
             },
             "paired": {"same_provider": True, "same_scoring_rubric": True},
             "cases": [],
-            "task_quality": {
-                "available": False,
-                "baseline_mean": None,
-                "maximized_mean": None,
-                "paired_delta": None,
-            },
+            "contract_compliance_proxy": contract_proxy,
+            "task_quality": unresolved_task_quality(contract_proxy),
             "scaffold_contract": {
                 "baseline_mean": 0.0,
                 "maximized_mean": 0.0,
@@ -302,17 +276,14 @@ class CapabilityEvaluationRunner:
                 "maximized_mean_ms": 0.0,
                 "overhead_mean_ms": 0.0,
             },
-            "calibration": {
-                "status": "blocked",
-                "automatic_adoption": False,
-                "requires_human_interpretation": True,
-            },
+            "calibration": proxy_calibration(contract_proxy, blocked=True),
             "official_score_policy": {
                 "model_weight_score_unchanged": True,
                 "official_benchmark_claimed": False,
             },
             "claims": {
                 "task_quality_uplift_claimed": False,
+                "quality_claim": quality_claim_boundary(contract_proxy),
                 "requires_human_interpretation": True,
                 "automatic_adoption": False,
                 "scope": "blocked",
@@ -353,6 +324,7 @@ class CapabilityEvaluationRunner:
                     }
                     for case in report["cases"]
                 ],
+                "contract_compliance_proxy": report["contract_compliance_proxy"],
                 "task_quality": report["task_quality"],
                 "scaffold_contract": report["scaffold_contract"],
                 "calibration": report["calibration"],

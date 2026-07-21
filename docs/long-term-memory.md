@@ -33,6 +33,14 @@ the chat runtime never uses that bypass for operational context.
 This policy does not prove that an eligible memory is true. Source quality,
 confidence, TTL, and task-specific verification remain separate obligations.
 
+Before eligible records reach the chat `ModelAdapter` context, the Context
+Mediation Layer applies an additional provenance, routing-integrity,
+per-record producer-Receipt/repository binding, deduplication, prompt-injection,
+and size-budget boundary. Directly inserted and legacy-unreceipted records remain
+audit-readable but are not model-facing context. See
+`docs/context-mediation.md`. This extra boundary is read-only during preview and
+does not turn source/confidence attestations into proof of truth.
+
 ## Storage
 
 The default database is `runtime/spst_long_term_memory.db`.
