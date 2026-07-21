@@ -25,6 +25,7 @@ class ToolAdapter(ABC):
         profile: str,
         *,
         governance_authorized: bool,
+        profile_contract_version: int | None = None,
     ) -> dict[str, Any]:
         """Run one fixed local verification profile after governance approval."""
         ...

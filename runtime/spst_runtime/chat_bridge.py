@@ -7,6 +7,10 @@ from spst_runtime.adaptive_profile import RequestedProfile, select_execution_pro
 from spst_runtime.cli import run_dispatch, run_loop
 from spst_runtime.chat_session import ChatSessionStore, record_turn, summarize_session
 from spst_runtime.context_mediation import ContextBudget, ContextMediator
+from spst_runtime.context_review import (
+    ContextSemanticReviewError,
+    ContextSemanticReviewLedger,
+)
 from spst_runtime.evidence_context import (
     EvidenceContextError,
     EvidenceContextVerifier,
@@ -112,7 +116,11 @@ def preview_context(
                 origin_index,
                 candidates,
             )
-        except EvidenceContextError:
+            origin_index = ContextSemanticReviewLedger(
+                str(resolved_memory_path),
+                read_only=True,
+            ).apply_gate(origin_index, candidates)
+        except (EvidenceContextError, ContextSemanticReviewError):
             origin_index = reject_unverifiable_artifact_origins(
                 origin_index,
                 candidates,

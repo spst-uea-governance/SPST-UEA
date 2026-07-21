@@ -6,9 +6,14 @@ import re
 import secrets
 from typing import Any, Callable
 
+from spst_runtime.context_review import validate_producer_context_binding
 from spst_runtime.engines.governance_engine import GovernanceEngine
 from spst_runtime.evaluation.operational_corpus import OperationalEvaluationCorpus
-from spst_runtime.evaluation.producer_evidence import verified_producer_binding
+from spst_runtime.evaluation.producer_evidence import (
+    CONTEXT_SCHEMA_VERSION,
+    SCHEMA_VERSION as PRODUCER_SCORING_SCHEMA_VERSION,
+    verified_producer_binding,
+)
 from spst_runtime.evaluation.quality_evidence import (
     IndependentExactJsonScorer,
     paired_hoeffding_interval,
@@ -340,8 +345,21 @@ class PairedQualityEvidenceLedger:
             return None, "producer_not_completed"
         if binding.get("verification_status") != "passed":
             return None, "producer_verification_not_passed"
-        if binding.get("schema_version") != "producer-evidence-v3":
+        binding_schema = binding.get("schema_version")
+        if binding_schema not in {
+            PRODUCER_SCORING_SCHEMA_VERSION,
+            CONTEXT_SCHEMA_VERSION,
+        }:
             return None, "producer_scoring_binding_required"
+        if binding_schema == CONTEXT_SCHEMA_VERSION:
+            context_valid, _ = validate_producer_context_binding(
+                binding.get("context_intervention")
+            )
+            if (
+                binding.get("context_intervention_status") != "ready"
+                or not context_valid
+            ):
+                return None, "producer_context_intervention_invalid"
         if binding.get("scoring_material_status") != "ready":
             return None, "producer_scoring_material_unresolved"
         run_instance_id = binding.get("producer_run_instance_id")

@@ -83,6 +83,18 @@ Run commands from `runtime/` unless noted otherwise:
   unrelated changes only for file-scoped bindings; fail closed when source
   scope cannot be established. Preserve `untrusted_evidence_only` authority and
   `asserted_not_independently_established` semantic status.
+- Do not deliver an evidence-context artifact until an append-only semantic
+  review exactly binds its artifact, source, producer Receipt, memory record,
+  projection, and policy and records a `supported` human attestation. Keep
+  reviewer identity and reviewer independence explicitly self-attested and
+  unverified; a review is support evidence, not proof that the statement is true.
+- Attribute context utility only from the isolated context-intervention profile
+  and a revalidated Phase 16 evaluation with at least eight pairs, the fixed
+  uncertainty bound, and accepted semantic and outcome reviews. Reject caller
+  scores, missing or mismatched interventions, context-bearing baselines, and
+  non-isolated comparisons. Report beneficial, harmful, and inconclusive
+  directions. Never upgrade adapter submission into verified provider uptake or
+  causal/general model-quality evidence.
 - A verified v4 receipt proves routing, profile, trace, governance, memory
   action, mediated-context digests, session binding, provenance, and the
   recorded repository identity. v1-v3 remain narrower legacy evidence.

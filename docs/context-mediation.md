@@ -96,11 +96,16 @@ in the database for audit but are not model-facing context.
 
 ## Model Input Binding
 
-`spst-model-input-binding-v1` binds the normalized task, complete context-
-packet digest, bounded model-facing item projection, instructions digest, and
-canonical model input. The adapter rejects packet digest changes, task
+`spst-model-input-binding-v2` binds the normalized task, complete context-
+packet digest, bounded model-facing item projection, instructions digest,
+canonical model input, and the exact reviewed artifact and semantic-review
+digest sets. The adapter rejects packet digest changes, task
 mismatches, non-ready items, altered item text, and disagreement between the
 packet items and `retrieved_context`.
+
+Evidence-context items additionally require an exact supported semantic review.
+The review is source- and record-bound but remains a self-attested human
+decision, not authenticated identity or semantic truth.
 
 The optional OpenAI adapter submits the canonical input and includes the model-
 input and context-packet digests in request metadata. Tests use a captured local

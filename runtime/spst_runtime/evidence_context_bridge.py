@@ -3,6 +3,11 @@ import json
 from pathlib import Path
 from typing import Any
 
+from spst_runtime.context_review import (
+    SEMANTIC_REVIEW_SCOPE,
+    ContextSemanticReviewError,
+    ContextSemanticReviewLedger,
+)
 from spst_runtime.evidence_context import (
     SUPPORTED_ARTIFACT_KINDS,
     EvidenceContextCompiler,
@@ -110,24 +115,70 @@ def build_parser() -> argparse.ArgumentParser:
     verify_parser = commands.add_parser("verify")
     _add_store_arguments(verify_parser)
     verify_parser.add_argument("--record-id", required=True)
+
+    review_parser = commands.add_parser("review")
+    _add_store_arguments(review_parser)
+    review_parser.add_argument("--record-id", required=True)
+    review_parser.add_argument("--reviewer-id", required=True)
+    review_parser.add_argument("--decision", choices=("supported", "unsupported"), required=True)
+    review_parser.add_argument("--artifact-sha256", required=True)
+    review_parser.add_argument("--source-sha256", required=True)
+    review_parser.add_argument("--review-note", required=True)
+
+    intervention_parser = commands.add_parser("intervention")
+    _add_store_arguments(intervention_parser)
+    intervention_parser.add_argument("--artifact-sha256", required=True)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     try:
-        if arguments.command == "verify":
+        if arguments.command in {"verify", "review", "intervention"}:
             compiler = _compiler(arguments, read_only=True)
-            matches = [
-                record
-                for record in compiler.memory.list_all()
-                if record.id == arguments.record_id
-            ]
-            if len(matches) != 1:
-                raise EvidenceContextError(
-                    "artifact_record_missing" if not matches else "artifact_record_ambiguous"
+            reviews = ContextSemanticReviewLedger(
+                arguments.memory_db,
+                read_only=arguments.command != "review",
+            )
+            if arguments.command == "intervention":
+                record = reviews.find_artifact_record(arguments.artifact_sha256)
+            else:
+                matches = [
+                    record
+                    for record in compiler.memory.list_all()
+                    if record.id == arguments.record_id
+                ]
+                if len(matches) != 1:
+                    raise EvidenceContextError(
+                        "artifact_record_missing"
+                        if not matches
+                        else "artifact_record_ambiguous"
+                    )
+                record = matches[0]
+            structural = compiler.verifier.verify_record(record)
+            if structural.get("verified") is not True:
+                raise EvidenceContextError(str(structural.get("reason")))
+            if arguments.command == "verify":
+                output = {
+                    **structural,
+                    "semantic_support": reviews.verify_record(record, structural),
+                }
+            elif arguments.command == "review":
+                output = reviews.review(
+                    record,
+                    structural,
+                    {
+                        "reviewer_id": arguments.reviewer_id,
+                        "reviewer_kind": "human",
+                        "review_scope": SEMANTIC_REVIEW_SCOPE,
+                        "decision": arguments.decision,
+                        "artifact_sha256": arguments.artifact_sha256,
+                        "source_sha256": arguments.source_sha256,
+                        "review_note": arguments.review_note,
+                    },
                 )
-            output = compiler.verifier.verify_record(matches[0])
+            else:
+                output = reviews.build_intervention(record, structural)
         else:
             compiler = _compiler(arguments)
             common = _compile_arguments(arguments)
@@ -147,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
                     action_id=arguments.action_id,
                 )
             output = _bounded_result(result)
-    except EvidenceContextError as error:
+    except (EvidenceContextError, ContextSemanticReviewError) as error:
         print(
             json.dumps(
                 {"ok": False, "reason": str(error)},

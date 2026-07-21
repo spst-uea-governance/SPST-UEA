@@ -89,17 +89,31 @@ python -m spst_runtime.evidence_context_bridge compile-file `
   --source-file path/to/source.py
 ```
 
-The compiler uses the existing long-term-memory DB, revalidates its source on
-every preview, and never upgrades the statement above untrusted evidence. See
-`../docs/evidence-derived-context.md` for file, commit, Action, TTL, and
-supersession semantics.
+The compiler uses the existing long-term-memory DB and revalidates its source on
+every preview. A compiled artifact is not delivered until an exact, append-only
+human semantic-support review is recorded. Reviewer identity remains
+self-attested, and every delivered item remains untrusted evidence. See
+`../docs/evidence-derived-context.md` and
+`../docs/context-semantic-review-and-utility.md`.
+
+```powershell
+python -m spst_runtime.evidence_context_bridge review `
+  --repository-root .. `
+  --record-id <memory-record-id> `
+  --reviewer-id <local-reviewer-id> `
+  --decision supported `
+  --artifact-sha256 <artifact-sha256> `
+  --source-sha256 <source-sha256> `
+  --review-note "Why the exact source supports the bounded statement"
+```
 
 Only memory records with a verified producer Receipt are eligible; repository
 routes additionally require the producer's exact repository identity to match.
 Relevance is recomputed under `deterministic-lexical-v2` with a fail-closed
 floor; a caller-supplied score cannot promote unrelated memory. A ready packet
-is projected into `spst-model-input-binding-v1`, whose digest and delivery
-status are included in the Routing Receipt. The API-key-free adapter records
+is projected into `spst-model-input-binding-v2`, whose digest, reviewed artifact
+set, semantic-review set, and delivery status are included in the Routing
+Receipt. The API-key-free adapter records
 the binding as `scaffold_only` and does not claim that Codex consumed it.
 See `../docs/context-mediation.md` for the selection, provenance, budget,
 origin-binding, and instruction-authority boundaries.
@@ -128,6 +142,22 @@ reports a fixed 95% Hoeffding bound, and requires a digest-bound human review:
 
 See `../docs/phase16-independent-paired-quality.md`. The offline conformance
 fixture proves the mechanism only; it is not GPT-uplift evidence.
+
+After an isolated context experiment and accepted Phase 16 review, derive or
+inspect bounded utility without supplying scores:
+
+```powershell
+python -m spst_runtime.context_utility_bridge attribute `
+  --repository-root .. `
+  --evaluation-id <paired-evaluation-id> `
+  --artifact-sha256 <artifact-sha256>
+
+python -m spst_runtime.context_utility_bridge status --repository-root ..
+```
+
+The result distinguishes beneficial association, harmful association, and an
+inconclusive interval. It does not prove provider uptake, causality, or general
+GPT quality.
 
 After `python -m pip install -e ".[dev]"`, the console script is also available:
 

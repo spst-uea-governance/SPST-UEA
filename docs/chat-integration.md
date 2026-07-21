@@ -63,9 +63,10 @@ See `docs/context-mediation.md`.
 
 The `ModelAdapter` receives the complete digest-sealed packet and an identical
 copy of its selected items. It validates both before constructing
-`spst-model-input-binding-v1`. The resulting model-input digest, packet digest,
-item count, context status, and delivery status are included in the Routing
-Receipt. The no-key adapter reports `recorded_not_executed` and
+`spst-model-input-binding-v2`. The resulting model-input digest, packet digest,
+item count, reviewed artifact and semantic-review digest sets, context status,
+and delivery status are included in the Routing Receipt. The no-key adapter
+reports `recorded_not_executed` and
 `scaffold_only`; only the optional API adapter can report
 `submitted_to_provider`, and that still does not establish causal quality
 improvement.

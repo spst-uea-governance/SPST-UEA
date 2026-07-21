@@ -83,9 +83,13 @@ execution root, repository and resolved-root digests, return code, duration,
 output digest, command digest, executor identity, and provenance bindings. It
 does not persist raw stdout, stderr, arbitrary command text, or the absolute
 repository path. A failed command can have a verified execution binding while
-`successful` remains false. Legacy manifests remain verifiable; an unexecuted
-legacy fixed profile can run only when its stored workspace digest matches the
-root resolved by the current profile definition.
+`successful` remains false. Contract v3 gives the full `pytest` profile a
+300-second bound; v2 remains frozen at 120 seconds. Execution and verification
+resolve the exact stored contract version, so increasing the current timeout
+does not reinterpret or invalidate historical v2 evidence. Unversioned legacy
+manifests remain verifiable; an unexecuted legacy fixed profile can run only
+when its stored workspace digest matches the root resolved by the current
+profile definition.
 
 ## External Codex Tools and HITL
 

@@ -48,9 +48,13 @@ class ToolProvider(ToolAdapter):
         if tool == "execute_local":
             return self.execute_local(payload.get("command", []), governance_authorized=bool(payload.get("authorized")))
         if tool == "verify_local":
+            contract_version = payload.get("profile_contract_version")
             return self.execute_verification_profile(
                 str(payload.get("profile") or ""),
                 governance_authorized=bool(payload.get("authorized")),
+                profile_contract_version=(
+                    contract_version if isinstance(contract_version, int) else None
+                ),
             )
         if tool in self._dynamic_tools:
             return self.run_dynamic_tool(tool, payload)
@@ -184,6 +188,7 @@ class ToolProvider(ToolAdapter):
         profile: str,
         *,
         governance_authorized: bool,
+        profile_contract_version: int | None = None,
     ) -> dict[str, Any]:
         """Run a fixed local profile without accepting arbitrary command input."""
         if not governance_authorized:
@@ -193,7 +198,9 @@ class ToolProvider(ToolAdapter):
                 "reason": "governance_required",
                 "sandbox": self.sandbox_name,
             }
-        command = command_for(profile)
+        command = command_for(
+            profile, contract_version=profile_contract_version
+        )
         if command is None:
             return {
                 "profile": profile,
@@ -209,7 +216,9 @@ class ToolProvider(ToolAdapter):
                 cwd=self._workspace_root,
                 capture_output=True,
                 text=True,
-                timeout=timeout_for(profile),
+                timeout=timeout_for(
+                    profile, contract_version=profile_contract_version
+                ),
                 shell=False,
                 check=False,
             )

@@ -6,7 +6,9 @@ from typing import Any
 from spst_runtime.context_mediation import CONTEXT_AUTHORITY, CONTEXT_PACKET_SCHEMA
 
 
-MODEL_INPUT_SCHEMA = "spst-model-input-binding-v1"
+MODEL_INPUT_SCHEMA_V1 = "spst-model-input-binding-v1"
+MODEL_INPUT_SCHEMA_V2 = "spst-model-input-binding-v2"
+MODEL_INPUT_SCHEMA = MODEL_INPUT_SCHEMA_V2
 MODEL_INPUT_CONTENT_SCHEMA = "spst-model-input-content-v1"
 MODEL_CONTEXT_SCHEMA = "spst-model-context-projection-v1"
 
@@ -44,6 +46,20 @@ def bind_model_input(prompt: str, context: dict[str, Any] | None = None) -> dict
         "context": projection,
     }
     canonical_input = _canonical_json(content)
+    delivered_artifacts = sorted(
+        {
+            str(item["evidence_context"]["artifact_sha256"])
+            for item in projection["items"]
+            if isinstance(item.get("evidence_context"), dict)
+        }
+    )
+    delivered_reviews = sorted(
+        {
+            str(item["evidence_context"]["semantic_review_sha256"])
+            for item in projection["items"]
+            if isinstance(item.get("evidence_context"), dict)
+        }
+    )
     unsigned = {
         "schema": MODEL_INPUT_SCHEMA,
         "prompt_sha256": prompt_sha256,
@@ -53,6 +69,10 @@ def bind_model_input(prompt: str, context: dict[str, Any] | None = None) -> dict
         "canonical_input_sha256": _sha256_text(canonical_input),
         "context_status": projection["status"],
         "delivered_context_items": len(projection["items"]),
+        "delivered_artifact_sha256s": delivered_artifacts,
+        "delivered_artifact_set_sha256": _canonical_hash(delivered_artifacts),
+        "delivered_semantic_review_sha256s": delivered_reviews,
+        "delivered_semantic_review_set_sha256": _canonical_hash(delivered_reviews),
         "unbound_context_rejected": projection["status"] == "unbound_context_rejected",
     }
     return {
@@ -77,6 +97,10 @@ def binding_evidence(binding: dict[str, Any], *, delivery_status: str) -> dict[s
             "canonical_input_sha256",
             "context_status",
             "delivered_context_items",
+            "delivered_artifact_sha256s",
+            "delivered_artifact_set_sha256",
+            "delivered_semantic_review_sha256s",
+            "delivered_semantic_review_set_sha256",
             "unbound_context_rejected",
         )
     } | {"delivery_status": delivery_status}
@@ -162,7 +186,7 @@ def _project_item(item: Any) -> dict[str, Any]:
         item.get("relevance_score"),
         "context_item_relevance_invalid",
     )
-    return {
+    projected: dict[str, Any] = {
         "id": str(item.get("id", "")),
         "kind": str(item.get("kind", "episodic")),
         "source": str(item.get("source", "")),
@@ -174,6 +198,25 @@ def _project_item(item: Any) -> dict[str, Any]:
         "origin_receipt_id": receipt_id,
         "text": text,
     }
+    if origin.get("binding_type") == "evidence_context_artifact":
+        artifact = origin.get("artifact")
+        review = origin.get("semantic_review")
+        if (
+            not isinstance(artifact, dict)
+            or not _is_sha256(artifact.get("artifact_sha256"))
+            or not isinstance(review, dict)
+            or review.get("decision") != "supported"
+            or not _is_sha256(review.get("review_sha256"))
+            or review.get("artifact_sha256") != artifact.get("artifact_sha256")
+        ):
+            raise ModelInputBindingError("context_item_semantic_review_invalid")
+        projected["evidence_context"] = {
+            "artifact_sha256": artifact["artifact_sha256"],
+            "semantic_review_id": review.get("review_id"),
+            "semantic_review_sha256": review["review_sha256"],
+            "semantic_support": review.get("semantic_support"),
+        }
+    return projected
 
 
 def _canonical_hash(value: Any) -> str:

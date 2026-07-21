@@ -39,6 +39,12 @@ digest, rubric digest, and output digest are included in a v3 `PBIND`; reports
 without this material continue to produce the legacy v2 binding and are not
 eligible for Phase 16.
 
+An isolated ARCH-03 context experiment may additionally emit a v4 PBIND. The
+v4 extension binds the exact reviewed context intervention submitted through
+the adapter argument. A no-context control remains v3. Phase 16 accepts both
+forms but independently recomputes either one; ARCH-03 utility attribution
+requires the v4 treatment and rejects a context-bearing baseline.
+
 ## Independent and Arm-Blinded Scoring
 
 `PairedQualityEvidenceLedger` reloads both reports and recomputes each saved

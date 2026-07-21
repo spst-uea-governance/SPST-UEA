@@ -1,4 +1,5 @@
 import asyncio
+from copy import deepcopy
 import hashlib
 import json
 import secrets
@@ -7,6 +8,10 @@ from typing import Any
 
 from spst_runtime.engines.capability_maximizer import CapabilityMaximizer
 from spst_runtime.engines.governance_engine import GovernanceEngine
+from spst_runtime.context_review import (
+    producer_context_binding,
+    validate_context_intervention,
+)
 from spst_runtime.evaluation.operational_corpus import OperationalEvaluationCorpus
 from spst_runtime.evaluation.producer_evidence import (
     build_producer_evidence,
@@ -47,8 +52,18 @@ class OperationalShadowRunner:
         baseline_candidate_id: str | None = None,
         split: str = "holdout",
         task_ids: list[str] | None = None,
+        context_experiment: bool = False,
+        context_intervention: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Evaluate a candidate in an L0 shadow boundary against active corpus tasks."""
+        if context_intervention is not None and not context_experiment:
+            raise ValueError("context_intervention_requires_isolated_experiment")
+        if context_intervention is not None:
+            valid_intervention, intervention_reason = validate_context_intervention(
+                context_intervention
+            )
+            if not valid_intervention:
+                raise ValueError(intervention_reason or "context_intervention_invalid")
         tasks, manifest = self.corpus.load_for_shadow(split=split, task_ids=task_ids)
         governance = self._governance_decision(len(tasks), split)
         if not governance.get("authorized", False):
@@ -73,11 +88,15 @@ class OperationalShadowRunner:
                 task,
                 mode="baseline",
                 task_scoring_supported=task_scoring_supported,
+                context_experiment=context_experiment,
+                context_intervention=None,
             )
             maximized = self._run_task(
                 task,
                 mode="maximized",
                 task_scoring_supported=task_scoring_supported,
+                context_experiment=context_experiment,
+                context_intervention=context_intervention,
             )
             cases.append(
                 {
@@ -127,8 +146,26 @@ class OperationalShadowRunner:
                 "same_scoring_rubric": True,
                 "same_contract_proxy": True,
                 "independent_blinded_evaluator": False,
-                "baseline_mode": "normal_adapter_context",
-                "maximized_mode": "capability_maximization_context",
+                "baseline_mode": (
+                    "context_control_no_intervention"
+                    if context_experiment
+                    else "normal_adapter_context"
+                ),
+                "maximized_mode": (
+                    "context_control_reviewed_intervention"
+                    if context_experiment
+                    else "capability_maximization_context"
+                ),
+                "comparison_profile": (
+                    "isolated_context_intervention_v1"
+                    if context_experiment
+                    else "capability_maximization_v1"
+                ),
+                "context_intervention_sha256": (
+                    context_intervention.get("intervention_sha256")
+                    if isinstance(context_intervention, dict)
+                    else None
+                ),
             },
             "cases": cases,
             "contract_compliance_proxy": contract_proxy,
@@ -176,6 +213,8 @@ class OperationalShadowRunner:
         *,
         mode: str,
         task_scoring_supported: bool,
+        context_experiment: bool,
+        context_intervention: dict[str, Any] | None,
     ) -> dict[str, Any]:
         plan = None
         context: dict[str, Any] = {
@@ -184,13 +223,13 @@ class OperationalShadowRunner:
                 "evaluation and must not mutate runtime state."
             ),
             "evaluation": {
-                "mode": mode,
+                "mode": "context_control" if context_experiment else mode,
                 "suite_version": self.SUITE_VERSION,
                 "case_id": task["task_id"],
                 "shadow_only": True,
             },
         }
-        if mode == "maximized":
+        if mode == "maximized" and not context_experiment:
             plan = self.capability_maximizer.maximize(
                 task["prompt"],
                 amplification={"work_units": ["operational_shadow"]},
@@ -198,6 +237,8 @@ class OperationalShadowRunner:
                 payload={"benchmark_suite": task["domain"], "shadow_only": True},
             )
             context["capability_maximization"] = plan
+        if context_intervention is not None:
+            context["evidence_context_intervention"] = deepcopy(context_intervention)
 
         started_at = time.perf_counter()
         try:
@@ -220,7 +261,14 @@ class OperationalShadowRunner:
                 "verification": {"status": "error", "score": 0.0, "check_count": 0},
                 "scaffold_contract_score": self._scaffold_score(plan),
                 "plan": self._plan_summary(plan),
+                "evaluation_profile": (
+                    "context_control" if context_experiment else mode
+                ),
             }
+            task_result = self._with_context_intervention(
+                task_result,
+                context_intervention,
+            )
             return self._with_scoring_material(task_result, error_artifact, task)
 
         text = str(result.get("text", ""))
@@ -244,7 +292,9 @@ class OperationalShadowRunner:
             "verification": verification,
             "scaffold_contract_score": self._scaffold_score(plan),
             "plan": self._plan_summary(plan),
+            "evaluation_profile": "context_control" if context_experiment else mode,
         }
+        task_result = self._with_context_intervention(task_result, context_intervention)
         return self._with_scoring_material(task_result, text, task)
 
     def _verify(self, task: dict[str, Any], text: str) -> dict[str, Any]:
@@ -467,6 +517,18 @@ class OperationalShadowRunner:
             if summary["strategy_count"] >= 4 and summary["verification_check_count"] >= 2
             else 0.5
         )
+
+    @staticmethod
+    def _with_context_intervention(
+        result: dict[str, Any],
+        intervention: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if intervention is None:
+            return result
+        return {
+            **result,
+            "context_intervention": producer_context_binding(intervention),
+        }
 
     @staticmethod
     def _with_scoring_material(

@@ -428,9 +428,11 @@ class ContextMediator:
             binding_type = candidate.get("binding_type", "routing_memory")
             artifact: dict[str, Any] = {}
             source_binding: dict[str, Any] = {}
+            semantic_review: dict[str, Any] = {}
             if binding_type == "evidence_context_artifact":
                 artifact_value = candidate.get("artifact")
                 source_value = candidate.get("source_binding")
+                review_value = candidate.get("semantic_review")
                 if not isinstance(artifact_value, dict) or not self._is_sha256(
                     artifact_value.get("artifact_sha256")
                 ):
@@ -464,8 +466,39 @@ class ContextMediator:
                 if repository.get("binding_verified") is not True:
                     failures.add("artifact_producer_repository_unverified")
                     continue
+                if (
+                    not isinstance(review_value, dict)
+                    or review_value.get("schema")
+                    != "spst-context-semantic-support-gate-v1"
+                    or review_value.get("decision") != "supported"
+                    or review_value.get("semantic_support")
+                    != "human_self_attested_supported"
+                    or review_value.get("identity_assurance") != "self_attested"
+                    or review_value.get("human_identity_cryptographically_verified")
+                    is not False
+                    or review_value.get("reviewer_independence_verified") is not False
+                    or not self._is_sha256(review_value.get("review_sha256"))
+                ):
+                    failures.add("artifact_semantic_review_unverified")
+                    continue
+                if (
+                    review_value.get("artifact_sha256")
+                    != artifact_value.get("artifact_sha256")
+                    or review_value.get("source_sha256")
+                    != source_value.get("source_sha256")
+                    or review_value.get("producer_receipt_id")
+                    != candidate.get("receipt_id")
+                    or review_value.get("memory_record_id") != record.get("id")
+                    or review_value.get("memory_record_sha256") != record_sha256
+                    or review_value.get("projection_sha256")
+                    != candidate.get("record_text_sha256")
+                    or review_value.get("policy_version") != record.get("policy_version")
+                ):
+                    failures.add("artifact_semantic_review_binding_mismatch")
+                    continue
                 artifact = artifact_value
                 source_binding = source_value
+                semantic_review = review_value
             elif binding_type == "routing_memory":
                 if repository_identity is not None:
                     if not isinstance(repository, dict) or repository.get("bound") is not True:
@@ -547,6 +580,29 @@ class ContextMediator:
                         "current_repository_identity_sha256",
                     ),
                 )
+                selected["semantic_review"] = self._copy_fields(
+                    semantic_review,
+                    (
+                        "schema",
+                        "review_id",
+                        "review_sha256",
+                        "review_scope",
+                        "decision",
+                        "reviewer_id",
+                        "reviewer_kind",
+                        "identity_assurance",
+                        "human_identity_cryptographically_verified",
+                        "reviewer_independence_verified",
+                        "artifact_sha256",
+                        "source_sha256",
+                        "producer_receipt_id",
+                        "memory_record_id",
+                        "memory_record_sha256",
+                        "projection_sha256",
+                        "policy_version",
+                        "semantic_support",
+                    ),
+                )
             return None, selected
 
         priority = (
@@ -561,6 +617,10 @@ class ContextMediator:
             "artifact_producer_repository_unbound",
             "artifact_producer_repository_unverified",
             "artifact_origin_binding_invalid",
+            "artifact_semantic_review_binding_mismatch",
+            "artifact_semantic_review_unverified",
+            "artifact_semantic_review_unsupported",
+            "artifact_semantic_review_missing",
             "artifact_semantic_claim_invalid",
             "origin_binding_type_unsupported",
             "origin_repository_identity_mismatch",
@@ -680,6 +740,7 @@ class ContextMediator:
                     "current_repository_identity_sha256",
                     "index_sha256",
                     "artifact_compiler",
+                    "semantic_review_gate",
                 ),
             ),
             "provenance": {
@@ -723,7 +784,7 @@ class ContextMediator:
             "kind": str(record.get("kind", "episodic")),
             "source": record["source"],
             "source_trust": (
-                "source_verified_untrusted"
+                "human_supported_source_verified_untrusted"
                 if origin.get("binding_type") == "evidence_context_artifact"
                 else "attested_not_verified"
             ),

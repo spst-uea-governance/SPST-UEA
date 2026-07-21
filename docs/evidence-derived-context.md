@@ -109,6 +109,27 @@ python -m spst_runtime.evidence_context_bridge verify `
   --record-id <memory-record-id>
 ```
 
+Structural verification is necessary but no longer sufficient for delivery.
+Record an exact semantic-support decision before normal preview can select the
+artifact:
+
+```powershell
+python -m spst_runtime.evidence_context_bridge review `
+  --repository-root .. `
+  --record-id <memory-record-id> `
+  --reviewer-id <local-reviewer-id> `
+  --decision supported `
+  --artifact-sha256 <artifact-sha256> `
+  --source-sha256 <source-sha256> `
+  --review-note "The bound source supports the bounded statement."
+```
+
+The review is append-only and binds the complete memory record, projection,
+artifact, source, producer Receipt, and policy. The runtime records reviewer
+identity as self-attested; it does not authenticate the person or establish
+reviewer independence. An `unsupported` decision is retained and excludes the
+artifact.
+
 Normal read-only retrieval remains:
 
 ```powershell
@@ -118,8 +139,9 @@ python -m spst_runtime.chat_bridge `
 ```
 
 The preview revalidates candidate artifacts and augments the receipt-derived
-origin index in memory. It does not update access times, repair records, create
-indexes, or write provenance entries.
+origin index in memory, then applies the semantic-review gate. It does not
+update access times, repair records, create indexes, or write provenance
+entries.
 
 ## Lifecycle and failure behavior
 
@@ -141,6 +163,9 @@ Representative rejection reasons include:
 - `artifact_digest_mismatch`
 - `artifact_kind_unsupported`
 - `artifact_repository_root_missing`
+- `artifact_semantic_review_missing`
+- `artifact_semantic_review_unsupported`
+- `semantic_review_digest_mismatch`
 
 ## Evidence boundary
 
@@ -149,3 +174,7 @@ policy eligibility, and model-input delivery binding. It does not prove the
 semantic truth of a human- or Codex-authored statement, general GPT quality
 improvement, model-weight change, or causal performance uplift. Those require
 separate review and paired evaluation evidence.
+
+ARCH-03 supplies that separate review and a bounded context-utility attribution
+path without changing the immutable ARCH-02 artifact claim. See
+`context-semantic-review-and-utility.md`.

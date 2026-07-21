@@ -4,12 +4,14 @@ import hashlib
 import json
 from typing import Any
 
+from spst_runtime.context_review import validate_producer_context_binding
 from spst_runtime.evaluation.quality_evidence import (
     validate_producer_scoring_material,
 )
 
 
 SCHEMA_VERSION = "producer-evidence-v3"
+CONTEXT_SCHEMA_VERSION = "producer-evidence-v4"
 LEGACY_SCHEMA_VERSION = "producer-evidence-v2"
 ARMS = ("baseline", "maximized")
 ARTIFACT_SEMANTIC_PROFILE = "contract-json-v1"
@@ -142,6 +144,9 @@ def build_producer_evidence(report: dict[str, Any]) -> list[dict[str, Any]]:
                 case=case,
                 result=result,
             )
+            context_intervention = _context_intervention_binding(
+                result.get("context_intervention")
+            )
             artifact_semantics = _artifact_semantic_binding(
                 result.get("artifact_semantics")
             )
@@ -151,7 +156,11 @@ def build_producer_evidence(report: dict[str, Any]) -> list[dict[str, Any]]:
             )
             binding = {
                 "schema_version": (
-                    SCHEMA_VERSION if scoring_material_present else LEGACY_SCHEMA_VERSION
+                    CONTEXT_SCHEMA_VERSION
+                    if scoring_material_present and context_intervention["present"]
+                    else SCHEMA_VERSION
+                    if scoring_material_present
+                    else LEGACY_SCHEMA_VERSION
                 ),
                 "producer_run_id": producer_run_id,
                 "task_id": task_id,
@@ -183,6 +192,14 @@ def build_producer_evidence(report: dict[str, Any]) -> list[dict[str, Any]]:
                         "producer_execution_id": result.get(
                             "producer_execution_id"
                         ),
+                    }
+                )
+            if context_intervention["present"]:
+                binding.update(
+                    {
+                        "context_intervention_status": context_intervention["status"],
+                        "context_intervention_reason": context_intervention["reason"],
+                        "context_intervention": context_intervention["binding"],
                     }
                 )
             binding["binding_id"] = f"PBIND-{_digest(binding)[:16]}"
@@ -245,7 +262,15 @@ def _semantic_configuration(
         for value in counts
     ):
         return _unresolved_configuration("semantic_configuration_plan_invalid")
-    semantic_value = {
+    context_intervention = _context_intervention_binding(result.get("context_intervention"))
+    if context_intervention["present"] and context_intervention["status"] != "ready":
+        return _unresolved_configuration(
+            str(context_intervention["reason"] or "context_intervention_unresolved")
+        )
+    evaluation_profile = result.get("evaluation_profile")
+    if evaluation_profile is not None and not isinstance(evaluation_profile, str):
+        return _unresolved_configuration("semantic_configuration_evaluation_profile_invalid")
+    semantic_value: dict[str, Any] = {
         "suite": {
             "version": suite.get("version"),
             "split": suite.get("split"),
@@ -265,6 +290,22 @@ def _semantic_configuration(
             "strategy_count": plan.get("strategy_count"),
             "verification_check_count": plan.get("verification_check_count"),
         },
+        "evaluation_profile": evaluation_profile,
+        "context_intervention": (
+            {
+                "artifact_sha256": context_intervention["binding"].get(
+                    "artifact_sha256"
+                ),
+                "semantic_review_sha256": context_intervention["binding"].get(
+                    "semantic_review_sha256"
+                ),
+                "producer_context_binding_sha256": context_intervention["binding"].get(
+                    "producer_context_binding_sha256"
+                ),
+            }
+            if context_intervention["status"] == "ready"
+            else None
+        ),
     }
     required = (
         semantic_value["suite"]["version"],
@@ -317,6 +358,30 @@ def _artifact_semantic_binding(value: Any) -> dict[str, Any]:
         "status": "unresolved",
         "reason": "semantic_artifact_record_invalid",
         "semantic_digest": None,
+    }
+
+
+def _context_intervention_binding(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {
+            "present": False,
+            "status": "absent",
+            "reason": None,
+            "binding": {},
+        }
+    valid, reason = validate_producer_context_binding(value)
+    if not valid or not isinstance(value, dict):
+        return {
+            "present": True,
+            "status": "unresolved",
+            "reason": reason or "producer_context_binding_invalid",
+            "binding": {},
+        }
+    return {
+        "present": True,
+        "status": "ready",
+        "reason": None,
+        "binding": deepcopy(value),
     }
 
 

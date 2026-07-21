@@ -9,6 +9,10 @@ import pytest
 
 from spst_runtime.action_manifest import ActionManifestLedger
 from spst_runtime.chat_bridge import preview_context, run_chat_turn
+from spst_runtime.context_review import (
+    SEMANTIC_REVIEW_SCOPE,
+    ContextSemanticReviewLedger,
+)
 from spst_runtime.evidence_context import (
     EVIDENCE_CONTEXT_METADATA_KEY,
     EvidenceContextCompiler,
@@ -81,6 +85,32 @@ def _db_manifest(path: Path) -> dict[str, str]:
     }
 
 
+def _support(
+    compiler: EvidenceContextCompiler,
+    compiled: dict,
+    *,
+    decision: str = "supported",
+) -> dict:
+    record_id = compiled["memory_record"]["id"]
+    record = next(record for record in compiler.memory.list_all() if record.id == record_id)
+    structural = compiler.verifier.verify_record(record, now=NOW)
+    artifact = compiled["artifact"]
+    return ContextSemanticReviewLedger(compiler.memory.repository.path).review(
+        record,
+        structural,
+        {
+            "reviewer_id": "human-reviewer-local",
+            "reviewer_kind": "human",
+            "review_scope": SEMANTIC_REVIEW_SCOPE,
+            "decision": decision,
+            "artifact_sha256": artifact["artifact_sha256"],
+            "source_sha256": artifact["source"]["source_sha256"],
+            "review_note": "The bound source supports the bounded artifact statement.",
+        },
+        now=NOW,
+    )
+
+
 def test_file_artifact_survives_unrelated_change_but_rejects_source_change(
     tmp_path: Path,
 ):
@@ -110,6 +140,19 @@ def test_file_artifact_survives_unrelated_change_but_rejects_source_change(
         now=NOW,
     )
     assert compiled["verification"]["verified"] is True
+    unreviewed = preview_context(
+        "source-scoped context validity unrelated changes",
+        session_path=str(session),
+        memory_path=str(memory),
+        repository_root=str(repository),
+    )
+    assert not any(
+        item["source"] == "evidence_context_compiler" for item in unreviewed["items"]
+    )
+    assert unreviewed["selection"]["rejection_reasons"][
+        "artifact_semantic_review_missing"
+    ] == 1
+    _support(compiler, compiled)
     session_before = _db_manifest(session)
     memory_before = _db_manifest(memory)
 
@@ -124,9 +167,15 @@ def test_file_artifact_survives_unrelated_change_but_rejects_source_change(
         item for item in packet["items"] if item["source"] == "evidence_context_compiler"
     )
     assert artifact_item["kind"] == "architecture_decision"
-    assert artifact_item["source_trust"] == "source_verified_untrusted"
+    assert artifact_item["source_trust"] == (
+        "human_supported_source_verified_untrusted"
+    )
     assert artifact_item["origin"]["binding_type"] == "evidence_context_artifact"
     assert artifact_item["origin"]["source_binding"]["current_match"] is True
+    assert artifact_item["origin"]["semantic_review"]["decision"] == "supported"
+    assert artifact_item["origin"]["semantic_review"][
+        "human_identity_cryptographically_verified"
+    ] is False
     assert _db_manifest(session) == session_before
     assert _db_manifest(memory) == memory_before
 
@@ -259,7 +308,7 @@ def test_action_evidence_requires_verified_success_and_exact_repository_state(
         session_path=session,
         memory_path=memory,
     )
-    compiler.compile_action_result(
+    compiled = compiler.compile_action_result(
         producer_receipt_id=receipt_id,
         artifact_kind="test_evidence",
         title="Ruff verification passed",
@@ -267,6 +316,7 @@ def test_action_evidence_requires_verified_success_and_exact_repository_state(
         action_id=action["manifest"]["action_id"],
         now=NOW,
     )
+    _support(compiler, compiled)
     packet = preview_context(
         "Ruff verification passed repository state",
         session_path=str(session),
@@ -306,6 +356,7 @@ def test_ancestor_commit_artifact_and_explicit_supersession(tmp_path: Path):
         revision="HEAD",
         now=NOW,
     )
+    _support(compiler, commit_artifact)
 
     (repository / "unrelated.txt").write_text("descendant\n", encoding="utf-8")
     _git(repository, "add", "unrelated.txt")
@@ -410,4 +461,70 @@ def test_evidence_context_cli_compiles_and_verifies_record(tmp_path: Path):
         text=True,
     )
     assert verify_result.returncode == 0, verify_result.stderr
-    assert json.loads(verify_result.stdout)["verified"] is True
+    unreviewed = json.loads(verify_result.stdout)
+    assert unreviewed["verified"] is True
+    assert unreviewed["semantic_support"]["verified"] is False
+    assert unreviewed["semantic_support"]["reason"] == (
+        "artifact_semantic_review_missing"
+    )
+
+    review_result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "spst_runtime.evidence_context_bridge",
+            "review",
+            "--repository-root",
+            str(repository),
+            "--session-db",
+            str(session),
+            "--memory-db",
+            str(memory),
+            "--record-id",
+            record_id,
+            "--reviewer-id",
+            "human-reviewer-local",
+            "--decision",
+            "supported",
+            "--artifact-sha256",
+            compiled["artifact"]["artifact_sha256"],
+            "--source-sha256",
+            compiled["artifact"]["source_sha256"],
+            "--review-note",
+            "The exact bound source supports this bounded CLI statement.",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert review_result.returncode == 0, review_result.stderr
+    reviewed = json.loads(review_result.stdout)
+    assert reviewed["semantic_support"]["verified"] is True
+    assert reviewed["semantic_support"]["semantic_review"][
+        "human_identity_cryptographically_verified"
+    ] is False
+
+    intervention_result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "spst_runtime.evidence_context_bridge",
+            "intervention",
+            "--repository-root",
+            str(repository),
+            "--session-db",
+            str(session),
+            "--memory-db",
+            str(memory),
+            "--artifact-sha256",
+            compiled["artifact"]["artifact_sha256"],
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert intervention_result.returncode == 0, intervention_result.stderr
+    intervention = json.loads(intervention_result.stdout)
+    assert intervention["binding"]["semantic_support"] == (
+        "human_self_attested_supported"
+    )
