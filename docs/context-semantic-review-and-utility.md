@@ -94,3 +94,28 @@ python -m spst_runtime.context_utility_bridge status --repository-root ..
 The conformance fixture uses an isolated deterministic adapter to prove
 beneficial, harmful, and inconclusive paths. Those fixture results validate the
 mechanism, not SPST or GPT uplift in production.
+
+## ARCH-04 provider-observed extension
+
+ARCH-04 upgrades the transport boundary without upgrading the causal claim. An
+eligible adapter must return a provider observation that echoes the SHA-256 of
+the exact prompt, instructions, canonical model input, context intervention,
+evaluation contract, and remaining adapter context. The runtime also binds the
+provider/model declaration, response identifier, completion status, and exact
+output digest. Missing, mismatched, altered, or replayed observations fail
+closed; a no-key local Codex scaffold is ineligible.
+
+Both selected conditions are fresh calls and use a balanced, nonce-committed
+per-task order bound into the provider request and v5 PBIND.
+Both must produce v5 PBIND records. Before outcome review, the projection
+withholds source-pair mappings and the measured direction and exposes only a
+digest-bound blind surface. The reviewer must self-attest that the arm mapping
+was not accessed and that they are independent; the semantic-context reviewer
+and outcome reviewer must have different identifiers.
+
+After an accepted review, utility attribution may report
+`provider_uptake_observed: true`. It deliberately retains
+`provider_uptake_verified: false`, because the local evidence does not
+cryptographically authenticate the provider, prove that hidden model state used
+the context semantically, or establish causality. See
+`provider-observed-live-context-evaluation.md`.

@@ -12,6 +12,7 @@ from spst_runtime.evaluation.operational_corpus import OperationalEvaluationCorp
 from spst_runtime.evaluation.producer_evidence import (
     CONTEXT_SCHEMA_VERSION,
     SCHEMA_VERSION as PRODUCER_SCORING_SCHEMA_VERSION,
+    UPTAKE_SCHEMA_VERSION,
     verified_producer_binding,
 )
 from spst_runtime.evaluation.quality_evidence import (
@@ -20,7 +21,12 @@ from spst_runtime.evaluation.quality_evidence import (
     quality_rubric_digest,
     validate_producer_scoring_material,
 )
+from spst_runtime.live_pairing import (
+    validate_live_pair_execution,
+    validate_live_pair_execution_set,
+)
 from spst_runtime.persistence.sqlite_repository import SQLiteRepository
+from spst_runtime.provider_observation import validate_provider_observation_binding
 
 
 class PairedQualityEvidenceLedger:
@@ -34,6 +40,7 @@ class PairedQualityEvidenceLedger:
     MINIMUM_PAIRED_SAMPLES = 8
     CONFIDENCE_LEVEL = 0.95
     REVIEW_SCOPE = "paired_quality_scoring_artifact"
+    BLIND_REVIEW_SURFACE_SCHEMA = "spst-blind-review-surface-v1"
     METRIC_SCOPE = "task_specific_exact_json_quality_on_registered_local_corpus"
     _identifier = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
     _sha256 = re.compile(r"^[0-9a-f]{64}$")
@@ -63,6 +70,7 @@ class PairedQualityEvidenceLedger:
             reasons.append("minimum_paired_samples_not_met")
 
         scoring_artifact: dict[str, Any] = {}
+        blind_review_surface: dict[str, Any] = {}
         paired_scores: list[dict[str, Any]] = []
         measurement = self._unavailable_measurement(len(resolved_pairs))
         blocking_reasons = [
@@ -71,6 +79,18 @@ class PairedQualityEvidenceLedger:
         if resolved_pairs and not blocking_reasons:
             scoring_artifact, paired_scores = self._score_pairs(resolved_pairs)
             measurement = self._measurement(paired_scores)
+        provider_observation_required = bool(resolved_pairs) and all(
+            pair["baseline"]["binding"].get("schema_version")
+            == UPTAKE_SCHEMA_VERSION
+            and pair["candidate"]["binding"].get("schema_version")
+            == UPTAKE_SCHEMA_VERSION
+            for pair in resolved_pairs
+        )
+        if scoring_artifact:
+            blind_review_surface = self._blind_review_surface(
+                scoring_artifact,
+                provider_observation_required=provider_observation_required,
+            )
 
         evaluator_independent = self._evaluator_independent(resolved_pairs)
         if not evaluator_independent:
@@ -102,6 +122,8 @@ class PairedQualityEvidenceLedger:
             "reasons": reasons,
             "source_pairs": self._source_pairs(resolved_pairs, paired_scores),
             "scoring_artifact": scoring_artifact,
+            "blind_review_surface": blind_review_surface,
+            "provider_observation_required": provider_observation_required,
             "measurement": measurement,
             "human_review": {
                 "status": "pending" if status == "pending_human_review" else "not_applicable",
@@ -122,6 +144,9 @@ class PairedQualityEvidenceLedger:
                 "verified_distinct_producer_runs": bool(resolved_pairs)
                 and not resolution_reasons,
                 "arm_blinded_scoring": bool(scoring_artifact),
+                "blind_review_surface_enforced": provider_observation_required
+                and bool(blind_review_surface),
+                "provider_observation_required": provider_observation_required,
                 "organizational_evaluator_independence_verified": False,
             },
             "governance": self._compact_governance(governance),
@@ -138,20 +163,32 @@ class PairedQualityEvidenceLedger:
             return self._not_found(evaluation_id)
         if current.get("status") != "pending_human_review":
             return self._operation_blocked(current, "quality_evaluation_not_pending")
-        normalized = self._normalize_review(payload)
+        blind_review_required = current.get("provider_observation_required") is True
+        normalized = self._normalize_review(
+            payload,
+            blind_review_required=blind_review_required,
+        )
         artifact = self._mapping(current.get("scoring_artifact"))
         artifact_digest_matches = (
             normalized["scoring_artifact_digest"] == artifact.get("artifact_digest")
+        )
+        blind_surface = self._mapping(current.get("blind_review_surface"))
+        blind_surface_matches = (
+            not blind_review_required
+            or normalized.get("blind_review_surface_sha256")
+            == blind_surface.get("surface_sha256")
         )
         provenance = self.repository.verify_provenance()
         governance = self._review_governance(
             provenance_valid=bool(provenance.get("valid", False)),
             review_valid=not normalized["errors"],
             artifact_digest_matches=artifact_digest_matches,
+            blind_surface_matches=blind_surface_matches,
         )
         if (
             normalized["errors"]
             or not artifact_digest_matches
+            or not blind_surface_matches
             or not provenance.get("valid", False)
             or not governance.get("authorized", False)
         ):
@@ -161,9 +198,16 @@ class PairedQualityEvidenceLedger:
                     [
                         *normalized["errors"],
                         *([] if artifact_digest_matches else ["review_artifact_digest_mismatch"]),
+                        *(
+                            []
+                            if blind_surface_matches
+                            else ["blind_review_surface_digest_mismatch"]
+                        ),
                     ]
                 )[0]
-                if normalized["errors"] or not artifact_digest_matches
+                if normalized["errors"]
+                or not artifact_digest_matches
+                or not blind_surface_matches
                 else "quality_review_not_authorized",
             )
             blocked["governance"] = self._compact_governance(governance)
@@ -182,6 +226,18 @@ class PairedQualityEvidenceLedger:
             ],
             "identity_assurance": "self_attested",
             "human_identity_cryptographically_verified": False,
+            "blind_review_surface_enforced": blind_review_required,
+            "blind_review_surface_sha256": normalized.get(
+                "blind_review_surface_sha256"
+            ),
+            "arm_mapping_not_accessed_attested": normalized.get(
+                "arm_mapping_not_accessed"
+            ),
+            "reviewer_independence_attested": normalized.get(
+                "reviewer_independence_attested"
+            ),
+            "reviewer_blindness_cryptographically_verified": False,
+            "reviewer_independence_verified": False,
             "governance": self._compact_governance(governance),
         }
         event["id"] = f"PQREV-{self._digest(event)[:16]}"
@@ -253,7 +309,12 @@ class PairedQualityEvidenceLedger:
         reasons: list[str] = []
         task_ids: set[str] = set()
         binding_ids: set[str] = set()
+        provider_response_ids: set[str] = set()
         model_contract: tuple[Any, ...] | None = None
+        provider_observation_contract: bool | None = None
+        live_pair_contract: bool | None = None
+        live_pair_executions: list[dict[str, Any]] = []
+        live_context_sha256: str | None = None
         for pair in pairs:
             task_id = pair["task_id"]
             if task_id in task_ids:
@@ -285,6 +346,64 @@ class PairedQualityEvidenceLedger:
             if baseline["model_contract"] != candidate["model_contract"]:
                 reasons.append("same_model_same_task_contract_required")
                 continue
+            pair_provider_observed = all(
+                item["binding"].get("schema_version") == UPTAKE_SCHEMA_VERSION
+                for item in (baseline, candidate)
+            )
+            if any(
+                item["binding"].get("schema_version") == UPTAKE_SCHEMA_VERSION
+                for item in (baseline, candidate)
+            ) and not pair_provider_observed:
+                reasons.append("provider_observation_pair_incomplete")
+                continue
+            if provider_observation_contract is None:
+                provider_observation_contract = pair_provider_observed
+            elif provider_observation_contract is not pair_provider_observed:
+                reasons.append("cross_pair_provider_observation_mismatch")
+                continue
+            if pair_provider_observed:
+                response_ids = {
+                    self._mapping(item["binding"].get("provider_observation"))
+                    .get("response", {})
+                    .get("response_id_sha256")
+                    for item in (baseline, candidate)
+                }
+                if (
+                    len(response_ids) != 2
+                    or None in response_ids
+                    or provider_response_ids & response_ids
+                ):
+                    reasons.append("provider_response_replay_detected")
+                    continue
+                provider_response_ids.update(str(value) for value in response_ids)
+                baseline_live = self._mapping(
+                    baseline["binding"].get("live_pair_execution")
+                )
+                candidate_live = self._mapping(
+                    candidate["binding"].get("live_pair_execution")
+                )
+                pair_live = bool(baseline_live) and bool(candidate_live)
+                if bool(baseline_live) is not bool(candidate_live):
+                    reasons.append("live_pair_execution_pair_incomplete")
+                    continue
+                if live_pair_contract is None:
+                    live_pair_contract = pair_live
+                elif live_pair_contract is not pair_live:
+                    reasons.append("cross_pair_live_execution_mismatch")
+                    continue
+                if pair_live:
+                    candidate_context = self._mapping(
+                        candidate["binding"].get("context_intervention")
+                    ).get("intervention_sha256")
+                    if not isinstance(candidate_context, str):
+                        reasons.append("live_pair_context_binding_missing")
+                        continue
+                    if live_context_sha256 is None:
+                        live_context_sha256 = candidate_context
+                    elif live_context_sha256 != candidate_context:
+                        reasons.append("cross_pair_live_context_mismatch")
+                        continue
+                    live_pair_executions.extend((baseline_live, candidate_live))
             if model_contract is None:
                 model_contract = baseline["model_contract"][:3]
             elif baseline["model_contract"][:3] != model_contract:
@@ -321,6 +440,14 @@ class PairedQualityEvidenceLedger:
                     "candidate": candidate,
                 }
             )
+        if live_pair_contract is True:
+            live_valid, live_reason = validate_live_pair_execution_set(
+                live_pair_executions,
+                expected_task_ids=[str(pair["task_id"]) for pair in pairs],
+                expected_context_intervention_sha256=str(live_context_sha256 or ""),
+            )
+            if not live_valid:
+                reasons.append(live_reason or "live_pair_execution_set_invalid")
         return resolved, self._dedupe(reasons)
 
     def _resolve_reference(
@@ -346,12 +473,20 @@ class PairedQualityEvidenceLedger:
         if binding.get("verification_status") != "passed":
             return None, "producer_verification_not_passed"
         binding_schema = binding.get("schema_version")
+        live_pair = self._mapping(report.get("paired")).get(
+            "execution_order_randomized"
+        ) is True
+        if live_pair and binding_schema != UPTAKE_SCHEMA_VERSION:
+            return None, "provider_observation_required_for_live_pair"
         if binding_schema not in {
             PRODUCER_SCORING_SCHEMA_VERSION,
             CONTEXT_SCHEMA_VERSION,
+            UPTAKE_SCHEMA_VERSION,
         }:
             return None, "producer_scoring_binding_required"
-        if binding_schema == CONTEXT_SCHEMA_VERSION:
+        if binding_schema in {CONTEXT_SCHEMA_VERSION, UPTAKE_SCHEMA_VERSION} and (
+            "context_intervention" in binding
+        ):
             context_valid, _ = validate_producer_context_binding(
                 binding.get("context_intervention")
             )
@@ -360,6 +495,44 @@ class PairedQualityEvidenceLedger:
                 or not context_valid
             ):
                 return None, "producer_context_intervention_invalid"
+        if binding_schema == UPTAKE_SCHEMA_VERSION:
+            context = self._mapping(binding.get("context_intervention"))
+            observation_valid, observation_reason = validate_provider_observation_binding(
+                binding.get("provider_observation"),
+                expected_output_sha256=str(binding.get("artifact_digest") or ""),
+                expected_context_intervention_sha256=(
+                    str(context.get("intervention_sha256"))
+                    if context.get("intervention_sha256") is not None
+                    else None
+                ),
+            )
+            if (
+                binding.get("provider_observation_status") != "verified"
+                or not observation_valid
+            ):
+                return None, observation_reason or "producer_provider_observation_invalid"
+            live_pair_execution = binding.get("live_pair_execution")
+            if live_pair_execution is not None:
+                expected_condition = (
+                    "control" if expected_arm == "baseline" else "treatment"
+                )
+                live_valid, live_reason = validate_live_pair_execution(
+                    live_pair_execution,
+                    expected_task_id=str(binding.get("task_id") or ""),
+                    expected_condition=expected_condition,
+                    expected_selected_arm=expected_arm,
+                    expected_context_intervention_sha256=(
+                        str(context.get("intervention_sha256"))
+                        if expected_arm == "maximized"
+                        and context.get("intervention_sha256") is not None
+                        else None
+                    ),
+                )
+                if (
+                    binding.get("live_pair_execution_status") != "verified"
+                    or not live_valid
+                ):
+                    return None, live_reason or "producer_live_pair_execution_invalid"
         if binding.get("scoring_material_status") != "ready":
             return None, "producer_scoring_material_unresolved"
         run_instance_id = binding.get("producer_run_instance_id")
@@ -484,14 +657,18 @@ class PairedQualityEvidenceLedger:
                     candidate_slot: pair["candidate"]["binding"]["binding_id"],
                 }
             )
-            task_artifacts.append(
-                {
-                    "task_id": task_id,
-                    "rubric_digest": quality_rubric_digest(pair["rubric"]),
-                    "mapping_commitment": mapping_commitment,
-                    "scores": scores,
-                }
-            )
+            task_artifact = {
+                "task_id": task_id,
+                "rubric_digest": quality_rubric_digest(pair["rubric"]),
+                "mapping_commitment": mapping_commitment,
+                "scores": scores,
+            }
+            observation_commitment = self._provider_observation_commitment(pair)
+            if observation_commitment is not None:
+                task_artifact["provider_observation_commitment"] = (
+                    observation_commitment
+                )
+            task_artifacts.append(task_artifact)
             paired_scores.append(
                 {
                     "task_id": task_id,
@@ -512,6 +689,35 @@ class PairedQualityEvidenceLedger:
         }
         artifact["artifact_digest"] = self._digest(artifact)
         return artifact, sorted(paired_scores, key=lambda item: item["task_id"])
+
+    def _blind_review_surface(
+        self,
+        scoring_artifact: dict[str, Any],
+        *,
+        provider_observation_required: bool,
+    ) -> dict[str, Any]:
+        unsigned = {
+            "schema": self.BLIND_REVIEW_SURFACE_SCHEMA,
+            "scoring_artifact": deepcopy(scoring_artifact),
+            "provider_observation_required": provider_observation_required,
+            "arm_mapping_disclosed": False,
+            "source_pairs_disclosed": False,
+            "measurement_labels_disclosed": False,
+        }
+        return {**unsigned, "surface_sha256": self._digest(unsigned)}
+
+    def _provider_observation_commitment(
+        self,
+        pair: dict[str, Any],
+    ) -> str | None:
+        observations = [
+            self._mapping(pair[arm]["binding"].get("provider_observation"))
+            for arm in ("baseline", "candidate")
+        ]
+        digests = [value.get("observation_sha256") for value in observations]
+        if not all(self._valid_sha256(value) for value in digests):
+            return None
+        return self._digest(sorted(str(value) for value in digests))
 
     def _measurement(self, paired_scores: list[dict[str, Any]]) -> dict[str, Any]:
         baseline = [float(item["baseline_score"]) for item in paired_scores]
@@ -575,6 +781,21 @@ class PairedQualityEvidenceLedger:
                 ),
                 "identity_assurance": review.get("identity_assurance"),
                 "human_identity_cryptographically_verified": False,
+                "blind_review_surface_enforced": review.get(
+                    "blind_review_surface_enforced",
+                    False,
+                ),
+                "blind_review_surface_sha256": review.get(
+                    "blind_review_surface_sha256"
+                ),
+                "arm_mapping_not_accessed_attested": review.get(
+                    "arm_mapping_not_accessed_attested"
+                ),
+                "reviewer_independence_attested": review.get(
+                    "reviewer_independence_attested"
+                ),
+                "reviewer_blindness_cryptographically_verified": False,
+                "reviewer_independence_verified": False,
             }
             if review is not None
             else view.get("human_review")
@@ -590,6 +811,20 @@ class PairedQualityEvidenceLedger:
             "task_quality_uplift_claimed": False,
             "automatic_promotion": False,
         }
+        if (
+            status == "pending_human_review"
+            and view.get("provider_observation_required") is True
+        ):
+            source_pairs = view.get("source_pairs")
+            view["source_pair_commitment_sha256"] = self._digest(source_pairs)
+            view["source_pairs"] = []
+            view["measurement"] = {
+                "available": False,
+                "metric_scope": self.METRIC_SCOPE,
+                "sample_count": measurement.get("sample_count"),
+                "minimum_paired_samples": self.MINIMUM_PAIRED_SAMPLES,
+                "reason": "withheld_until_blind_review",
+            }
         return view
 
     def _revalidate(self, evaluation: dict[str, Any]) -> tuple[bool, str | None]:
@@ -603,6 +838,13 @@ class PairedQualityEvidenceLedger:
             unsigned_artifact
         ):
             return False, "scoring_artifact_digest_mismatch"
+        if evaluation.get("provider_observation_required") is True:
+            expected_surface = self._blind_review_surface(
+                artifact,
+                provider_observation_required=True,
+            )
+            if evaluation.get("blind_review_surface") != expected_surface:
+                return False, "blind_review_surface_recomputation_mismatch"
         source_pairs = evaluation.get("source_pairs")
         if not isinstance(source_pairs, list):
             return False, "source_pairs_invalid"
@@ -759,16 +1001,30 @@ class PairedQualityEvidenceLedger:
             return None
         return {"producer_run_id": run_id, "binding_id": binding_id}
 
-    def _normalize_review(self, payload: Any) -> dict[str, Any]:
+    def _normalize_review(
+        self,
+        payload: Any,
+        *,
+        blind_review_required: bool = False,
+    ) -> dict[str, Any]:
         source = payload if isinstance(payload, dict) else {}
         errors: list[str] = []
-        if set(source) != {
+        expected = {
             "reviewer_id",
             "reviewer_kind",
             "review_scope",
             "decision",
             "scoring_artifact_digest",
-        }:
+        }
+        if blind_review_required:
+            expected.update(
+                {
+                    "blind_review_surface_sha256",
+                    "arm_mapping_not_accessed",
+                    "reviewer_independence_attested",
+                }
+            )
+        if set(source) != expected:
             errors.append("quality_review_payload_shape_invalid")
         reviewer_id = self._safe_identifier(source.get("reviewer_id"))
         if not reviewer_id:
@@ -785,10 +1041,29 @@ class PairedQualityEvidenceLedger:
         if not self._valid_sha256(digest):
             errors.append("quality_review_artifact_digest_invalid")
             digest = ""
+        blind_surface_sha256 = source.get("blind_review_surface_sha256")
+        if blind_review_required and not self._valid_sha256(blind_surface_sha256):
+            errors.append("blind_review_surface_digest_invalid")
+            blind_surface_sha256 = ""
+        arm_mapping_not_accessed = source.get("arm_mapping_not_accessed")
+        if blind_review_required and arm_mapping_not_accessed is not True:
+            errors.append("blind_review_mapping_access_attestation_required")
+        reviewer_independence_attested = source.get(
+            "reviewer_independence_attested"
+        )
+        if blind_review_required and reviewer_independence_attested is not True:
+            errors.append("blind_review_independence_attestation_required")
         return {
             "reviewer_id": reviewer_id,
             "decision": decision,
             "scoring_artifact_digest": digest,
+            "blind_review_surface_sha256": blind_surface_sha256,
+            "arm_mapping_not_accessed": (
+                arm_mapping_not_accessed if blind_review_required else None
+            ),
+            "reviewer_independence_attested": (
+                reviewer_independence_attested if blind_review_required else None
+            ),
             "errors": self._dedupe(errors),
         }
 

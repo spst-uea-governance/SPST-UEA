@@ -4,7 +4,7 @@ import hashlib
 import json
 import secrets
 import time
-from typing import Any
+from typing import Any, Callable
 
 from spst_runtime.engines.capability_maximizer import CapabilityMaximizer
 from spst_runtime.engines.governance_engine import GovernanceEngine
@@ -25,6 +25,13 @@ from spst_runtime.evaluation.quality_evidence import (
     unresolved_task_quality,
 )
 from spst_runtime.interfaces.model_adapter import ModelAdapter
+from spst_runtime.live_pairing import validate_live_pair_execution
+from spst_runtime.provider_observation import (
+    ProviderObservationError,
+    build_provider_request_binding,
+    unresolved_provider_observation,
+    verify_provider_observation,
+)
 
 
 class OperationalShadowRunner:
@@ -39,11 +46,15 @@ class OperationalShadowRunner:
         corpus: OperationalEvaluationCorpus,
         capability_maximizer: CapabilityMaximizer | None = None,
         governance_engine: GovernanceEngine | None = None,
+        randomization_nonce_factory: Callable[[], str] | None = None,
     ):
         self.model_adapter = model_adapter
         self.corpus = corpus
         self.capability_maximizer = capability_maximizer or CapabilityMaximizer()
         self.governance_engine = governance_engine or GovernanceEngine()
+        self.randomization_nonce_factory = (
+            randomization_nonce_factory or (lambda: secrets.token_hex(32))
+        )
 
     def run(
         self,
@@ -54,10 +65,16 @@ class OperationalShadowRunner:
         task_ids: list[str] | None = None,
         context_experiment: bool = False,
         context_intervention: dict[str, Any] | None = None,
+        randomize_arm_order: bool = False,
+        live_pair_execution: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Evaluate a candidate in an L0 shadow boundary against active corpus tasks."""
         if context_intervention is not None and not context_experiment:
             raise ValueError("context_intervention_requires_isolated_experiment")
+        if randomize_arm_order and not context_experiment:
+            raise ValueError("arm_order_randomization_requires_context_experiment")
+        if live_pair_execution is not None and not context_experiment:
+            raise ValueError("live_pair_execution_requires_context_experiment")
         if context_intervention is not None:
             valid_intervention, intervention_reason = validate_context_intervention(
                 context_intervention
@@ -65,6 +82,15 @@ class OperationalShadowRunner:
             if not valid_intervention:
                 raise ValueError(intervention_reason or "context_intervention_invalid")
         tasks, manifest = self.corpus.load_for_shadow(split=split, task_ids=task_ids)
+        if live_pair_execution is not None:
+            if len(tasks) != 1:
+                raise ValueError("live_pair_execution_requires_single_task")
+            live_valid, live_reason = validate_live_pair_execution(
+                live_pair_execution,
+                expected_task_id=str(tasks[0]["task_id"]),
+            )
+            if not live_valid:
+                raise ValueError(live_reason or "live_pair_execution_invalid")
         governance = self._governance_decision(len(tasks), split)
         if not governance.get("authorized", False):
             return self._denied_report(
@@ -82,29 +108,34 @@ class OperationalShadowRunner:
             if any(isinstance(task.get("quality_rubric"), dict) for task in tasks)
             else None
         )
+        randomization_nonce = (
+            self.randomization_nonce_factory() if randomize_arm_order else None
+        )
+        execution_orders = self._execution_orders(tasks, randomization_nonce)
         cases = []
         for task in tasks:
-            baseline = self._run_task(
-                task,
-                mode="baseline",
-                task_scoring_supported=task_scoring_supported,
-                context_experiment=context_experiment,
-                context_intervention=None,
-            )
-            maximized = self._run_task(
-                task,
-                mode="maximized",
-                task_scoring_supported=task_scoring_supported,
-                context_experiment=context_experiment,
-                context_intervention=context_intervention,
-            )
+            order = execution_orders[task["task_id"]]
+            arm_results: dict[str, dict[str, Any]] = {}
+            for position, mode in enumerate(order, start=1):
+                arm_results[mode] = self._run_task(
+                    task,
+                    mode=mode,
+                    task_scoring_supported=task_scoring_supported,
+                    context_experiment=context_experiment,
+                    context_intervention=(
+                        context_intervention if mode == "maximized" else None
+                    ),
+                    execution_position=position,
+                    live_pair_execution=live_pair_execution,
+                )
             cases.append(
                 {
                     "case_id": task["task_id"],
                     "domain": task["domain"],
                     "prompt_digest": task["prompt_digest"],
-                    "baseline": baseline,
-                    "maximized": maximized,
+                    "execution_order": list(order),
+                    "baseline": arm_results["baseline"],
+                    "maximized": arm_results["maximized"],
                 }
             )
 
@@ -166,6 +197,24 @@ class OperationalShadowRunner:
                     if isinstance(context_intervention, dict)
                     else None
                 ),
+                "execution_order_randomized": randomize_arm_order,
+                "randomization_method": (
+                    "sha256_balanced_task_order_v1"
+                    if randomize_arm_order
+                    else "fixed_baseline_then_maximized"
+                ),
+                "randomization_nonce": randomization_nonce,
+                "randomization_nonce_sha256": (
+                    self._digest(randomization_nonce)
+                    if randomization_nonce is not None
+                    else None
+                ),
+                "arm_order_balance": self._arm_order_balance(execution_orders),
+                "live_pair_execution": (
+                    deepcopy(live_pair_execution)
+                    if live_pair_execution is not None
+                    else None
+                ),
             },
             "cases": cases,
             "contract_compliance_proxy": contract_proxy,
@@ -215,6 +264,8 @@ class OperationalShadowRunner:
         task_scoring_supported: bool,
         context_experiment: bool,
         context_intervention: dict[str, Any] | None,
+        execution_position: int,
+        live_pair_execution: dict[str, Any] | None,
     ) -> dict[str, Any]:
         plan = None
         context: dict[str, Any] = {
@@ -227,8 +278,14 @@ class OperationalShadowRunner:
                 "suite_version": self.SUITE_VERSION,
                 "case_id": task["task_id"],
                 "shadow_only": True,
+                "execution_position": execution_position,
+                "arm": mode,
             },
         }
+        if live_pair_execution is not None:
+            context["evaluation"]["live_pair_execution"] = deepcopy(
+                live_pair_execution
+            )
         if mode == "maximized" and not context_experiment:
             plan = self.capability_maximizer.maximize(
                 task["prompt"],
@@ -241,6 +298,17 @@ class OperationalShadowRunner:
             context["evidence_context_intervention"] = deepcopy(context_intervention)
 
         started_at = time.perf_counter()
+        expected_provider_request: dict[str, Any] | None
+        request_binding_reason: str | None
+        try:
+            expected_provider_request = build_provider_request_binding(
+                task["prompt"], context
+            )
+        except ProviderObservationError as error:
+            expected_provider_request = None
+            request_binding_reason = str(error)
+        else:
+            request_binding_reason = None
         try:
             result = asyncio.run(self.model_adapter.infer(task["prompt"], context))
         except Exception as exc:
@@ -264,7 +332,14 @@ class OperationalShadowRunner:
                 "evaluation_profile": (
                     "context_control" if context_experiment else mode
                 ),
+                "provider_observation": unresolved_provider_observation(
+                    "provider_response_not_received"
+                ),
+                "execution_position": execution_position,
+                "evaluation_arm": mode,
             }
+            if live_pair_execution is not None:
+                task_result["live_pair_execution"] = deepcopy(live_pair_execution)
             task_result = self._with_context_intervention(
                 task_result,
                 context_intervention,
@@ -273,11 +348,41 @@ class OperationalShadowRunner:
 
         text = str(result.get("text", ""))
         available = bool(result.get("available", True))
+        health = self.model_adapter.health()
+        provider_name = str(result.get("provider") or self._provider_name(health))
+        model_version = str(
+            result.get("model_version")
+            or result.get("model")
+            or health.get("model_version")
+            or health.get("model")
+            or "unknown"
+        )
+        observation = result.get("provider_observation")
+        if expected_provider_request is None:
+            provider_observation = unresolved_provider_observation(
+                request_binding_reason or "provider_request_binding_unavailable"
+            )
+        else:
+            observation_valid, observation_reason = verify_provider_observation(
+                observation,
+                expected_provider_request,
+                output_text=text,
+                provider_name=provider_name,
+                model_version=model_version,
+            )
+            provider_observation = (
+                deepcopy(observation)
+                if observation_valid and isinstance(observation, dict)
+                else unresolved_provider_observation(
+                    observation_reason or "provider_observation_unresolved"
+                )
+            )
         verification = self._verify(task, text)
         task_result = {
             "status": "completed" if available else "unavailable",
             "available": available,
-            "provider": result.get("provider", "unknown"),
+            "provider": provider_name,
+            "model_version": model_version,
             "latency_ms": int((time.perf_counter() - started_at) * 1000),
             "output_digest": self._digest(text),
             "artifact_semantics": canonical_artifact_semantics(
@@ -293,7 +398,12 @@ class OperationalShadowRunner:
             "scaffold_contract_score": self._scaffold_score(plan),
             "plan": self._plan_summary(plan),
             "evaluation_profile": "context_control" if context_experiment else mode,
+            "provider_observation": provider_observation,
+            "execution_position": execution_position,
+            "evaluation_arm": mode,
         }
+        if live_pair_execution is not None:
+            task_result["live_pair_execution"] = deepcopy(live_pair_execution)
         task_result = self._with_context_intervention(task_result, context_intervention)
         return self._with_scoring_material(task_result, text, task)
 
@@ -449,6 +559,7 @@ class OperationalShadowRunner:
                 "baseline_candidate_id": report["baseline_candidate_id"],
                 "suite": report["suite"],
                 "provider": report["provider"],
+                "paired": report["paired"],
                 "cases": [
                     {
                         "case_id": case["case_id"],
@@ -482,6 +593,39 @@ class OperationalShadowRunner:
     @staticmethod
     def _provider_name(health: dict[str, Any]) -> str:
         return str(health.get("provider") or health.get("active_provider") or "unknown")
+
+    @classmethod
+    def _execution_orders(
+        cls,
+        tasks: list[dict[str, Any]],
+        nonce: str | None,
+    ) -> dict[str, tuple[str, str]]:
+        task_ids = [str(task["task_id"]) for task in tasks]
+        if nonce is None:
+            return {
+                task_id: ("baseline", "maximized") for task_id in task_ids
+            }
+        if not isinstance(nonce, str) or len(nonce) < 32:
+            raise ValueError("arm_order_randomization_nonce_invalid")
+        ranked = sorted(task_ids, key=lambda task_id: cls._digest(f"{nonce}:{task_id}"))
+        baseline_first = set(ranked[: (len(ranked) + 1) // 2])
+        return {
+            task_id: (
+                ("baseline", "maximized")
+                if task_id in baseline_first
+                else ("maximized", "baseline")
+            )
+            for task_id in task_ids
+        }
+
+    @staticmethod
+    def _arm_order_balance(
+        orders: dict[str, tuple[str, str]],
+    ) -> dict[str, int]:
+        return {
+            "baseline_first": sum(order[0] == "baseline" for order in orders.values()),
+            "maximized_first": sum(order[0] == "maximized" for order in orders.values()),
+        }
 
     @staticmethod
     def _candidate_id(value: str | None) -> str:

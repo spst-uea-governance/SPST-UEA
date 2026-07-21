@@ -159,6 +159,35 @@ The result distinguishes beneficial association, harmful association, and an
 inconclusive interval. It does not prove provider uptake, causality, or general
 GPT quality.
 
+ARCH-04 adds a stricter live path for adapters that return an exact request
+binding acknowledgement. Inspect the blind pending artifact without changing
+the evaluation database, then append a human review only after inspecting that
+surface:
+
+```powershell
+python -m spst_runtime.paired_quality_bridge get `
+  --evaluation-db <isolated-evaluation.db> `
+  --evaluation-id <paired-evaluation-id>
+
+python -m spst_runtime.paired_quality_bridge review `
+  --evaluation-db <isolated-evaluation.db> `
+  --evaluation-id <paired-evaluation-id> `
+  --reviewer-id <independent-human-reviewer> `
+  --decision accepted `
+  --scoring-artifact-digest <artifact-digest> `
+  --blind-review-surface-sha256 <surface-digest> `
+  --arm-mapping-not-accessed `
+  --reviewer-independence-attested
+```
+
+The pending projection withholds source-pair mappings and measured direction.
+The flags are self-attestations; they do not authenticate the reviewer. Exact
+provider acknowledgement proves only observed transport of the bound request,
+not semantic use, causality, or general GPT improvement. The bundled
+conformance path uses a no-charge in-process provider; no bundled network
+adapter currently emits this observation contract. See
+`../docs/provider-observed-live-context-evaluation.md`.
+
 After `python -m pip install -e ".[dev]"`, the console script is also available:
 
 ```bash

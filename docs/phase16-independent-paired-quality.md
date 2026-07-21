@@ -45,6 +45,12 @@ the adapter argument. A no-context control remains v3. Phase 16 accepts both
 forms but independently recomputes either one; ARCH-03 utility attribution
 requires the v4 treatment and rejects a context-bearing baseline.
 
+ARCH-04 provider-observed experiments emit v5 PBIND for both arms. The baseline
+binds an explicit absence of intervention; the treatment binds the exact
+intervention. Each v5 record additionally binds a recomputable provider request
+and response observation. Mixed legacy/provider-observed pairs, missing or
+mismatched acknowledgements, and repeated response identifiers are rejected.
+
 ## Independent and Arm-Blinded Scoring
 
 `PairedQualityEvidenceLedger` reloads both reports and recomputes each saved
@@ -100,6 +106,13 @@ cryptographic proof of who reviewed the artifact. Only an accepted review makes
 task quality available for the recorded local corpus. It still does not set
 `task_quality_uplift_claimed`, generalize beyond that corpus, or trigger an
 automatic promotion.
+
+For v5 evidence, the pending projection does not disclose source-pair arm
+mappings or measured direction. It exposes a separate blind-review surface and
+requires the review to bind that surface digest plus self-attest that the arm
+mapping was not accessed and the reviewer is independent. These declarations
+remain cryptographically unverified. The full mapping and measurement become
+visible only after the append-only review is accepted.
 
 ## Cockpit API
 

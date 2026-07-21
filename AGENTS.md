@@ -95,6 +95,22 @@ Run commands from `runtime/` unless noted otherwise:
   non-isolated comparisons. Report beneficial, harmful, and inconclusive
   directions. Never upgrade adapter submission into verified provider uptake or
   causal/general model-quality evidence.
+- Treat provider-observed uptake as a transport observation only when the
+  provider response echoes the exact canonical request-binding digest and the
+  response identifier, status, model version, and output digest recompute. A
+  local scaffold, a submitted request without an echo, a mismatched echo, or a
+  replayed response identifier is not observed uptake. Provider identity and
+  source authenticity remain unverified unless separately authenticated.
+- For provider-observed paired evaluation, use fresh baseline and treatment
+  calls, balance and randomize selected-condition order per task, bind that
+  schedule into the provider request and v5 PBIND on both selected arms, and
+  expose only the digest-bound blind-review surface before review.
+  Do not reveal source-pair arm mappings or measured direction to the reviewer.
+  Record mapping non-access and reviewer independence as human attestations,
+  not cryptographic facts, and keep semantic use and causality false.
+- Keep semantic-context and outcome reviewers role-separated for ARCH-04
+  attribution. Do not invoke a paid provider merely to satisfy a test; a local
+  observable provider validates the mechanism but is not GPT quality evidence.
 - A verified v4 receipt proves routing, profile, trace, governance, memory
   action, mediated-context digests, session binding, provenance, and the
   recorded repository identity. v1-v3 remain narrower legacy evidence.

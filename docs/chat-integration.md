@@ -71,6 +71,13 @@ reports `recorded_not_executed` and
 `submitted_to_provider`, and that still does not establish causal quality
 improvement.
 
+ARCH-04 requires more than submission for paired live evidence. A supported
+adapter must receive the canonical request-binding digest and return the same
+digest through its response metadata together with a response identifier and
+output whose binding recomputes. Absence or mismatch remains unresolved. Even
+a valid echo is only provider-transport observation: it does not authenticate
+the provider, prove semantic context use, or establish a causal quality effect.
+
 ## Repository Identity Binding
 
 Repository tasks use `spst-routing-receipt-v4`. Before session or memory writes,
