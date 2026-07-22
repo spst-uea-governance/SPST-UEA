@@ -90,7 +90,7 @@ Each fixed profile owns its repository-relative execution root; callers select
 the repository boundary, not an arbitrary command working directory.
 
 Repository tasks should route with `chat_bridge --repository-root <git-top-level>`.
-The resulting v3 Routing Receipt includes a path-free identity for the exact
+The resulting v4 Routing Receipt includes a path-free identity for the exact
 HEAD, index, tracked files, and non-ignored untracked files. Read-only receipt
 verification separates an intact historical binding from a live
 `current_match`; this is byte-level Git state and not semantic equivalence.
@@ -106,6 +106,15 @@ attestation can bind a caller-supplied result digest and the repository state
 captured at attestation time to the provenance chain, but it remains
 source-unauthenticated and does not become verified execution. See
 `docs/action-manifest-binding.md` for commands and evidence boundaries.
+
+ARCH-05 can freeze an ordered, Receipt-bound action denominator before any
+Manifest is created, then project its coverage through a read-only status path.
+Missing, duplicate, out-of-plan, out-of-order, pre-plan, and wrong-workspace
+actions prevent complete coverage. Fixed runtime actions and external
+attestations remain separate; the latter never become verified execution.
+This measures only declared task actions, so declaration completeness remains
+unverified and global Codex tool coverage remains unavailable. See
+`docs/governed-execution-coverage.md`.
 
 ## Current Runtime Status
 

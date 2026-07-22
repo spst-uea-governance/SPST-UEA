@@ -27,7 +27,7 @@ provenance sequence.
 
 ## Repository Transition Contract
 
-New manifests require a repository-bound v3 parent receipt. At prepare time,
+New manifests require a repository-bound v3 or v4 parent receipt. At prepare time,
 the runtime captures `before_repository_identity` and rejects the manifest if
 it differs from the parent receipt identity. Immediately before fixed-profile
 execution, the runtime recaptures the repository and refuses to run if the
@@ -61,6 +61,7 @@ Only the existing fixed verification profiles can produce
 |---|---|---|---|
 | `git_head`, `git_status`, `git_diff_check` | `R0` | repository root | Derived read-only inspection |
 | `pytest`, `ruff`, `mypy` | `R1` | `runtime/` | Local quality execution; tools may create reversible caches |
+| `pytest_coverage`, `coverage_report` | `R1` | `runtime/` | Action-only CI profiles; run the full suite, then enforce the configured branch-coverage floor |
 
 Run one profile through the bound executor:
 
@@ -83,10 +84,12 @@ execution root, repository and resolved-root digests, return code, duration,
 output digest, command digest, executor identity, and provenance bindings. It
 does not persist raw stdout, stderr, arbitrary command text, or the absolute
 repository path. A failed command can have a verified execution binding while
-`successful` remains false. Contract v3 gives the full `pytest` profile a
-300-second bound; v2 remains frozen at 120 seconds. Execution and verification
-resolve the exact stored contract version, so increasing the current timeout
-does not reinterpret or invalidate historical v2 evidence. Unversioned legacy
+`successful` remains false. Contract v3 gave the full `pytest` profile a
+300-second bound; v2 remains frozen at 120 seconds. Contract v4 preserves both
+definitions and adds action-only `pytest_coverage` and `coverage_report`
+profiles without changing the Phase 13-16 evaluation profile set. Execution
+and verification resolve the exact stored contract version, so a current
+profile change does not reinterpret historical evidence. Unversioned legacy
 manifests remain verifiable; an unexecuted legacy fixed profile can run only
 when its stored workspace digest matches the root resolved by the current
 profile definition.
@@ -174,6 +177,13 @@ preserved, changed, attested, and unresolved actions. External attestations
 have separate `external_attested_actions` and
 `repository_transition_attested_actions` counters and remain unresolved for
 verified-transition purposes.
+
+For tasks that require a stable denominator, ARCH-05 adds an immutable ordered
+execution plan that must be registered before the first child Manifest. Its
+read-only projection matches exact post-plan contracts one-to-one, checks the
+canonical workspace and declared order, and exposes missing or extra actions.
+It does not change Action Manifest execution semantics or make external tools
+observable. See `docs/governed-execution-coverage.md`.
 
 ## Honesty and Security Boundaries
 

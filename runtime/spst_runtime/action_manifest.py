@@ -16,8 +16,8 @@ from spst_runtime.repository_identity import (
 )
 from spst_runtime.routing_receipt import RoutingReceiptLedger
 from spst_runtime.verification_profiles import (
+    ACTION_QUALITY_PROFILE_NAMES,
     PROFILE_CONTRACT_VERSION,
-    QUALITY_PROFILE_NAMES,
     SNAPSHOT_PROFILE_NAMES,
     SUPPORTED_PROFILE_CONTRACT_VERSIONS,
     command_for,
@@ -243,7 +243,7 @@ def _risk_for_profile(profile: str) -> dict[str, Any]:
             "reasons": ["fixed_read_only_profile"],
             "requires_human_approval": False,
         }
-    if profile in QUALITY_PROFILE_NAMES:
+    if profile in ACTION_QUALITY_PROFILE_NAMES:
         return {
             "level": "R1",
             "reasons": ["fixed_local_quality_profile"],

@@ -7,8 +7,11 @@ from typing import Any
 SNAPSHOT_PROFILE_NAMES = ("git_head", "git_status")
 QUALITY_PROFILE_NAMES = ("pytest", "ruff", "mypy", "git_diff_check")
 VERIFICATION_PROFILE_NAMES = (*SNAPSHOT_PROFILE_NAMES, *QUALITY_PROFILE_NAMES)
-PROFILE_CONTRACT_VERSION = 3
-SUPPORTED_PROFILE_CONTRACT_VERSIONS = frozenset({2, PROFILE_CONTRACT_VERSION})
+ACTION_ONLY_PROFILE_NAMES = ("pytest_coverage", "coverage_report")
+ACTION_QUALITY_PROFILE_NAMES = (*QUALITY_PROFILE_NAMES, *ACTION_ONLY_PROFILE_NAMES)
+ACTION_PROFILE_NAMES = (*VERIFICATION_PROFILE_NAMES, *ACTION_ONLY_PROFILE_NAMES)
+PROFILE_CONTRACT_VERSION = 4
+SUPPORTED_PROFILE_CONTRACT_VERSIONS = frozenset({2, 3, PROFILE_CONTRACT_VERSION})
 
 
 @dataclass(frozen=True)
@@ -70,9 +73,26 @@ _PROFILES_V3 = {
     ),
 }
 
+_PROFILES_V4 = {
+    **_PROFILES_V3,
+    "pytest_coverage": VerificationProfile(
+        command=(sys.executable, "-m", "coverage", "run", "-m", "pytest", "-q"),
+        execution_root="runtime",
+        timeout_seconds=300,
+        required_paths=("pyproject.toml", "spst_runtime"),
+    ),
+    "coverage_report": VerificationProfile(
+        command=(sys.executable, "-m", "coverage", "report"),
+        execution_root="runtime",
+        timeout_seconds=60,
+        required_paths=("pyproject.toml", ".coverage"),
+    ),
+}
+
 _PROFILES_BY_CONTRACT_VERSION = {
     2: _PROFILES_V2,
-    PROFILE_CONTRACT_VERSION: _PROFILES_V3,
+    3: _PROFILES_V3,
+    PROFILE_CONTRACT_VERSION: _PROFILES_V4,
 }
 
 

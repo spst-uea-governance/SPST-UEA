@@ -310,8 +310,12 @@ def verify_chat_receipt(
     )
     if verification.get("verified"):
         from spst_runtime.action_manifest import ActionManifestLedger
+        from spst_runtime.execution_coverage import GovernedExecutionCoverageLedger
 
         verification["actions"] = ActionManifestLedger(
+            store.path, read_only=True
+        ).summarize_receipt(receipt_id)
+        verification["execution_coverage"] = GovernedExecutionCoverageLedger(
             store.path, read_only=True
         ).summarize_receipt(receipt_id)
     return verification

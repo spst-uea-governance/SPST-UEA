@@ -144,6 +144,27 @@ and stores the captured after-state in immutable execution evidence. External
 tools bind only the before-state and keep the after-state explicitly
 unobserved.
 
+## Declared Governed Execution Coverage
+
+When a task needs an explicit action denominator, register its ordered plan
+before any child Action Manifest exists:
+
+```powershell
+python -m spst_runtime.execution_coverage_bridge register --session-db <session.db> --receipt-id <receipt-id> --plan-file <plan.json> --repository-root ..
+python -m spst_runtime.execution_coverage_bridge status --session-db <session.db> --receipt-id <receipt-id>
+```
+
+Receipt verification exposes this read-only projection under
+`execution_coverage`. It detects missing, extra, duplicate, pre-plan,
+out-of-order, and wrong-workspace Action Manifests. Complete coverage requires
+successful runtime-verified execution and a verified Repository transition for
+every declared slot. An external attestation can complete bounded result
+evidence but cannot complete runtime execution coverage. The declaration itself
+is not an authenticated list of every Codex tool call; therefore
+`declaration_completeness_verified` remains false and
+`global_codex_tool_coverage` remains null. See
+`docs/governed-execution-coverage.md`.
+
 ## Boundary
 
 This does not give the local runtime direct access to the Codex chat model. Instead, Codex receives the chat message, invokes SPST-UEA locally, and reports the result back in the same conversation.

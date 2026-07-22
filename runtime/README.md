@@ -188,6 +188,27 @@ conformance path uses a no-charge in-process provider; no bundled network
 adapter currently emits this observation contract. See
 `../docs/provider-observed-live-context-evaluation.md`.
 
+Freeze a task-local action denominator before preparing any Action Manifest,
+then inspect coverage through the immutable read-only path:
+
+```powershell
+python -m spst_runtime.execution_coverage_bridge register `
+  --session-db <isolated-session.db> `
+  --receipt-id <receipt-id> `
+  --plan-file <plan.json> `
+  --repository-root ..
+
+python -m spst_runtime.execution_coverage_bridge status `
+  --session-db <isolated-session.db> `
+  --receipt-id <receipt-id>
+```
+
+Only exact, ordered, same-workspace post-plan Action Manifests satisfy slots.
+External result attestations remain execution-unverified. The denominator is a
+caller declaration whose completeness cannot be authenticated, so this does
+not measure all Codex tool calls. See
+`../docs/governed-execution-coverage.md`.
+
 After `python -m pip install -e ".[dev]"`, the console script is also available:
 
 ```bash

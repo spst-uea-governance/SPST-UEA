@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 from spst_runtime.action_manifest import ActionManifestLedger
-from spst_runtime.verification_profiles import VERIFICATION_PROFILE_NAMES
+from spst_runtime.verification_profiles import ACTION_PROFILE_NAMES
 
 
 def _default_session_path() -> str:
@@ -19,7 +19,7 @@ def main(argv: list[str] | None = None) -> int:
 
     execute = subparsers.add_parser("execute-profile")
     execute.add_argument("--receipt-id", required=True)
-    execute.add_argument("--profile", required=True, choices=VERIFICATION_PROFILE_NAMES)
+    execute.add_argument("--profile", required=True, choices=ACTION_PROFILE_NAMES)
     execute.add_argument("--repository-root", required=True)
 
     prepare = subparsers.add_parser("prepare-external")

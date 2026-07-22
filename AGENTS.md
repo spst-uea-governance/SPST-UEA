@@ -33,6 +33,8 @@ Run commands from `runtime/` unless noted otherwise:
 - `python -m spst_runtime.action_bridge execute-profile --receipt-id <receipt-id> --profile git_status --repository-root ..`
 - `python -m spst_runtime.action_bridge verify --action-id <action-id>`
 - `python -m spst_runtime.action_bridge receipt-status --receipt-id <receipt-id>`
+- `python -m spst_runtime.execution_coverage_bridge register --receipt-id <receipt-id> --plan-file <plan.json> --repository-root ..`
+- `python -m spst_runtime.execution_coverage_bridge status --receipt-id <receipt-id>`
 - `python -m pip install -e ".[dev]"`
 - `python -m ruff check .`
 - `python -m mypy spst_runtime`
@@ -132,6 +134,14 @@ Run commands from `runtime/` unless noted otherwise:
   were cryptographically execution-bound. The repository cannot intercept
   those Codex App tools; report them as outside verified action coverage and
   keep `global_codex_tool_coverage` unmeasured.
+- When declared-task execution coverage is required, register its immutable,
+  ordered Action plan before creating any child Action Manifest. Count only
+  exact post-plan Manifest bindings from the same canonical workspace. Reject
+  missing, duplicate, out-of-order, out-of-plan, pre-plan, or wrong-workspace
+  actions from complete coverage. Keep external attestations separate from
+  runtime-verified execution and preserve
+  `declaration_completeness_verified: false`; a declared denominator does not
+  make `global_codex_tool_coverage` measurable.
 - Treat required-marker presence and JSON-key shape checks as
   `contract_compliance_proxy` only. They may detect a regression but MUST NOT
   set `task_quality.available` or `task_quality_uplift_claimed`, even when the

@@ -128,6 +128,8 @@ def _canonical_hash(value: dict) -> str:
         ("git_status", "."),
         ("git_diff_check", "."),
         ("pytest", "runtime"),
+        ("pytest_coverage", "runtime"),
+        ("coverage_report", "runtime"),
         ("ruff", "runtime"),
         ("mypy", "runtime"),
     ],
@@ -142,18 +144,35 @@ def test_every_fixed_profile_owns_an_execution_root(
     assert contract["execution_root"] == execution_root
 
 
-def test_pytest_profile_v3_extends_timeout_without_rewriting_v2_contract():
+def test_pytest_profile_v4_preserves_frozen_v2_and_v3_contracts():
     version_two = profile_contract_for("pytest", contract_version=2)
+    version_three = profile_contract_for("pytest", contract_version=3)
     current = profile_contract_for("pytest")
 
     assert version_two is not None
+    assert version_three is not None
     assert current is not None
     assert version_two["version"] == 2
     assert version_two["timeout_seconds"] == 120
-    assert current["version"] == 3
+    assert version_three["version"] == 3
+    assert version_three["timeout_seconds"] == 300
+    assert current["version"] == 4
     assert current["timeout_seconds"] == 300
     assert current["command"] == version_two["command"]
+    assert current["command"] == version_three["command"]
     assert current["execution_root"] == version_two["execution_root"]
+
+
+def test_action_only_coverage_profiles_do_not_expand_evaluation_profile_set():
+    from spst_runtime.verification_profiles import (
+        ACTION_PROFILE_NAMES,
+        VERIFICATION_PROFILE_NAMES,
+    )
+
+    assert "pytest_coverage" in ACTION_PROFILE_NAMES
+    assert "coverage_report" in ACTION_PROFILE_NAMES
+    assert "pytest_coverage" not in VERIFICATION_PROFILE_NAMES
+    assert "coverage_report" not in VERIFICATION_PROFILE_NAMES
 
 
 def test_historical_v2_fixed_profile_manifest_remains_valid(tmp_path: Path):
