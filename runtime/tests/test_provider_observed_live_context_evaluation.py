@@ -290,6 +290,7 @@ def test_live_provider_observation_blind_review_and_utility_attribution(
 
     assert live["status"] == "pending_human_review"
     assert live["execution"]["fresh_adapter_calls_executed"] is True
+    assert live["execution"]["plan_registered_before_adapter_invocations"] is True
     assert live["execution"]["verified_provider_observations"] == 16
     assert live["execution"]["selected_condition_order_randomized"] is True
     assert live["execution"]["condition_order_balance"] == {
@@ -431,6 +432,23 @@ def test_live_provider_observation_blind_review_and_utility_attribution(
     )
     assert missing_exit == 2
     assert json.loads(capsys.readouterr().out)["status"] == "not_found"
+
+    plan_record = asyncio.run(
+        repository.load(
+            f"runtime:live_context_plan:{live['execution']['experiment_id']}"
+        )
+    )
+    assert isinstance(plan_record, dict)
+    calls_before_duplicate = adapter.calls
+    duplicate_plan = evaluator.run(
+        context_intervention=context["intervention"],
+        candidate_id="provider-context-treatment",
+        baseline_candidate_id="provider-context-control",
+        execution_plan=plan_record["manifest"],
+    )
+    assert duplicate_plan["status"] == "blocked"
+    assert duplicate_plan["reason"] == "live_pair_plan_already_registered"
+    assert adapter.calls == calls_before_duplicate
 
 
 def test_mismatched_acknowledgement_and_response_replay_fail_closed(tmp_path: Path):

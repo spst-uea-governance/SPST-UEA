@@ -14,11 +14,13 @@ from spst_runtime.live_pairing import (
     build_live_pair_execution,
     build_live_pair_plan,
     canonical_live_pair_hash,
+    validate_live_pair_plan,
 )
 from spst_runtime.persistence.sqlite_repository import SQLiteRepository
 
 
 LIVE_CONTEXT_EVALUATION_SCHEMA = "spst-live-context-paired-evaluation-v1"
+LIVE_CONTEXT_PLAN_RECORD_SCHEMA = "spst-live-context-plan-record-v1"
 
 
 class LiveContextPairedEvaluator:
@@ -53,6 +55,7 @@ class LiveContextPairedEvaluator:
         candidate_id: str,
         baseline_candidate_id: str,
         task_ids: list[str] | None = None,
+        execution_plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         valid, reason = validate_context_intervention(context_intervention)
         if not valid:
@@ -65,14 +68,41 @@ class LiveContextPairedEvaluator:
             return self._blocked("provider_observation_capability_required")
         tasks, _ = self.corpus.load_for_shadow(split="holdout", task_ids=task_ids)
         selected_task_ids = [str(task["task_id"]) for task in tasks]
-        try:
-            plan = build_live_pair_plan(
-                selected_task_ids,
-                self.randomization_nonce_factory(),
-                str(context_intervention["intervention_sha256"]),
-            )
-        except LivePairingError as error:
-            return self._blocked(str(error))
+        if execution_plan is None:
+            try:
+                plan = build_live_pair_plan(
+                    selected_task_ids,
+                    self.randomization_nonce_factory(),
+                    str(context_intervention["intervention_sha256"]),
+                )
+            except LivePairingError as error:
+                return self._blocked(str(error))
+        else:
+            plan = deepcopy(execution_plan)
+            plan_valid, plan_reason = validate_live_pair_plan(plan)
+            if not plan_valid:
+                return self._blocked(plan_reason or "live_pair_plan_invalid")
+            if plan.get("task_ids") != sorted(selected_task_ids):
+                return self._blocked("live_pair_plan_task_set_mismatch")
+            if (
+                plan.get("context_intervention_sha256")
+                != context_intervention["intervention_sha256"]
+            ):
+                return self._blocked("live_pair_plan_context_mismatch")
+
+        plan_record_key = f"runtime:live_context_plan:{plan['experiment_id']}"
+        plan_record = {
+            "schema": LIVE_CONTEXT_PLAN_RECORD_SCHEMA,
+            "kind": "pre_execution_plan",
+            "experiment_id": plan["experiment_id"],
+            "manifest": deepcopy(plan),
+            "adapter_invocations_started": False,
+        }
+        plan_record["record_sha256"] = canonical_live_pair_hash(plan_record)
+        with self.repository.locked():
+            if asyncio.run(self.repository.load(plan_record_key)) is not None:
+                return self._blocked("live_pair_plan_already_registered")
+            asyncio.run(self.repository.save(plan_record_key, plan_record))
 
         reports_by_task: dict[str, dict[str, dict[str, Any]]] = {}
         all_reports: list[dict[str, Any]] = []
@@ -184,6 +214,8 @@ class LiveContextPairedEvaluator:
                 "provider_identity_cryptographically_verified": False,
             },
             "execution": {
+                "plan_registered_before_adapter_invocations": True,
+                "plan_record_sha256": plan_record["record_sha256"],
                 "fresh_adapter_calls_executed": (
                     adapter_attempts == expected_adapter_attempts
                 ),

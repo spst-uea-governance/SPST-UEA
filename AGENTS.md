@@ -113,6 +113,14 @@ Run commands from `runtime/` unless noted otherwise:
 - Keep semantic-context and outcome reviewers role-separated for ARCH-04
   attribution. Do not invoke a paid provider merely to satisfy a test; a local
   observable provider validates the mechanism but is not GPT quality evidence.
+- For ARCH-06, pre-register the exact task cohort, context intervention,
+  provider/model observation contract, balanced condition schedule, fixed stop
+  rule, call cap, and external/paid execution authority before any provider
+  call. Recompute observation sources from the saved Producer records; never
+  promote an in-process fixture or a post-hoc HTTPS relabel into real outcome
+  evidence. Keep provider, reviewer, and real-workload identity assurance
+  explicitly unverified, and run `preflight()` before any credentialed or
+  network-backed study.
 - A verified v4 receipt proves routing, profile, trace, governance, memory
   action, mediated-context digests, session binding, provenance, and the
   recorded repository identity. v1-v3 remain narrower legacy evidence.

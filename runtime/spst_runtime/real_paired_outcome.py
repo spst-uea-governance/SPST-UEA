@@ -1,0 +1,1159 @@
+import asyncio
+from copy import deepcopy
+import json
+import re
+import secrets
+from typing import Any, Callable
+
+from spst_runtime.context_review import validate_context_intervention
+from spst_runtime.evaluation.operational_corpus import OperationalEvaluationCorpus
+from spst_runtime.evaluation.paired_quality import PairedQualityEvidenceLedger
+from spst_runtime.interfaces.model_adapter import ModelAdapter
+from spst_runtime.live_context_evaluation import (
+    LIVE_CONTEXT_EVALUATION_SCHEMA,
+    LIVE_CONTEXT_PLAN_RECORD_SCHEMA,
+    LiveContextPairedEvaluator,
+)
+from spst_runtime.live_pairing import (
+    build_live_pair_plan,
+    canonical_live_pair_hash,
+    validate_live_pair_plan,
+)
+from spst_runtime.persistence.sqlite_repository import SQLiteRepository
+from spst_runtime.provider_observation import PROVIDER_OBSERVATION_SOURCES
+
+
+REAL_PAIRED_OUTCOME_PROGRAM_SCHEMA = "spst-real-paired-outcome-program-v1"
+REAL_PAIRED_OUTCOME_EXECUTION_SCHEMA = "spst-real-paired-outcome-execution-v1"
+REAL_PAIRED_OUTCOME_INDEX_SCHEMA = "spst-real-paired-outcome-index-v1"
+PROVIDER_EXECUTION_AUTHORITY_SCHEMA = "spst-provider-execution-authority-v1"
+PROGRAM_INDEX_KEY = "runtime:real_paired_outcome:index:v1"
+PROGRAM_RECORD_PREFIX = "runtime:real_paired_outcome:program:"
+PROGRAM_EXECUTION_PREFIX = "runtime:real_paired_outcome:execution:"
+WORKLOAD_CLASSES = frozenset({"test_fixture", "real_user_workload"})
+EXECUTION_ENVIRONMENTS = frozenset({"in_process", "external_network"})
+BILLING_CLASSES = frozenset({"no_charge", "paid", "unknown"})
+MECHANISM_OBSERVATION_SOURCE = "in_process_provider_echo"
+REMOTE_OBSERVATION_SOURCE = "https_response_metadata_echo"
+
+_identifier = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+_sha256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+class RealPairedOutcomeProgram:
+    """Pre-register and revalidate a bounded provider-observed paired study."""
+
+    EXPECTED_ATTEMPTS_PER_PAIR = 4
+    METRIC_SCOPE = PairedQualityEvidenceLedger.METRIC_SCOPE
+
+    def __init__(
+        self,
+        repository: SQLiteRepository,
+        corpus: OperationalEvaluationCorpus,
+        model_adapter: ModelAdapter | None = None,
+        *,
+        plan_nonce_factory: Callable[[], str] | None = None,
+        scoring_nonce_factory: Callable[[], str] | None = None,
+    ):
+        self.repository = repository
+        self.corpus = corpus
+        self.model_adapter = model_adapter
+        self.plan_nonce_factory = plan_nonce_factory or (lambda: secrets.token_hex(32))
+        self.scoring_nonce_factory = scoring_nonce_factory
+        self.paired_quality = PairedQualityEvidenceLedger(repository, corpus)
+
+    def register(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Freeze the cohort, provider contract, cost authority, and order before calls."""
+
+        if self.repository.read_only:
+            return self._blocked("real_paired_outcome_store_read_only")
+        source = payload if isinstance(payload, dict) else {}
+        if set(source) != {
+            "baseline_candidate_id",
+            "candidate_id",
+            "context_intervention",
+            "execution_authority",
+            "study",
+            "task_ids",
+        }:
+            return self._blocked("real_paired_outcome_registration_shape_invalid")
+        if self.model_adapter is None:
+            return self._blocked("real_paired_outcome_adapter_required")
+
+        intervention = source.get("context_intervention")
+        intervention_valid, intervention_reason = validate_context_intervention(
+            intervention
+        )
+        if not intervention_valid or not isinstance(intervention, dict):
+            return self._blocked(
+                intervention_reason or "real_paired_outcome_intervention_invalid"
+            )
+        task_ids = self._task_ids(source.get("task_ids"))
+        if task_ids is None:
+            return self._blocked("real_paired_outcome_task_set_invalid")
+        if len(task_ids) < PairedQualityEvidenceLedger.MINIMUM_PAIRED_SAMPLES:
+            return self._blocked("real_paired_outcome_minimum_pairs_not_met")
+        tasks, corpus_manifest = self.corpus.load_for_shadow(
+            split="holdout",
+            task_ids=task_ids,
+        )
+        if sorted(str(task["task_id"]) for task in tasks) != task_ids:
+            return self._blocked("real_paired_outcome_task_set_unavailable")
+        if any(not isinstance(task.get("quality_rubric"), dict) for task in tasks):
+            return self._blocked("real_paired_outcome_quality_rubric_required")
+
+        study = self._study(source.get("study"))
+        if study is None:
+            return self._blocked("real_paired_outcome_study_invalid")
+        authority = self._authority(source.get("execution_authority"))
+        if authority is None:
+            return self._blocked("real_paired_outcome_execution_authority_invalid")
+        expected_calls = len(task_ids) * self.EXPECTED_ATTEMPTS_PER_PAIR
+        if authority["maximum_adapter_invocations"] < expected_calls:
+            return self._blocked("real_paired_outcome_adapter_invocation_cap_too_low")
+
+        provider, provider_reason = self._adapter_contract(self.model_adapter)
+        if provider is None:
+            return self._blocked(
+                provider_reason or "real_paired_outcome_provider_contract_invalid"
+            )
+        candidate_id = self._safe_identifier(source.get("candidate_id"))
+        baseline_candidate_id = self._safe_identifier(
+            source.get("baseline_candidate_id")
+        )
+        if not candidate_id or not baseline_candidate_id:
+            return self._blocked("real_paired_outcome_candidate_id_invalid")
+        if candidate_id == baseline_candidate_id:
+            return self._blocked("real_paired_outcome_candidate_ids_not_distinct")
+
+        plan = build_live_pair_plan(
+            task_ids,
+            self.plan_nonce_factory(),
+            str(intervention["intervention_sha256"]),
+        )
+        evaluation_contract = {
+            "metric_scope": self.METRIC_SCOPE,
+            "minimum_paired_samples": PairedQualityEvidenceLedger.MINIMUM_PAIRED_SAMPLES,
+            "confidence_level": PairedQualityEvidenceLedger.CONFIDENCE_LEVEL,
+            "uncertainty_method": "hoeffding_bounded_paired_delta",
+            "human_review_required": True,
+            "blind_review_required": True,
+            "automatic_promotion": False,
+        }
+        unsigned = {
+            "schema": REAL_PAIRED_OUTCOME_PROGRAM_SCHEMA,
+            "kind": "program_registration",
+            "study": study,
+            "corpus": {
+                "task_ids": task_ids,
+                "task_count": len(task_ids),
+                "task_set_sha256": plan["task_set_sha256"],
+                "selected_manifest_sha256": corpus_manifest["hash"],
+                "task_contracts": [
+                    {
+                        "task_id": str(item["id"]),
+                        "contract_sha256": str(item["contract_hash"]),
+                    }
+                    for item in sorted(
+                        corpus_manifest["tasks"],
+                        key=lambda task: str(task["id"]),
+                    )
+                ],
+                "consent_scope": OperationalEvaluationCorpus.CONSENT_SCOPE,
+            },
+            "context": {
+                "intervention_sha256": intervention["intervention_sha256"],
+                "binding_sha256": intervention["binding"]["binding_sha256"],
+                "semantic_review_sha256": intervention["binding"][
+                    "semantic_review_sha256"
+                ],
+            },
+            "provider": provider,
+            "candidates": {
+                "baseline_candidate_id": baseline_candidate_id,
+                "candidate_id": candidate_id,
+            },
+            "execution_authority": authority,
+            "expected_adapter_invocations": expected_calls,
+            "execution_plan": plan,
+            "evaluation_contract": evaluation_contract,
+            "claims": self._claim_boundary(),
+        }
+        program_sha256 = self._digest(unsigned)
+        record = {
+            **unsigned,
+            "program_sha256": program_sha256,
+            "id": f"RPOP-{program_sha256[:16]}",
+        }
+        with self.repository.locked():
+            index = self._load_index()
+            program_ids = self._program_ids(index)
+            if record["id"] in program_ids:
+                return self._blocked("real_paired_outcome_program_exists")
+            asyncio.run(
+                self.repository.save(
+                    f"{PROGRAM_RECORD_PREFIX}{record['id']}",
+                    record,
+                )
+            )
+            asyncio.run(
+                self.repository.save(
+                    PROGRAM_INDEX_KEY,
+                    {
+                        "schema": REAL_PAIRED_OUTCOME_INDEX_SCHEMA,
+                        "program_ids": [*program_ids, record["id"]],
+                    },
+                )
+            )
+        return self.get(str(record["id"])) or self._blocked(
+            "real_paired_outcome_registration_unreadable"
+        )
+
+    def preflight(self, program_id: str) -> dict[str, Any]:
+        """Check corpus, adapter, and authority without writing state or making calls."""
+
+        registration = self._registration(program_id)
+        registration_reason = self._registration_reason(registration, program_id)
+        if registration_reason or registration is None:
+            return self._blocked(
+                registration_reason or "real_paired_outcome_program_not_found"
+            )
+        provenance = self.repository.verify_provenance()
+        if provenance.get("valid") is not True:
+            return self._blocked("provenance_invalid")
+        corpus_reason = self._current_corpus_reason(registration)
+        if corpus_reason:
+            return self._blocked(corpus_reason)
+        if self._execution(program_id) is not None:
+            return self._blocked("real_paired_outcome_execution_already_recorded")
+        if self.model_adapter is None:
+            return self._blocked("real_paired_outcome_adapter_required")
+        adapter, adapter_reason = self._adapter_contract(self.model_adapter)
+        if adapter is None or adapter != registration["provider"]:
+            return self._blocked(
+                adapter_reason or "real_paired_outcome_provider_contract_mismatch"
+            )
+        authority_reason = self._execution_authority_reason(registration, adapter)
+        if authority_reason:
+            return self._blocked(authority_reason)
+        return {
+            "schema": REAL_PAIRED_OUTCOME_PROGRAM_SCHEMA,
+            "id": program_id,
+            "status": "ready",
+            "expected_adapter_invocations": registration[
+                "expected_adapter_invocations"
+            ],
+            "external_provider_calls_authorized": registration[
+                "execution_authority"
+            ]["external_provider_calls_authorized"],
+            "paid_provider_calls_authorized": registration["execution_authority"][
+                "paid_provider_calls_authorized"
+            ],
+            "provider": deepcopy(registration["provider"]),
+            "state_changed": False,
+            "adapter_invocations_executed": 0,
+            "claims": self._claim_boundary(),
+        }
+
+    def execute(
+        self,
+        program_id: str,
+        *,
+        context_intervention: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Execute one pre-registered study without accepting post-hoc plan changes."""
+
+        if self.repository.read_only:
+            return self._blocked("real_paired_outcome_store_read_only")
+        registration = self._registration(program_id)
+        registration_reason = self._registration_reason(registration, program_id)
+        if registration_reason or registration is None:
+            return self._blocked(
+                registration_reason or "real_paired_outcome_program_not_found"
+            )
+        if self._execution(program_id) is not None:
+            return self._blocked("real_paired_outcome_execution_already_recorded")
+        if self.model_adapter is None:
+            return self._blocked("real_paired_outcome_adapter_required")
+        valid_intervention, intervention_reason = validate_context_intervention(
+            context_intervention
+        )
+        if not valid_intervention:
+            return self._blocked(
+                intervention_reason or "real_paired_outcome_intervention_invalid"
+            )
+        if (
+            context_intervention.get("intervention_sha256")
+            != registration["context"]["intervention_sha256"]
+        ):
+            return self._blocked("real_paired_outcome_intervention_mismatch")
+        current_reason = self._current_corpus_reason(registration)
+        if current_reason:
+            return self._blocked(current_reason)
+        adapter, adapter_reason = self._adapter_contract(self.model_adapter)
+        if adapter is None or adapter != registration["provider"]:
+            return self._blocked(
+                adapter_reason or "real_paired_outcome_provider_contract_mismatch"
+            )
+        authority_reason = self._execution_authority_reason(registration, adapter)
+        if authority_reason:
+            return self._blocked(authority_reason)
+
+        evaluator = LiveContextPairedEvaluator(
+            self.repository,
+            self.corpus,
+            self.model_adapter,
+            scoring_nonce_factory=self.scoring_nonce_factory,
+        )
+        live = evaluator.run(
+            context_intervention=context_intervention,
+            candidate_id=str(registration["candidates"]["candidate_id"]),
+            baseline_candidate_id=str(
+                registration["candidates"]["baseline_candidate_id"]
+            ),
+            task_ids=list(registration["corpus"]["task_ids"]),
+            execution_plan=deepcopy(registration["execution_plan"]),
+        )
+        (
+            observation_sources,
+            observed_providers,
+            producer_record_keys,
+            recomputed_calls,
+        ) = (
+            self._execution_observations(live)
+        )
+        evidence_class, source_reason = self._evidence_class(observation_sources)
+        expected_source = registration["provider"]["provider_observation_source"]
+        expected_observed_provider = self._expected_observed_provider(registration)
+        actual_calls = self._mapping(live.get("execution")).get(
+            "total_adapter_attempts"
+        )
+        expected_calls = registration["expected_adapter_invocations"]
+        order_evidence = self._registration_order_evidence(
+            program_id,
+            str(self._mapping(live.get("execution")).get("experiment_id") or ""),
+            producer_record_keys,
+        )
+        reasons = [
+            str(live.get("reason") or "")
+            if live.get("status") != "pending_human_review"
+            else "",
+            source_reason or "",
+            (
+                "real_paired_outcome_provider_observation_source_mismatch"
+                if observation_sources != [expected_source]
+                else ""
+            ),
+            (
+                "real_paired_outcome_provider_identity_mismatch"
+                if observed_providers != [expected_observed_provider]
+                else ""
+            ),
+            (
+                "real_paired_outcome_adapter_invocation_count_mismatch"
+                if actual_calls != expected_calls or recomputed_calls != actual_calls
+                else ""
+            ),
+            (
+                "real_paired_outcome_registration_order_unverified"
+                if order_evidence.get("verified") is not True
+                else ""
+            ),
+        ]
+        reasons = self._dedupe(reasons)
+        execution_status = (
+            "pending_human_review"
+            if not reasons and live.get("status") == "pending_human_review"
+            else "blocked"
+        )
+        execution_unsigned = {
+            "schema": REAL_PAIRED_OUTCOME_EXECUTION_SCHEMA,
+            "kind": "program_execution",
+            "program_id": program_id,
+            "program_sha256": registration["program_sha256"],
+            "status": execution_status,
+            "reasons": reasons,
+            "evaluation_id": self._mapping(live.get("evaluation")).get("id"),
+            "experiment_id": self._mapping(live.get("execution")).get(
+                "experiment_id"
+            ),
+            "execution_manifest_sha256": self._mapping(live.get("execution")).get(
+                "execution_manifest_sha256"
+            ),
+            "execution_record_sha256": self._mapping(live.get("execution")).get(
+                "execution_record_sha256"
+            ),
+            "plan_record_sha256": self._mapping(live.get("execution")).get(
+                "plan_record_sha256"
+            ),
+            "expected_adapter_invocations": expected_calls,
+            "actual_adapter_invocations": actual_calls,
+            "provider_observation_sources": observation_sources,
+            "observed_providers": observed_providers,
+            "evidence_class": evidence_class,
+            "producer_record_keys": producer_record_keys,
+            "registration_order": order_evidence,
+        }
+        execution = {
+            **execution_unsigned,
+            "execution_sha256": self._digest(execution_unsigned),
+        }
+        asyncio.run(
+            self.repository.save(f"{PROGRAM_EXECUTION_PREFIX}{program_id}", execution)
+        )
+        return self.get(program_id) or self._blocked(
+            "real_paired_outcome_execution_unreadable"
+        )
+
+    def review(self, program_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Append the existing exact blind-review decision for one program."""
+
+        if self.repository.read_only:
+            return self._blocked("real_paired_outcome_store_read_only")
+        execution = self._execution(program_id)
+        if not isinstance(execution, dict):
+            return self._blocked("real_paired_outcome_execution_missing")
+        if execution.get("status") != "pending_human_review":
+            return self._blocked("real_paired_outcome_not_pending_review")
+        evaluation_id = execution.get("evaluation_id")
+        if not self._safe_identifier(evaluation_id):
+            return self._blocked("real_paired_outcome_evaluation_missing")
+        reviewed = self.paired_quality.review(str(evaluation_id), payload)
+        operation = self._mapping(reviewed.get("operation"))
+        if operation.get("status") == "blocked":
+            return {
+                **(self.get(program_id) or self._blocked("real_paired_outcome_not_found")),
+                "operation": deepcopy(operation),
+            }
+        return self.get(program_id) or self._blocked(
+            "real_paired_outcome_review_unreadable"
+        )
+
+    def get(self, program_id: str) -> dict[str, Any] | None:
+        registration = self._registration(program_id)
+        if registration is None:
+            return None
+        registration_reason = self._registration_reason(registration, program_id)
+        provenance = self.repository.verify_provenance()
+        current_reason = (
+            registration_reason
+            or (None if provenance.get("valid") is True else "provenance_invalid")
+            or self._current_corpus_reason(registration)
+        )
+        execution = self._execution(program_id)
+        execution_reason = self._execution_reason(execution, registration)
+        if current_reason or execution_reason:
+            return self._projection(
+                registration,
+                execution,
+                evaluation=None,
+                status="blocked",
+                reason=current_reason or execution_reason,
+                provenance=provenance,
+            )
+        if execution is None:
+            return self._projection(
+                registration,
+                None,
+                evaluation=None,
+                status="registered",
+                reason=None,
+                provenance=provenance,
+            )
+        evaluation_id = execution.get("evaluation_id")
+        evaluation = (
+            self.paired_quality.get(str(evaluation_id))
+            if self._safe_identifier(evaluation_id)
+            else None
+        )
+        if evaluation is None:
+            status, reason = "blocked", "real_paired_outcome_evaluation_missing"
+        elif execution.get("status") == "blocked":
+            status = "blocked"
+            reason = next(
+                iter(execution.get("reasons", [])),
+                "real_paired_outcome_execution_blocked",
+            )
+        elif evaluation.get("status") == "pending_human_review":
+            status, reason = "pending_human_review", None
+        elif evaluation.get("status") == "reviewed_evidence":
+            if execution.get("evidence_class") == "mechanism_validation":
+                status = "mechanism_validation_only"
+                reason = "in_process_provider_is_not_real_outcome_evidence"
+            elif registration["study"]["workload_class"] == "test_fixture":
+                status = "reviewed_fixture_outcome"
+                reason = "fixture_workload_is_not_real_outcome_evidence"
+            else:
+                status, reason = "reviewed_observed_real_workload", None
+        elif evaluation.get("status") == "rejected_by_human":
+            status, reason = "rejected_by_human", "human_review_rejected"
+        else:
+            status = "blocked"
+            reason = str(
+                self._mapping(evaluation.get("revalidation")).get("reason")
+                or "real_paired_outcome_evaluation_invalid"
+            )
+        return self._projection(
+            registration,
+            execution,
+            evaluation=evaluation,
+            status=status,
+            reason=reason,
+            provenance=provenance,
+        )
+
+    def history(self) -> list[dict[str, Any]]:
+        return [
+            record
+            for program_id in self._program_ids(self._load_index())
+            if (record := self.get(program_id)) is not None
+        ]
+
+    def coverage(self) -> dict[str, Any]:
+        records = self.history()
+        by_status: dict[str, int] = {}
+        for record in records:
+            status = str(record.get("status") or "unknown")
+            by_status[status] = by_status.get(status, 0) + 1
+        return {
+            "schema": REAL_PAIRED_OUTCOME_PROGRAM_SCHEMA,
+            "total_programs": len(records),
+            "reviewed_observed_real_workload_count": by_status.get(
+                "reviewed_observed_real_workload", 0
+            ),
+            "cryptographically_verified_real_outcome_count": 0,
+            "by_status": by_status,
+        }
+
+    def _projection(
+        self,
+        registration: dict[str, Any],
+        execution: dict[str, Any] | None,
+        *,
+        evaluation: dict[str, Any] | None,
+        status: str,
+        reason: str | None,
+        provenance: dict[str, Any],
+    ) -> dict[str, Any]:
+        plan = registration["execution_plan"]
+        measurement = self._mapping(
+            self._mapping(evaluation).get("measurement")
+        )
+        task_quality = self._mapping(
+            self._mapping(evaluation).get("task_quality")
+        )
+        remote_observed = (
+            isinstance(execution, dict)
+            and execution.get("evidence_class") == "remote_transport_observed"
+        )
+        real_workload = registration["study"]["workload_class"] == "real_user_workload"
+        reviewed = self._mapping(evaluation).get("status") == "reviewed_evidence"
+        observed_real_outcome = remote_observed and real_workload and reviewed
+        return {
+            "schema": REAL_PAIRED_OUTCOME_PROGRAM_SCHEMA,
+            "id": registration["id"],
+            "status": status,
+            "reason": reason,
+            "program_sha256": registration["program_sha256"],
+            "study": deepcopy(registration["study"]),
+            "corpus": deepcopy(registration["corpus"]),
+            "context": deepcopy(registration["context"]),
+            "provider": deepcopy(registration["provider"]),
+            "candidates": deepcopy(registration["candidates"]),
+            "execution_authority": deepcopy(registration["execution_authority"]),
+            "preregistration": {
+                "registered_before_adapter_invocations": (
+                    self._mapping(execution).get("registration_order", {}).get(
+                        "verified"
+                    )
+                    if execution is not None
+                    else True
+                ),
+                "execution_manifest_sha256": plan["manifest_sha256"],
+                "randomization_nonce_sha256": plan["randomization_nonce_sha256"],
+                "condition_order_balance": deepcopy(plan["condition_order_balance"]),
+                "per_task_order_disclosed": False,
+                "stop_rule": {
+                    "target_pair_count": registration["corpus"]["task_count"],
+                    "minimum_pair_count": PairedQualityEvidenceLedger.MINIMUM_PAIRED_SAMPLES,
+                    "optional_stopping_permitted": False,
+                },
+            },
+            "execution": (
+                {
+                    key: deepcopy(execution.get(key))
+                    for key in (
+                        "status",
+                        "reasons",
+                        "evaluation_id",
+                        "experiment_id",
+                        "execution_manifest_sha256",
+                        "execution_record_sha256",
+                        "plan_record_sha256",
+                        "expected_adapter_invocations",
+                        "actual_adapter_invocations",
+                        "provider_observation_sources",
+                        "observed_providers",
+                        "evidence_class",
+                        "registration_order",
+                    )
+                }
+                if execution is not None
+                else None
+            ),
+            "blind_review": {
+                "surface": deepcopy(
+                    self._mapping(evaluation).get("blind_review_surface", {})
+                ),
+                "source_pairs_disclosed": bool(
+                    self._mapping(evaluation).get("source_pairs")
+                ),
+                "human_review": deepcopy(
+                    self._mapping(evaluation).get("human_review", {})
+                ),
+                "reviewer_identity_cryptographically_verified": False,
+                "reviewer_independence_verified": False,
+            },
+            "outcome": {
+                "measurement_available": task_quality.get("available") is True,
+                "observed_real_workload_outcome": observed_real_outcome,
+                "real_paired_outcome_cryptographically_verified": False,
+                "metric_scope": measurement.get("metric_scope"),
+                "sample_count": measurement.get("sample_count") if reviewed else 0,
+                "baseline_mean": measurement.get("baseline_mean") if reviewed else None,
+                "treatment_mean": measurement.get("candidate_mean") if reviewed else None,
+                "paired_delta": measurement.get("paired_delta") if reviewed else None,
+                "uncertainty": measurement.get("uncertainty") if reviewed else None,
+                "positive_effect_supported": (
+                    measurement.get("positive_effect_supported") if reviewed else False
+                ),
+                "workload_provenance_assurance": "self_attested",
+                "workload_provenance_verified": False,
+                "provider_identity_cryptographically_verified": False,
+                "adapter_invocation_count_recomputed": (
+                    self._mapping(execution).get("actual_adapter_invocations")
+                    if execution is not None
+                    else 0
+                ),
+                "provider_transport_attempt_count_verified": False,
+            },
+            "revalidation": {
+                "program_valid": status != "blocked",
+                "paired_evaluation_valid": self._mapping(
+                    self._mapping(evaluation).get("revalidation")
+                ).get("valid"),
+                "provenance_valid": provenance.get("valid") is True,
+            },
+            "claims": self._claim_boundary(),
+            "state_provenance": {
+                key: provenance.get(key)
+                for key in ("valid", "entries", "latest_hash", "key_source")
+                if key in provenance
+            },
+        }
+
+    def _registration_reason(
+        self,
+        value: dict[str, Any] | None,
+        expected_program_id: str,
+    ) -> str | None:
+        if not isinstance(value, dict):
+            return "real_paired_outcome_program_not_found"
+        if value.get("schema") != REAL_PAIRED_OUTCOME_PROGRAM_SCHEMA:
+            return "real_paired_outcome_program_schema_invalid"
+        digest = value.get("program_sha256")
+        unsigned = {
+            key: item
+            for key, item in value.items()
+            if key not in {"id", "program_sha256"}
+        }
+        if not self._valid_sha256(digest) or self._digest(unsigned) != digest:
+            return "real_paired_outcome_program_digest_mismatch"
+        if value.get("id") != expected_program_id or expected_program_id != f"RPOP-{digest[:16]}":
+            return "real_paired_outcome_program_id_mismatch"
+        plan_valid, plan_reason = validate_live_pair_plan(value.get("execution_plan"))
+        if not plan_valid:
+            return plan_reason or "real_paired_outcome_plan_invalid"
+        corpus = self._mapping(value.get("corpus"))
+        context = self._mapping(value.get("context"))
+        plan = self._mapping(value.get("execution_plan"))
+        if (
+            plan.get("task_ids") != corpus.get("task_ids")
+            or plan.get("task_set_sha256") != corpus.get("task_set_sha256")
+            or plan.get("context_intervention_sha256")
+            != context.get("intervention_sha256")
+        ):
+            return "real_paired_outcome_program_binding_mismatch"
+        if self._authority(value.get("execution_authority")) is None:
+            return "real_paired_outcome_execution_authority_invalid"
+        return None
+
+    def _execution_reason(
+        self,
+        value: dict[str, Any] | None,
+        registration: dict[str, Any],
+    ) -> str | None:
+        if value is None:
+            return None
+        if value.get("schema") != REAL_PAIRED_OUTCOME_EXECUTION_SCHEMA:
+            return "real_paired_outcome_execution_schema_invalid"
+        digest = value.get("execution_sha256")
+        unsigned = {
+            key: item for key, item in value.items() if key != "execution_sha256"
+        }
+        if not self._valid_sha256(digest) or self._digest(unsigned) != digest:
+            return "real_paired_outcome_execution_digest_mismatch"
+        if (
+            value.get("program_id") != registration.get("id")
+            or value.get("program_sha256") != registration.get("program_sha256")
+            or value.get("execution_manifest_sha256")
+            != self._mapping(registration.get("execution_plan")).get("manifest_sha256")
+        ):
+            return "real_paired_outcome_execution_binding_mismatch"
+        live_record_reason = self._live_record_reason(value, registration)
+        if live_record_reason:
+            return live_record_reason
+        actual_sources, actual_providers, actual_keys, actual_calls = (
+            self._execution_observations(
+            {
+                "execution": {
+                    "experiment_id": value.get("experiment_id"),
+                }
+            }
+            )
+        )
+        if (
+            actual_sources != value.get("provider_observation_sources")
+            or actual_providers != value.get("observed_providers")
+            or actual_keys != value.get("producer_record_keys")
+            or actual_calls != value.get("actual_adapter_invocations")
+            or actual_calls != registration.get("expected_adapter_invocations")
+        ):
+            return "real_paired_outcome_execution_recomputation_mismatch"
+        if actual_sources != [registration["provider"]["provider_observation_source"]]:
+            return "real_paired_outcome_provider_observation_source_mismatch"
+        if actual_providers != [self._expected_observed_provider(registration)]:
+            return "real_paired_outcome_provider_identity_mismatch"
+        evidence_class, reason = self._evidence_class(
+            actual_sources
+        )
+        if reason or evidence_class != value.get("evidence_class"):
+            return reason or "real_paired_outcome_evidence_class_mismatch"
+        order = self._registration_order_evidence(
+            str(registration["id"]),
+            str(value.get("experiment_id") or ""),
+            value.get("producer_record_keys"),
+        )
+        if order != value.get("registration_order") or order.get("verified") is not True:
+            return "real_paired_outcome_registration_order_unverified"
+        return None
+
+    def _live_record_reason(
+        self,
+        execution: dict[str, Any],
+        registration: dict[str, Any],
+    ) -> str | None:
+        experiment_id = execution.get("experiment_id")
+        if not self._safe_identifier(experiment_id):
+            return "real_paired_outcome_experiment_id_invalid"
+        plan_record = asyncio.run(
+            self.repository.load(f"runtime:live_context_plan:{experiment_id}")
+        )
+        if not isinstance(plan_record, dict):
+            return "real_paired_outcome_live_plan_missing"
+        plan_digest = plan_record.get("record_sha256")
+        plan_unsigned = {
+            key: item for key, item in plan_record.items() if key != "record_sha256"
+        }
+        if (
+            plan_record.get("schema") != LIVE_CONTEXT_PLAN_RECORD_SCHEMA
+            or not self._valid_sha256(plan_digest)
+            or canonical_live_pair_hash(plan_unsigned) != plan_digest
+            or plan_record.get("manifest") != registration.get("execution_plan")
+            or plan_digest != execution.get("plan_record_sha256")
+        ):
+            return "real_paired_outcome_live_plan_mismatch"
+        live_record = asyncio.run(
+            self.repository.load(f"runtime:live_context_execution:{experiment_id}")
+        )
+        if not isinstance(live_record, dict):
+            return "real_paired_outcome_live_execution_missing"
+        live_digest = live_record.get("record_sha256")
+        live_unsigned = {
+            key: item for key, item in live_record.items() if key != "record_sha256"
+        }
+        if (
+            live_record.get("schema") != LIVE_CONTEXT_EVALUATION_SCHEMA
+            or not self._valid_sha256(live_digest)
+            or canonical_live_pair_hash(live_unsigned) != live_digest
+            or live_record.get("manifest") != registration.get("execution_plan")
+            or live_record.get("evaluation_id") != execution.get("evaluation_id")
+            or live_digest != execution.get("execution_record_sha256")
+        ):
+            return "real_paired_outcome_live_execution_mismatch"
+        return None
+
+    def _current_corpus_reason(self, registration: dict[str, Any]) -> str | None:
+        corpus = self._mapping(registration.get("corpus"))
+        task_ids = corpus.get("task_ids")
+        if not isinstance(task_ids, list):
+            return "real_paired_outcome_task_set_invalid"
+        tasks, manifest = self.corpus.load_for_shadow(
+            split="holdout",
+            task_ids=list(task_ids),
+        )
+        if sorted(str(task["task_id"]) for task in tasks) != task_ids:
+            return "real_paired_outcome_task_set_stale"
+        current_contracts = [
+            {
+                "task_id": str(item.get("id")),
+                "contract_sha256": str(item.get("contract_hash")),
+            }
+            for item in sorted(
+                manifest.get("tasks", []),
+                key=lambda task: str(task.get("id")),
+            )
+            if isinstance(item, dict)
+        ]
+        if (
+            manifest.get("hash") != corpus.get("selected_manifest_sha256")
+            or current_contracts != corpus.get("task_contracts")
+        ):
+            return "real_paired_outcome_corpus_manifest_mismatch"
+        return None
+
+    def _execution_authority_reason(
+        self,
+        registration: dict[str, Any],
+        adapter: dict[str, Any],
+    ) -> str | None:
+        authority = registration["execution_authority"]
+        if (
+            adapter["execution_environment"] == "external_network"
+            and authority["external_provider_calls_authorized"] is not True
+        ):
+            return "external_provider_calls_not_authorized"
+        if (
+            adapter["billing_class"] != "no_charge"
+            and authority["paid_provider_calls_authorized"] is not True
+        ):
+            return "paid_or_unknown_provider_calls_not_authorized"
+        if authority["maximum_adapter_invocations"] < registration[
+            "expected_adapter_invocations"
+        ]:
+            return "real_paired_outcome_adapter_invocation_cap_too_low"
+        health = self.model_adapter.health() if self.model_adapter is not None else {}
+        if health.get("ok") is not True:
+            return "real_paired_outcome_provider_unavailable"
+        return None
+
+    def _adapter_contract(
+        self,
+        adapter: ModelAdapter,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        health = adapter.health()
+        capabilities = adapter.get_capabilities()
+        if capabilities.get("supports_provider_observation") is not True:
+            return None, "provider_observation_capability_required"
+        observation_source = capabilities.get("provider_observation_source")
+        execution_environment = capabilities.get("execution_environment")
+        billing_class = capabilities.get("billing_class")
+        provider_name = health.get("provider") or health.get("active_provider")
+        model_version = health.get("model_version") or health.get("model")
+        if observation_source not in PROVIDER_OBSERVATION_SOURCES:
+            return None, "real_paired_outcome_observation_source_required"
+        if execution_environment not in EXECUTION_ENVIRONMENTS:
+            return None, "real_paired_outcome_execution_environment_required"
+        if billing_class not in BILLING_CLASSES:
+            return None, "real_paired_outcome_billing_class_required"
+        if not self._safe_identifier(provider_name) or not self._safe_identifier(
+            model_version
+        ):
+            return None, "real_paired_outcome_provider_identity_invalid"
+        return (
+            {
+                "name": str(provider_name),
+                "model_version": str(model_version),
+                "provider_observation_source": str(observation_source),
+                "execution_environment": str(execution_environment),
+                "billing_class": str(billing_class),
+                "requires_api_key": bool(health.get("requires_api_key", False)),
+                "adapter_declaration_authenticated": False,
+                "provider_identity_cryptographically_verified": False,
+            },
+            None,
+        )
+
+    def _execution_observations(
+        self,
+        live: dict[str, Any],
+    ) -> tuple[list[str], list[dict[str, str]], list[str], int]:
+        execution = self._mapping(live.get("execution"))
+        experiment_id = execution.get("experiment_id")
+        if not self._safe_identifier(experiment_id):
+            return [], [], [], 0
+        record = asyncio.run(
+            self.repository.load(f"runtime:live_context_execution:{experiment_id}")
+        )
+        pairs = self._mapping(record).get("pairs")
+        if not isinstance(pairs, list):
+            return [], [], [], 0
+        sources: list[str] = []
+        observed_providers: list[dict[str, str]] = []
+        record_keys: list[str] = []
+        adapter_attempts = 0
+        for pair in pairs:
+            if not isinstance(pair, dict):
+                continue
+            for arm in ("baseline", "candidate"):
+                reference = self._mapping(pair.get(arm))
+                run_id = reference.get("producer_run_id")
+                binding_id = reference.get("binding_id")
+                if not self._safe_identifier(run_id) or not self._safe_identifier(
+                    binding_id
+                ):
+                    continue
+                record_key = f"runtime:operational_shadow:{run_id}"
+                report = asyncio.run(self.repository.load(record_key))
+                cases = self._mapping(report).get("cases")
+                if isinstance(cases, list):
+                    adapter_attempts += len(cases) * 2
+                bindings = self._mapping(report).get("producer_evidence")
+                if not isinstance(bindings, list):
+                    continue
+                binding = next(
+                    (
+                        item
+                        for item in bindings
+                        if isinstance(item, dict) and item.get("binding_id") == binding_id
+                    ),
+                    None,
+                )
+                observation = self._mapping(
+                    self._mapping(binding).get("provider_observation")
+                )
+                source = observation.get("observation_source")
+                if isinstance(source, str):
+                    sources.append(source)
+                provider = self._mapping(observation.get("provider"))
+                provider_name = provider.get("name")
+                model_version = provider.get("model_version")
+                if (
+                    isinstance(source, str)
+                    and isinstance(provider_name, str)
+                    and isinstance(model_version, str)
+                ):
+                    observed_providers.append(
+                        {
+                            "name": provider_name,
+                            "model_version": model_version,
+                            "provider_observation_source": source,
+                        }
+                    )
+                record_keys.append(record_key)
+        return (
+            sorted(set(sources)),
+            self._dedupe_mappings(observed_providers),
+            sorted(set(record_keys)),
+            adapter_attempts,
+        )
+
+    @staticmethod
+    def _expected_observed_provider(registration: dict[str, Any]) -> dict[str, str]:
+        provider = registration["provider"]
+        return {
+            "name": str(provider["name"]),
+            "model_version": str(provider["model_version"]),
+            "provider_observation_source": str(
+                provider["provider_observation_source"]
+            ),
+        }
+
+    @staticmethod
+    def _dedupe_mappings(values: list[dict[str, str]]) -> list[dict[str, str]]:
+        keyed = {
+            json.dumps(value, sort_keys=True, separators=(",", ":")): value
+            for value in values
+        }
+        return [deepcopy(keyed[key]) for key in sorted(keyed)]
+
+    def _registration_order_evidence(
+        self,
+        program_id: str,
+        experiment_id: str,
+        producer_record_keys: Any,
+    ) -> dict[str, Any]:
+        keys = (
+            [str(item) for item in producer_record_keys]
+            if isinstance(producer_record_keys, list)
+            and all(isinstance(item, str) for item in producer_record_keys)
+            else []
+        )
+        entries = self.repository.provenance_entries()
+        sequences: dict[str, list[int]] = {}
+        for entry in entries:
+            sequences.setdefault(str(entry["record_key"]), []).append(
+                int(entry["sequence"])
+            )
+        registration_values = sequences.get(f"{PROGRAM_RECORD_PREFIX}{program_id}", [])
+        plan_values = sequences.get(f"runtime:live_context_plan:{experiment_id}", [])
+        producer_values = [
+            min(sequences.get(key, [0])) for key in keys if sequences.get(key)
+        ]
+        registration_sequence = min(registration_values) if registration_values else None
+        plan_sequence = min(plan_values) if plan_values else None
+        first_producer_sequence = min(producer_values) if producer_values else None
+        verified = (
+            isinstance(registration_sequence, int)
+            and isinstance(plan_sequence, int)
+            and isinstance(first_producer_sequence, int)
+            and registration_sequence < plan_sequence < first_producer_sequence
+        )
+        return {
+            "verified": verified,
+            "registration_sequence": registration_sequence,
+            "plan_sequence": plan_sequence,
+            "first_producer_sequence": first_producer_sequence,
+            "producer_record_count": len(keys),
+        }
+
+    @staticmethod
+    def _evidence_class(sources: Any) -> tuple[str, str | None]:
+        if not isinstance(sources, list) or not sources:
+            return "unresolved", "real_paired_outcome_observation_sources_missing"
+        if len(sources) != 1:
+            return "unresolved", "real_paired_outcome_observation_sources_mixed"
+        if sources[0] == MECHANISM_OBSERVATION_SOURCE:
+            return "mechanism_validation", None
+        if sources[0] == REMOTE_OBSERVATION_SOURCE:
+            return "remote_transport_observed", None
+        return "unresolved", "real_paired_outcome_observation_source_invalid"
+
+    def _registration(self, program_id: str) -> dict[str, Any] | None:
+        if not self._safe_identifier(program_id):
+            return None
+        stored = asyncio.run(
+            self.repository.load(f"{PROGRAM_RECORD_PREFIX}{program_id}")
+        )
+        return stored if isinstance(stored, dict) else None
+
+    def _execution(self, program_id: str) -> dict[str, Any] | None:
+        if not self._safe_identifier(program_id):
+            return None
+        stored = asyncio.run(
+            self.repository.load(f"{PROGRAM_EXECUTION_PREFIX}{program_id}")
+        )
+        return stored if isinstance(stored, dict) else None
+
+    def _load_index(self) -> dict[str, Any]:
+        stored = asyncio.run(self.repository.load(PROGRAM_INDEX_KEY))
+        if stored is None:
+            return {"schema": REAL_PAIRED_OUTCOME_INDEX_SCHEMA, "program_ids": []}
+        if (
+            not isinstance(stored, dict)
+            or stored.get("schema") != REAL_PAIRED_OUTCOME_INDEX_SCHEMA
+            or not isinstance(stored.get("program_ids"), list)
+        ):
+            raise ValueError("real_paired_outcome_index_invalid")
+        return stored
+
+    @staticmethod
+    def _program_ids(index: dict[str, Any]) -> list[str]:
+        values = index.get("program_ids", [])
+        return [str(item) for item in values if isinstance(item, str)]
+
+    @staticmethod
+    def _task_ids(value: Any) -> list[str] | None:
+        if not isinstance(value, list) or not value:
+            return None
+        normalized = sorted(str(item) for item in value)
+        if (
+            len(normalized) != len(value)
+            or len(normalized) != len(set(normalized))
+            or any(not _identifier.fullmatch(item) for item in normalized)
+        ):
+            return None
+        return normalized
+
+    @staticmethod
+    def _study(value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict) or set(value) != {"workload_class"}:
+            return None
+        workload_class = value.get("workload_class")
+        if workload_class not in WORKLOAD_CLASSES:
+            return None
+        return {
+            "workload_class": workload_class,
+            "workload_source_assurance": "operator_self_attested",
+            "workload_source_cryptographically_verified": False,
+        }
+
+    @staticmethod
+    def _authority(value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict) or set(value) != {
+            "external_provider_calls_authorized",
+            "maximum_adapter_invocations",
+            "paid_provider_calls_authorized",
+            "schema",
+        }:
+            return None
+        maximum = value.get("maximum_adapter_invocations")
+        if (
+            value.get("schema") != PROVIDER_EXECUTION_AUTHORITY_SCHEMA
+            or not isinstance(value.get("external_provider_calls_authorized"), bool)
+            or not isinstance(value.get("paid_provider_calls_authorized"), bool)
+            or not isinstance(maximum, int)
+            or isinstance(maximum, bool)
+            or maximum < 1
+            or maximum > 4096
+        ):
+            return None
+        return deepcopy(value)
+
+    @staticmethod
+    def _claim_boundary() -> dict[str, bool]:
+        return {
+            "model_weight_change_claimed": False,
+            "general_model_quality_claimed": False,
+            "causal_context_utility_established": False,
+            "provider_identity_cryptographically_verified": False,
+            "reviewer_identity_cryptographically_verified": False,
+            "workload_provenance_cryptographically_verified": False,
+            "provider_transport_attempt_count_verified": False,
+            "automatic_promotion": False,
+        }
+
+    @staticmethod
+    def _blocked(reason: str) -> dict[str, Any]:
+        return {
+            "schema": REAL_PAIRED_OUTCOME_PROGRAM_SCHEMA,
+            "status": "blocked",
+            "reason": reason,
+            "outcome": {
+                "measurement_available": False,
+                "observed_real_workload_outcome": False,
+                "real_paired_outcome_cryptographically_verified": False,
+            },
+            "claims": RealPairedOutcomeProgram._claim_boundary(),
+        }
+
+    @staticmethod
+    def _safe_identifier(value: Any) -> str:
+        candidate = str(value or "")
+        return candidate if _identifier.fullmatch(candidate) else ""
+
+    @staticmethod
+    def _valid_sha256(value: Any) -> bool:
+        return isinstance(value, str) and bool(_sha256.fullmatch(value))
+
+    @staticmethod
+    def _mapping(value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _dedupe(values: list[str]) -> list[str]:
+        return list(dict.fromkeys(value for value in values if value))
+
+    @staticmethod
+    def _digest(value: Any) -> str:
+        return canonical_live_pair_hash(value)

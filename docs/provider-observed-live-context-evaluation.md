@@ -91,4 +91,7 @@ can exercise success and adversarial paths without credentials, network calls,
 or charges. Its measured benefit is fixture behavior, not GPT evidence. A real
 provider study still requires an independently approved dataset, credentials,
 cost authority, provider support for exact acknowledgement, and actual human
-review.
+review. ARCH-06 adds the durable pre-registration, cost gate, Program-level
+recomputation, and fixture-versus-remote evidence classification needed to
+conduct that study without upgrading the present fixture into real evidence;
+see `real-paired-outcome-program.md`.

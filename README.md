@@ -116,6 +116,15 @@ This measures only declared task actions, so declaration completeness remains
 unverified and global Codex tool coverage remains unavailable. See
 `docs/governed-execution-coverage.md`.
 
+ARCH-06 pre-registers a consented paired-outcome cohort, exact context and
+provider contract, balanced condition schedule, fixed stop rule, adapter-call
+cap, and external/paid execution authority before any provider request. It
+recomputes the observation source from stored Producer records, so an in-process
+fixture or post-hoc HTTPS relabel cannot become real outcome evidence. The
+read-only projection separates mechanism validation, reviewed fixture outcomes,
+and observed real-workload outcomes while keeping provider, reviewer, and
+workload identity unverified. See `docs/real-paired-outcome-program.md`.
+
 ## Current Runtime Status
 
 The runtime can be executed locally from `runtime/`:

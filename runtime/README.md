@@ -188,6 +188,28 @@ conformance path uses a no-charge in-process provider; no bundled network
 adapter currently emits this observation contract. See
 `../docs/provider-observed-live-context-evaluation.md`.
 
+ARCH-06 wraps that live path in a durable pre-registered Program. The Python API
+freezes the selected rubric cohort, reviewed intervention, provider/model and
+observation source, randomized order commitment, no-optional-stopping rule,
+adapter-invocation cap, and separate external/paid authority. Call `preflight()`
+before `execute()`; preflight changes no state and makes no provider calls.
+
+Inspect a Program without changing its database:
+
+```powershell
+python -m spst_runtime.real_paired_outcome_bridge get `
+  --evaluation-db <isolated-evaluation.db> `
+  --program-id <program-id>
+
+python -m spst_runtime.real_paired_outcome_bridge status `
+  --evaluation-db <isolated-evaluation.db>
+```
+
+The in-process conformance adapter remains `mechanism_validation_only`. No paid
+provider is invoked by the bundled Program. A remote metadata echo can establish
+observed transport, not authenticated provider identity, causal context use, or
+general model-quality uplift. See `../docs/real-paired-outcome-program.md`.
+
 Freeze a task-local action denominator before preparing any Action Manifest,
 then inspect coverage through the immutable read-only path:
 
