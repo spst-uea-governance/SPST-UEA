@@ -165,3 +165,10 @@ The no-charge conformance adapter proves the Program lifecycle and adversarial
 recomputation. It is not a real GPT outcome. A production study still requires a
 compatible remote adapter, an explicitly approved no-charge or budgeted execution
 authority, an actual consented workload corpus, and an actual blind human review.
+
+## ARCH-07 operational hardening
+
+ARCH-07 adds a single durable execution claim, compare-and-set state
+transitions, and fail-closed interruption handling. See
+`docs/operational-hardening.md`. A `recovery_required` result is deliberately
+not auto-retried because the provider transport attempt count remains unknown.

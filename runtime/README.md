@@ -236,3 +236,11 @@ After `python -m pip install -e ".[dev]"`, the console script is also available:
 ```bash
 spst-runtime --steps 3 --event codex_run
 ```
+
+## ARCH-07 operational hardening
+
+Real paired outcome execution now acquires an atomic one-attempt claim before
+adapter invocation. Concurrent callers cannot start a second run, ordinary
+adapter failures become terminal without storing raw error text, and interrupted
+runs surface as read-only `recovery_required` state with automatic retry
+disabled. See `../docs/operational-hardening.md`.

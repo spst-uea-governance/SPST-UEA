@@ -21,10 +21,17 @@ from spst_runtime.live_pairing import (
 )
 from spst_runtime.persistence.sqlite_repository import SQLiteRepository
 from spst_runtime.provider_observation import PROVIDER_OBSERVATION_SOURCES
+from spst_runtime.real_paired_outcome_attempt import (
+    ACTIVE_ATTEMPT_STATES,
+    PROGRAM_ATTEMPT_PREFIX,
+    REAL_PAIRED_OUTCOME_ATTEMPT_SCHEMA,
+    RealPairedOutcomeAttemptLedger,
+)
 
 
 REAL_PAIRED_OUTCOME_PROGRAM_SCHEMA = "spst-real-paired-outcome-program-v1"
-REAL_PAIRED_OUTCOME_EXECUTION_SCHEMA = "spst-real-paired-outcome-execution-v1"
+REAL_PAIRED_OUTCOME_EXECUTION_SCHEMA = "spst-real-paired-outcome-execution-v2"
+LEGACY_REAL_PAIRED_OUTCOME_EXECUTION_SCHEMA = "spst-real-paired-outcome-execution-v1"
 REAL_PAIRED_OUTCOME_INDEX_SCHEMA = "spst-real-paired-outcome-index-v1"
 PROVIDER_EXECUTION_AUTHORITY_SCHEMA = "spst-provider-execution-authority-v1"
 PROGRAM_INDEX_KEY = "runtime:real_paired_outcome:index:v1"
@@ -54,6 +61,7 @@ class RealPairedOutcomeProgram:
         *,
         plan_nonce_factory: Callable[[], str] | None = None,
         scoring_nonce_factory: Callable[[], str] | None = None,
+        attempt_nonce_factory: Callable[[], str] | None = None,
     ):
         self.repository = repository
         self.corpus = corpus
@@ -61,6 +69,10 @@ class RealPairedOutcomeProgram:
         self.plan_nonce_factory = plan_nonce_factory or (lambda: secrets.token_hex(32))
         self.scoring_nonce_factory = scoring_nonce_factory
         self.paired_quality = PairedQualityEvidenceLedger(repository, corpus)
+        self.attempts = RealPairedOutcomeAttemptLedger(
+            repository,
+            nonce_factory=attempt_nonce_factory,
+        )
 
     def register(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Freeze the cohort, provider contract, cost authority, and order before calls."""
@@ -176,6 +188,12 @@ class RealPairedOutcomeProgram:
             "execution_authority": authority,
             "expected_adapter_invocations": expected_calls,
             "execution_plan": plan,
+            "operational_hardening": {
+                "attempt_schema": REAL_PAIRED_OUTCOME_ATTEMPT_SCHEMA,
+                "atomic_single_claim": True,
+                "automatic_retry_after_unknown_attempt": False,
+                "timeout_lease_steal_permitted": False,
+            },
             "evaluation_contract": evaluation_contract,
             "claims": self._claim_boundary(),
         }
@@ -226,6 +244,12 @@ class RealPairedOutcomeProgram:
             return self._blocked(corpus_reason)
         if self._execution(program_id) is not None:
             return self._blocked("real_paired_outcome_execution_already_recorded")
+        attempt = self._attempt(program_id)
+        attempt_reason = self._attempt_reason(attempt, registration)
+        if attempt_reason:
+            return self._blocked(attempt_reason)
+        if attempt is not None:
+            return self._blocked("real_paired_outcome_execution_recovery_required")
         if self.model_adapter is None:
             return self._blocked("real_paired_outcome_adapter_required")
         adapter, adapter_reason = self._adapter_contract(self.model_adapter)
@@ -271,10 +295,6 @@ class RealPairedOutcomeProgram:
             return self._blocked(
                 registration_reason or "real_paired_outcome_program_not_found"
             )
-        if self._execution(program_id) is not None:
-            return self._blocked("real_paired_outcome_execution_already_recorded")
-        if self.model_adapter is None:
-            return self._blocked("real_paired_outcome_adapter_required")
         valid_intervention, intervention_reason = validate_context_intervention(
             context_intervention
         )
@@ -290,6 +310,42 @@ class RealPairedOutcomeProgram:
         current_reason = self._current_corpus_reason(registration)
         if current_reason:
             return self._blocked(current_reason)
+        provenance = self.repository.verify_provenance()
+        if provenance.get("valid") is not True:
+            return self._blocked("provenance_invalid")
+        attempt = self._attempt(program_id)
+        attempt_reason = self._attempt_reason(attempt, registration)
+        if attempt_reason:
+            return self._blocked(attempt_reason)
+        execution = self._execution(program_id)
+        execution_reason = self._execution_reason(execution, registration, attempt)
+        if execution_reason:
+            return self._blocked(execution_reason)
+        if execution is not None:
+            if isinstance(attempt, dict) and attempt.get("state") == "running":
+                _, terminal_reason = self.attempts.complete(
+                    registration,
+                    attempt,
+                    outcome=(
+                        "completed"
+                        if execution.get("status") == "pending_human_review"
+                        else "blocked"
+                    ),
+                    execution_sha256=str(execution["execution_sha256"]),
+                    reason=next(iter(execution.get("reasons", [])), None),
+                )
+                if terminal_reason:
+                    return self._blocked(terminal_reason)
+                return self.get(program_id) or self._blocked(
+                    "real_paired_outcome_execution_unreadable"
+                )
+            return self._blocked("real_paired_outcome_execution_already_recorded")
+        if attempt is not None:
+            return self.get(program_id) or self._blocked(
+                "real_paired_outcome_execution_recovery_required"
+            )
+        if self.model_adapter is None:
+            return self._blocked("real_paired_outcome_adapter_required")
         adapter, adapter_reason = self._adapter_contract(self.model_adapter)
         if adapter is None or adapter != registration["provider"]:
             return self._blocked(
@@ -299,21 +355,58 @@ class RealPairedOutcomeProgram:
         if authority_reason:
             return self._blocked(authority_reason)
 
+        claim, created, claim_reason = self.attempts.claim(registration)
+        if claim_reason:
+            return self._blocked(claim_reason)
+        if not created or claim is None:
+            return self.get(program_id) or self._blocked(
+                "real_paired_outcome_execution_recovery_required"
+            )
+        running, running_reason = self.attempts.mark_running(registration, claim)
+        if running_reason or running is None:
+            return self._blocked(
+                running_reason or "real_paired_outcome_attempt_transition_failed"
+            )
+
         evaluator = LiveContextPairedEvaluator(
             self.repository,
             self.corpus,
             self.model_adapter,
             scoring_nonce_factory=self.scoring_nonce_factory,
         )
-        live = evaluator.run(
-            context_intervention=context_intervention,
-            candidate_id=str(registration["candidates"]["candidate_id"]),
-            baseline_candidate_id=str(
-                registration["candidates"]["baseline_candidate_id"]
-            ),
-            task_ids=list(registration["corpus"]["task_ids"]),
-            execution_plan=deepcopy(registration["execution_plan"]),
-        )
+        try:
+            live = evaluator.run(
+                context_intervention=context_intervention,
+                candidate_id=str(registration["candidates"]["candidate_id"]),
+                baseline_candidate_id=str(
+                    registration["candidates"]["baseline_candidate_id"]
+                ),
+                task_ids=list(registration["corpus"]["task_ids"]),
+                execution_plan=deepcopy(registration["execution_plan"]),
+            )
+        except Exception as error:
+            _, failure_reason = self.attempts.complete(
+                registration,
+                running,
+                outcome="failed",
+                execution_sha256=None,
+                reason="real_paired_outcome_adapter_execution_failed",
+                failure_type=type(error).__name__,
+            )
+            if failure_reason:
+                return self._blocked(failure_reason)
+            return self.get(program_id) or self._blocked(
+                "real_paired_outcome_adapter_execution_failed"
+            )
+        return self._record_execution(registration, running, live)
+
+    def _record_execution(
+        self,
+        registration: dict[str, Any],
+        running_attempt: dict[str, Any],
+        live: dict[str, Any],
+    ) -> dict[str, Any]:
+        program_id = str(registration["id"])
         (
             observation_sources,
             observed_providers,
@@ -333,6 +426,7 @@ class RealPairedOutcomeProgram:
             program_id,
             str(self._mapping(live.get("execution")).get("experiment_id") or ""),
             producer_record_keys,
+            attempt_id=str(running_attempt["attempt_id"]),
         )
         reasons = [
             str(live.get("reason") or "")
@@ -371,6 +465,8 @@ class RealPairedOutcomeProgram:
             "kind": "program_execution",
             "program_id": program_id,
             "program_sha256": registration["program_sha256"],
+            "attempt_id": running_attempt["attempt_id"],
+            "attempt_running_sha256": running_attempt["attempt_sha256"],
             "status": execution_status,
             "reasons": reasons,
             "evaluation_id": self._mapping(live.get("evaluation")).get("id"),
@@ -398,9 +494,26 @@ class RealPairedOutcomeProgram:
             **execution_unsigned,
             "execution_sha256": self._digest(execution_unsigned),
         }
-        asyncio.run(
-            self.repository.save(f"{PROGRAM_EXECUTION_PREFIX}{program_id}", execution)
+        inserted = asyncio.run(
+            self.repository.save_if_absent(
+                f"{PROGRAM_EXECUTION_PREFIX}{program_id}", execution
+            )
         )
+        if not inserted:
+            stored = self._execution(program_id)
+            if stored != execution:
+                return self._blocked("real_paired_outcome_execution_write_conflict")
+        _, terminal_reason = self.attempts.complete(
+            registration,
+            running_attempt,
+            outcome=(
+                "completed" if execution_status == "pending_human_review" else "blocked"
+            ),
+            execution_sha256=str(execution["execution_sha256"]),
+            reason=next(iter(reasons), None),
+        )
+        if terminal_reason:
+            return self._blocked(terminal_reason)
         return self.get(program_id) or self._blocked(
             "real_paired_outcome_execution_unreadable"
         )
@@ -440,24 +553,61 @@ class RealPairedOutcomeProgram:
             or (None if provenance.get("valid") is True else "provenance_invalid")
             or self._current_corpus_reason(registration)
         )
+        attempt = self._attempt(program_id)
+        attempt_reason = self._attempt_reason(attempt, registration)
         execution = self._execution(program_id)
-        execution_reason = self._execution_reason(execution, registration)
-        if current_reason or execution_reason:
+        execution_reason = self._execution_reason(execution, registration, attempt)
+        if current_reason or attempt_reason or execution_reason:
             return self._projection(
                 registration,
                 execution,
+                attempt,
                 evaluation=None,
                 status="blocked",
-                reason=current_reason or execution_reason,
+                reason=current_reason or attempt_reason or execution_reason,
                 provenance=provenance,
             )
         if execution is None:
+            if isinstance(attempt, dict) and attempt.get("state") in ACTIVE_ATTEMPT_STATES:
+                return self._projection(
+                    registration,
+                    None,
+                    attempt,
+                    evaluation=None,
+                    status="recovery_required",
+                    reason="real_paired_outcome_execution_recovery_required",
+                    provenance=provenance,
+                )
+            if isinstance(attempt, dict) and attempt.get("terminal_outcome") == "failed":
+                return self._projection(
+                    registration,
+                    None,
+                    attempt,
+                    evaluation=None,
+                    status="blocked",
+                    reason=str(
+                        attempt.get("reason")
+                        or "real_paired_outcome_adapter_execution_failed"
+                    ),
+                    provenance=provenance,
+                )
             return self._projection(
                 registration,
                 None,
+                attempt,
                 evaluation=None,
                 status="registered",
                 reason=None,
+                provenance=provenance,
+            )
+        if isinstance(attempt, dict) and attempt.get("state") in ACTIVE_ATTEMPT_STATES:
+            return self._projection(
+                registration,
+                execution,
+                attempt,
+                evaluation=None,
+                status="recovery_required",
+                reason="real_paired_outcome_execution_finalization_required",
                 provenance=provenance,
             )
         evaluation_id = execution.get("evaluation_id")
@@ -496,6 +646,7 @@ class RealPairedOutcomeProgram:
         return self._projection(
             registration,
             execution,
+            attempt,
             evaluation=evaluation,
             status=status,
             reason=reason,
@@ -515,6 +666,16 @@ class RealPairedOutcomeProgram:
         for record in records:
             status = str(record.get("status") or "unknown")
             by_status[status] = by_status.get(status, 0) + 1
+        hardened = sum(
+            self._mapping(record.get("operational_hardening")).get("assurance")
+            == "attempt_bound"
+            for record in records
+        )
+        legacy_unbound = sum(
+            self._mapping(record.get("operational_hardening")).get("assurance")
+            == "legacy_unbound"
+            for record in records
+        )
         return {
             "schema": REAL_PAIRED_OUTCOME_PROGRAM_SCHEMA,
             "total_programs": len(records),
@@ -522,6 +683,9 @@ class RealPairedOutcomeProgram:
                 "reviewed_observed_real_workload", 0
             ),
             "cryptographically_verified_real_outcome_count": 0,
+            "attempt_bound_execution_count": hardened,
+            "recovery_required_count": by_status.get("recovery_required", 0),
+            "legacy_unbound_execution_count": legacy_unbound,
             "by_status": by_status,
         }
 
@@ -529,6 +693,7 @@ class RealPairedOutcomeProgram:
         self,
         registration: dict[str, Any],
         execution: dict[str, Any] | None,
+        attempt: dict[str, Any] | None,
         *,
         evaluation: dict[str, Any] | None,
         status: str,
@@ -549,6 +714,23 @@ class RealPairedOutcomeProgram:
         real_workload = registration["study"]["workload_class"] == "real_user_workload"
         reviewed = self._mapping(evaluation).get("status") == "reviewed_evidence"
         observed_real_outcome = remote_observed and real_workload and reviewed
+        attempt_bound = (
+            isinstance(attempt, dict)
+            and attempt.get("state") == "terminal"
+            and isinstance(execution, dict)
+            and attempt.get("execution_sha256") == execution.get("execution_sha256")
+        )
+        assurance = (
+            "attempt_bound"
+            if attempt_bound
+            else "recovery_required"
+            if isinstance(attempt, dict) and attempt.get("state") in ACTIVE_ATTEMPT_STATES
+            else "terminal_failure"
+            if isinstance(attempt, dict) and attempt.get("terminal_outcome") == "failed"
+            else "legacy_unbound"
+            if execution is not None
+            else "not_started"
+        )
         return {
             "schema": REAL_PAIRED_OUTCOME_PROGRAM_SCHEMA,
             "id": registration["id"],
@@ -561,6 +743,31 @@ class RealPairedOutcomeProgram:
             "provider": deepcopy(registration["provider"]),
             "candidates": deepcopy(registration["candidates"]),
             "execution_authority": deepcopy(registration["execution_authority"]),
+            "operational_hardening": {
+                "assurance": assurance,
+                "attempt_bound": attempt_bound,
+                "attempt": (
+                    {
+                        key: deepcopy(attempt.get(key))
+                        for key in (
+                            "attempt_id",
+                            "state",
+                            "transition_index",
+                            "adapter_invocations_may_have_started",
+                            "automatic_retry_permitted",
+                            "terminal_outcome",
+                            "reason",
+                            "failure_type",
+                        )
+                    }
+                    if attempt is not None
+                    else None
+                ),
+                "transition_provenance": self.attempts.provenance_projection(attempt),
+                "automatic_retry_permitted": False,
+                "timeout_lease_steal_permitted": False,
+                "provider_attempt_count_after_interruption_verified": False,
+            },
             "preregistration": {
                 "registered_before_adapter_invocations": (
                     self._mapping(execution).get("registration_order", {}).get(
@@ -585,6 +792,8 @@ class RealPairedOutcomeProgram:
                     for key in (
                         "status",
                         "reasons",
+                        "attempt_id",
+                        "attempt_running_sha256",
                         "evaluation_id",
                         "experiment_id",
                         "execution_manifest_sha256",
@@ -692,10 +901,15 @@ class RealPairedOutcomeProgram:
         self,
         value: dict[str, Any] | None,
         registration: dict[str, Any],
+        attempt: dict[str, Any] | None,
     ) -> str | None:
         if value is None:
             return None
-        if value.get("schema") != REAL_PAIRED_OUTCOME_EXECUTION_SCHEMA:
+        schema = value.get("schema")
+        if schema not in {
+            REAL_PAIRED_OUTCOME_EXECUTION_SCHEMA,
+            LEGACY_REAL_PAIRED_OUTCOME_EXECUTION_SCHEMA,
+        }:
             return "real_paired_outcome_execution_schema_invalid"
         digest = value.get("execution_sha256")
         unsigned = {
@@ -710,6 +924,21 @@ class RealPairedOutcomeProgram:
             != self._mapping(registration.get("execution_plan")).get("manifest_sha256")
         ):
             return "real_paired_outcome_execution_binding_mismatch"
+        if schema == REAL_PAIRED_OUTCOME_EXECUTION_SCHEMA:
+            if not isinstance(attempt, dict):
+                return "real_paired_outcome_attempt_missing"
+            running_sha256 = (
+                attempt.get("attempt_sha256")
+                if attempt.get("state") == "running"
+                else attempt.get("running_attempt_sha256")
+            )
+            if (
+                value.get("attempt_id") != attempt.get("attempt_id")
+                or value.get("attempt_running_sha256") != running_sha256
+            ):
+                return "real_paired_outcome_attempt_execution_binding_mismatch"
+        elif attempt is not None:
+            return "real_paired_outcome_legacy_execution_attempt_conflict"
         live_record_reason = self._live_record_reason(value, registration)
         if live_record_reason:
             return live_record_reason
@@ -743,9 +972,21 @@ class RealPairedOutcomeProgram:
             str(registration["id"]),
             str(value.get("experiment_id") or ""),
             value.get("producer_record_keys"),
+            attempt_id=(
+                str(value.get("attempt_id"))
+                if schema == REAL_PAIRED_OUTCOME_EXECUTION_SCHEMA
+                else None
+            ),
         )
         if order != value.get("registration_order") or order.get("verified") is not True:
             return "real_paired_outcome_registration_order_unverified"
+        if (
+            schema == REAL_PAIRED_OUTCOME_EXECUTION_SCHEMA
+            and isinstance(attempt, dict)
+            and attempt.get("state") == "terminal"
+            and attempt.get("execution_sha256") != value.get("execution_sha256")
+        ):
+            return "real_paired_outcome_attempt_execution_binding_mismatch"
         return None
 
     def _live_record_reason(
@@ -982,6 +1223,8 @@ class RealPairedOutcomeProgram:
         program_id: str,
         experiment_id: str,
         producer_record_keys: Any,
+        *,
+        attempt_id: str | None = None,
     ) -> dict[str, Any]:
         keys = (
             [str(item) for item in producer_record_keys]
@@ -1003,15 +1246,37 @@ class RealPairedOutcomeProgram:
         registration_sequence = min(registration_values) if registration_values else None
         plan_sequence = min(plan_values) if plan_values else None
         first_producer_sequence = min(producer_values) if producer_values else None
-        verified = (
+        base_verified = (
             isinstance(registration_sequence, int)
             and isinstance(plan_sequence, int)
             and isinstance(first_producer_sequence, int)
             and registration_sequence < plan_sequence < first_producer_sequence
         )
+        if attempt_id is None:
+            return {
+                "verified": base_verified,
+                "registration_sequence": registration_sequence,
+                "plan_sequence": plan_sequence,
+                "first_producer_sequence": first_producer_sequence,
+                "producer_record_count": len(keys),
+            }
+        attempt_values = sequences.get(f"{PROGRAM_ATTEMPT_PREFIX}{program_id}", [])
+        claim_sequence = attempt_values[0] if attempt_values else None
+        running_sequence = attempt_values[1] if len(attempt_values) > 1 else None
+        verified = (
+            base_verified
+            and isinstance(registration_sequence, int)
+            and isinstance(claim_sequence, int)
+            and isinstance(running_sequence, int)
+            and isinstance(plan_sequence, int)
+            and registration_sequence < claim_sequence < running_sequence < plan_sequence
+        )
         return {
             "verified": verified,
             "registration_sequence": registration_sequence,
+            "attempt_id": attempt_id,
+            "attempt_claim_sequence": claim_sequence,
+            "attempt_running_sequence": running_sequence,
             "plan_sequence": plan_sequence,
             "first_producer_sequence": first_producer_sequence,
             "producer_record_count": len(keys),
@@ -1044,6 +1309,20 @@ class RealPairedOutcomeProgram:
             self.repository.load(f"{PROGRAM_EXECUTION_PREFIX}{program_id}")
         )
         return stored if isinstance(stored, dict) else None
+
+    def _attempt(self, program_id: str) -> dict[str, Any] | None:
+        return self.attempts.get(program_id)
+
+    def _attempt_reason(
+        self,
+        value: dict[str, Any] | None,
+        registration: dict[str, Any],
+    ) -> str | None:
+        if value is None:
+            return None
+        return self.attempts.validation_reason(
+            value, registration
+        ) or self.attempts.provenance_reason(value)
 
     def _load_index(self) -> dict[str, Any]:
         stored = asyncio.run(self.repository.load(PROGRAM_INDEX_KEY))

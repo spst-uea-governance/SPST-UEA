@@ -103,6 +103,63 @@ class SQLiteRepository(PersistenceRepository):
                     raise
                 time.sleep(0.02 * (2**attempt))
 
+    async def save_if_absent(self, key: str, value: dict[str, Any]) -> bool:
+        """Atomically persist one record only when its key does not exist."""
+
+        if self.read_only:
+            raise PermissionError("Cannot save through a read-only SQLiteRepository.")
+        serialized = json.dumps(value, sort_keys=True)
+        for attempt in range(6):
+            try:
+                with self.locked(), self.connection() as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    cursor = conn.execute(
+                        "INSERT OR IGNORE INTO state_store(key, value) VALUES(?, ?)",
+                        (key, serialized),
+                    )
+                    inserted = cursor.rowcount == 1
+                    if inserted:
+                        self._append_provenance(conn, key, serialized)
+                return inserted
+            except sqlite3.OperationalError as exc:
+                if not self._is_locked(exc) or attempt == 5:
+                    raise
+                time.sleep(0.02 * (2**attempt))
+        return False
+
+    async def replace_if_record_hash(
+        self,
+        key: str,
+        expected_record_hash: str,
+        value: dict[str, Any],
+    ) -> bool:
+        """Atomically replace one record only when its current hash matches."""
+
+        if self.read_only:
+            raise PermissionError("Cannot save through a read-only SQLiteRepository.")
+        serialized = json.dumps(value, sort_keys=True)
+        for attempt in range(6):
+            try:
+                with self.locked(), self.connection() as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    row = conn.execute(
+                        "SELECT value FROM state_store WHERE key = ?",
+                        (key,),
+                    ).fetchone()
+                    if row is None or self._record_hash(str(row[0])) != expected_record_hash:
+                        return False
+                    conn.execute(
+                        "UPDATE state_store SET value = ? WHERE key = ?",
+                        (serialized, key),
+                    )
+                    self._append_provenance(conn, key, serialized)
+                return True
+            except sqlite3.OperationalError as exc:
+                if not self._is_locked(exc) or attempt == 5:
+                    raise
+                time.sleep(0.02 * (2**attempt))
+        return False
+
     async def load(self, key: str) -> dict[str, Any] | None:
         for attempt in range(6):
             try:

@@ -171,6 +171,13 @@ Run commands from `runtime/` unless noted otherwise:
 - Avoid committing generated files such as `__pycache__/`, `.pytest_cache/`, or `*.pyc`.
 - For API-key-free chat operation, route sanitized task contracts through
   `spst_runtime.chat_bridge`.
+- A real paired outcome execution must acquire one durable atomic attempt claim
+  before adapter invocation. Concurrent or interrupted attempts must not be
+  auto-retried when provider transport attempt count is unresolved. Read-only
+  status must expose `recovery_required` without changing state.
+- ARCH-06 execution records without an ARCH-07 attempt binding may remain
+  readable, but must be labeled `legacy_unbound` and must not be upgraded to
+  attempt-bound operational evidence.
 
 ## Sovereign Governance Rules
 

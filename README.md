@@ -125,6 +125,11 @@ read-only projection separates mechanism validation, reviewed fixture outcomes,
 and observed real-workload outcomes while keeping provider, reviewer, and
 workload identity unverified. See `docs/real-paired-outcome-program.md`.
 
+ARCH-07 adds a durable single-execution attempt, atomic compare-and-set
+transitions, and read-only `recovery_required` status. It refuses automatic
+retry after an interrupted provider attempt because the transport call count is
+not established. See `docs/operational-hardening.md`.
+
 ## Current Runtime Status
 
 The runtime can be executed locally from `runtime/`:
