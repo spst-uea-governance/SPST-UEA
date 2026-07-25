@@ -14,6 +14,7 @@ PROVIDER_OBSERVATION_SOURCES = frozenset(
     {
         "https_response_metadata_echo",
         "in_process_provider_echo",
+        "local_process_provider_echo",
     }
 )
 

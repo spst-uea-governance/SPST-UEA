@@ -138,6 +138,13 @@ inference. Missing acknowledgement, altered receipts, unresolved results, or an
 exhausted query cap remain blocked. Provider identity and exactly-once execution
 are not claimed. See `docs/provider-transport-recovery.md`.
 
+ARCH-09 exercises that recovery path across actual operating-system process
+boundaries. A no-network provider worker commits to a dedicated durable SQLite
+store, the submitting client is terminated before receiving the response, and
+a fresh client reconciles and resumes without a duplicate logical inference.
+The provider instance is Program-bound, but it remains locally simulated and
+unauthenticated. See `docs/process-isolated-transport-recovery.md`.
+
 ## Current Runtime Status
 
 The runtime can be executed locally from `runtime/`:

@@ -459,12 +459,25 @@ class ProviderTransportLedger:
             if query_reason or query is None:
                 return {}, query_reason or "provider_transport_query_reservation_failed"
             request = _mapping(record.get("transport_request"))
-            response = method(
-                str(request.get("idempotency_key") or ""),
-                str(record.get("provider_request_binding_sha256") or ""),
-            )
-            if inspect.isawaitable(response):
-                response = asyncio.run(_await_value(response))
+            try:
+                response = method(
+                    str(request.get("idempotency_key") or ""),
+                    str(record.get("provider_request_binding_sha256") or ""),
+                )
+                if inspect.isawaitable(response):
+                    response = asyncio.run(_await_value(response))
+            except Exception:
+                query_terminal_reason = self._complete_query(
+                    query,
+                    observed=False,
+                    receipt_sha256=None,
+                    reason="provider_transport_reconciliation_failed",
+                )
+                return (
+                    {},
+                    query_terminal_reason
+                    or "provider_transport_reconciliation_failed",
+                )
             if not isinstance(response, dict):
                 query_terminal_reason = self._complete_query(
                     query,

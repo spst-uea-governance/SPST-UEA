@@ -189,6 +189,12 @@ Run commands from `runtime/` unless noted otherwise:
   inference, cap reconciliation queries, and fail closed on any mismatch.
 - Keep provider identity unauthenticated and exactly-once execution unproven
   unless a separate external authenticity mechanism establishes them.
+- For ARCH-09 process recovery, bind the durable provider-instance digest and
+  local process protocol into the pre-registered Program. Confirm provider
+  commit before terminating the submitting client, recover only from a fresh
+  client process with explicit authority, and require one logical provider
+  execution per scheduled idempotency key. A local subprocess remains
+  mechanism evidence, not an authenticated external provider.
 
 ## Sovereign Governance Rules
 

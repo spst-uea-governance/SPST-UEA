@@ -97,7 +97,7 @@ new valid local provenance entry, fails the Producer-record recomputation.
 ## Evidence classes
 
 - `mechanism_validation`: every selected observation came from
-  `in_process_provider_echo`. After review, the status is
+  `in_process_provider_echo` or `local_process_provider_echo`. After review, the status is
   `mechanism_validation_only`; it is never counted as real outcome evidence.
 - `remote_transport_observed`: every selected observation came from
   `https_response_metadata_echo` and matched the pre-registered provider
@@ -182,3 +182,13 @@ can resume only through `RealPairedOutcomeProgram.recover()` with a digest-bound
 recovery authority. Submitted calls are reconciled first; completed calls are
 replayed without new inference, while unresolved or altered results remain
 `recovery_required`. See `docs/provider-transport-recovery.md`.
+
+## ARCH-09 process-isolated recovery
+
+ARCH-09 binds a durable local provider-instance digest into the Program and
+runs provider requests and reconciliation through fresh no-network subprocesses.
+Its crash test terminates the original client after the first provider commit
+and completes recovery from a second client process without a duplicate first
+inference. This remains `mechanism_validation`; local process separation does
+not establish external provider identity, exactly-once execution, or quality
+uplift. See `docs/process-isolated-transport-recovery.md`.

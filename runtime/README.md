@@ -255,3 +255,15 @@ requires an explicit recovery-authority artifact, reconciles uncertain results,
 and replays completed results without another inference. The no-charge test
 adapter validates this mechanism; the bundled OpenAI adapter does not claim the
 capability. See `../docs/provider-transport-recovery.md`.
+
+## ARCH-09 process-isolated transport recovery
+
+`ProcessIsolatedTransportAdapter` executes a no-network provider simulator in
+fresh Python worker processes and stores results in a dedicated SQLite file.
+The process integration test terminates the first client only after the
+provider commit marker exists, then performs `recover()` from another client
+PID. It requires 32 logical executions for 32 scheduled calls, one
+reconciliation, and no 33rd inference request. This validates local crash
+recovery mechanics only; it does not authenticate an external provider or
+prove exactly-once semantics. See
+`../docs/process-isolated-transport-recovery.md`.

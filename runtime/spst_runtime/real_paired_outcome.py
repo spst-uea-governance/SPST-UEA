@@ -47,9 +47,12 @@ PROGRAM_INDEX_KEY = "runtime:real_paired_outcome:index:v1"
 PROGRAM_RECORD_PREFIX = "runtime:real_paired_outcome:program:"
 PROGRAM_EXECUTION_PREFIX = "runtime:real_paired_outcome:execution:"
 WORKLOAD_CLASSES = frozenset({"test_fixture", "real_user_workload"})
-EXECUTION_ENVIRONMENTS = frozenset({"in_process", "external_network"})
+EXECUTION_ENVIRONMENTS = frozenset(
+    {"in_process", "local_process", "external_network"}
+)
 BILLING_CLASSES = frozenset({"no_charge", "paid", "unknown"})
 MECHANISM_OBSERVATION_SOURCE = "in_process_provider_echo"
+PROCESS_MECHANISM_OBSERVATION_SOURCE = "local_process_provider_echo"
 REMOTE_OBSERVATION_SOURCE = "https_response_metadata_echo"
 MAXIMUM_TRANSPORT_RECONCILIATION_MULTIPLIER = 2
 
@@ -222,6 +225,15 @@ class RealPairedOutcomeProgram:
                     expected_calls * MAXIMUM_TRANSPORT_RECONCILIATION_MULTIPLIER
                     if provider["transport_idempotency_supported"]
                     else 0
+                ),
+                "process_isolated_recovery_supported": provider.get(
+                    "process_isolated_recovery_supported", False
+                ),
+                "process_transport_protocol": provider.get(
+                    "process_transport_protocol"
+                ),
+                "transport_instance_sha256": provider.get(
+                    "transport_instance_sha256"
                 ),
             },
             "evaluation_contract": evaluation_contract,
@@ -906,7 +918,14 @@ class RealPairedOutcomeProgram:
         elif evaluation.get("status") == "reviewed_evidence":
             if execution.get("evidence_class") == "mechanism_validation":
                 status = "mechanism_validation_only"
-                reason = "in_process_provider_is_not_real_outcome_evidence"
+                reason = (
+                    "local_process_provider_is_not_real_outcome_evidence"
+                    if registration["provider"].get(
+                        "provider_observation_source"
+                    )
+                    == PROCESS_MECHANISM_OBSERVATION_SOURCE
+                    else "in_process_provider_is_not_real_outcome_evidence"
+                )
             elif registration["study"]["workload_class"] == "test_fixture":
                 status = "reviewed_fixture_outcome"
                 reason = "fixture_workload_is_not_real_outcome_evidence"
@@ -1025,6 +1044,22 @@ class RealPairedOutcomeProgram:
             and isinstance(transport_summary, dict)
             and transport_summary.get("receipt_set_complete") is True
         )
+        recovery_projection = (
+            transport_ledger.recovery_projection()
+            if transport_ledger is not None
+            else None
+        )
+        process_isolated_recovery_observed = bool(
+            transport_bound
+            and registration["provider"].get(
+                "process_isolated_recovery_supported"
+            )
+            is True
+            and isinstance(recovery_projection, dict)
+            and int(recovery_projection.get("cycle_count") or 0) > 0
+            and recovery_projection.get("latest_outcome") == "execution_completed"
+            and recovery_projection.get("verified") is True
+        )
         assurance = (
             "attempt_and_transport_bound"
             if transport_bound
@@ -1075,10 +1110,9 @@ class RealPairedOutcomeProgram:
                 "timeout_lease_steal_permitted": False,
                 "provider_attempt_count_after_interruption_verified": False,
                 "provider_transport": deepcopy(transport_summary),
-                "recovery_authority": (
-                    transport_ledger.recovery_projection()
-                    if transport_ledger is not None
-                    else None
+                "recovery_authority": deepcopy(recovery_projection),
+                "process_isolated_recovery_observed": (
+                    process_isolated_recovery_observed
                 ),
             },
             "preregistration": {
@@ -1160,6 +1194,9 @@ class RealPairedOutcomeProgram:
                 ),
                 "provider_transport_attempt_count_verified": False,
                 "provider_transport_attempt_count_observed": bool(transport_bound),
+                "process_isolated_recovery_mechanism_observed": (
+                    process_isolated_recovery_observed
+                ),
             },
             "revalidation": {
                 "program_valid": status != "blocked",
@@ -1244,6 +1281,42 @@ class RealPairedOutcomeProgram:
                 != expected_queries
             ):
                 return "provider_transport_program_binding_mismatch"
+        process_fields_present = any(
+            field in provider
+            for field in (
+                "process_isolated_recovery_supported",
+                "process_transport_protocol",
+                "transport_instance_sha256",
+            )
+        )
+        if process_fields_present:
+            local_process = provider.get("execution_environment") == "local_process"
+            if local_process:
+                if (
+                    provider.get("process_isolated_recovery_supported") is not True
+                    or provider.get("process_transport_protocol")
+                    != "subprocess-stdio-sqlite-v1"
+                    or not self._valid_sha256(
+                        provider.get("transport_instance_sha256")
+                    )
+                    or provider.get("transport_idempotency_supported") is not True
+                ):
+                    return "process_transport_capability_binding_invalid"
+            elif (
+                provider.get("process_isolated_recovery_supported") is not False
+                or provider.get("process_transport_protocol") is not None
+                or provider.get("transport_instance_sha256") is not None
+            ):
+                return "process_transport_capability_scope_invalid"
+            if (
+                hardening.get("process_isolated_recovery_supported")
+                != provider.get("process_isolated_recovery_supported")
+                or hardening.get("process_transport_protocol")
+                != provider.get("process_transport_protocol")
+                or hardening.get("transport_instance_sha256")
+                != provider.get("transport_instance_sha256")
+            ):
+                return "process_transport_program_binding_mismatch"
         return None
 
     def _execution_reason(
@@ -1472,6 +1545,12 @@ class RealPairedOutcomeProgram:
         transport_reconciliation = (
             capabilities.get("supports_transport_reconciliation") is True
         )
+        process_isolated_recovery = (
+            capabilities.get("supports_process_isolated_recovery") is True
+        )
+        process_transport_protocol = capabilities.get("process_transport_protocol")
+        transport_instance_sha256 = capabilities.get("transport_instance_sha256")
+        health_transport_instance = health.get("provider_instance_sha256")
         provider_name = health.get("provider") or health.get("active_provider")
         model_version = health.get("model_version") or health.get("model")
         if observation_source not in PROVIDER_OBSERVATION_SOURCES:
@@ -1486,6 +1565,24 @@ class RealPairedOutcomeProgram:
             getattr(adapter, "reconcile_transport", None)
         ):
             return None, "provider_transport_reconciliation_method_required"
+        if execution_environment == "local_process":
+            if (
+                not transport_idempotency
+                or not process_isolated_recovery
+                or process_transport_protocol != "subprocess-stdio-sqlite-v1"
+                or not self._valid_sha256(transport_instance_sha256)
+                or health_transport_instance != transport_instance_sha256
+            ):
+                return None, "process_transport_capability_binding_invalid"
+        elif process_isolated_recovery or any(
+            value is not None
+            for value in (
+                process_transport_protocol,
+                transport_instance_sha256,
+                health_transport_instance,
+            )
+        ):
+            return None, "process_transport_capability_scope_invalid"
         if not self._safe_identifier(provider_name) or not self._safe_identifier(
             model_version
         ):
@@ -1502,6 +1599,17 @@ class RealPairedOutcomeProgram:
                 "requires_api_key": bool(health.get("requires_api_key", False)),
                 "adapter_declaration_authenticated": False,
                 "provider_identity_cryptographically_verified": False,
+                "process_isolated_recovery_supported": process_isolated_recovery,
+                "process_transport_protocol": (
+                    str(process_transport_protocol)
+                    if process_transport_protocol is not None
+                    else None
+                ),
+                "transport_instance_sha256": (
+                    str(transport_instance_sha256)
+                    if transport_instance_sha256 is not None
+                    else None
+                ),
             },
             None,
         )
@@ -1669,7 +1777,10 @@ class RealPairedOutcomeProgram:
             return "unresolved", "real_paired_outcome_observation_sources_missing"
         if len(sources) != 1:
             return "unresolved", "real_paired_outcome_observation_sources_mixed"
-        if sources[0] == MECHANISM_OBSERVATION_SOURCE:
+        if sources[0] in {
+            MECHANISM_OBSERVATION_SOURCE,
+            PROCESS_MECHANISM_OBSERVATION_SOURCE,
+        }:
             return "mechanism_validation", None
         if sources[0] == REMOTE_OBSERVATION_SOURCE:
             return "remote_transport_observed", None

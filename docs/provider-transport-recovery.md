@@ -68,3 +68,9 @@ execution cannot be inferred from local records alone. The bundled OpenAI
 adapter does not declare this recovery capability. A real external adapter must
 implement and test a documented provider-side idempotency and result-lookup
 contract before it can enter the ARCH-08 path.
+
+ARCH-09 adds a stricter local experiment that kills the submitting client after
+a separate provider process commits its result, then reconciles from a fresh
+client process. See `docs/process-isolated-transport-recovery.md`. It reduces
+the in-process simulation gap but does not change the external-provider claim
+boundary above.
