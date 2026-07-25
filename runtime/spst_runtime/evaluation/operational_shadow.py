@@ -297,12 +297,24 @@ class OperationalShadowRunner:
         if context_intervention is not None:
             context["evidence_context_intervention"] = deepcopy(context_intervention)
 
+        provider_context = deepcopy(context)
+        prepare_transport = getattr(
+            self.model_adapter,
+            "prepare_transport_context",
+            None,
+        )
+        if callable(prepare_transport):
+            prepared_context = prepare_transport(task["prompt"], provider_context)
+            if not isinstance(prepared_context, dict):
+                raise ValueError("provider_transport_context_invalid")
+            provider_context = prepared_context
+
         started_at = time.perf_counter()
         expected_provider_request: dict[str, Any] | None
         request_binding_reason: str | None
         try:
             expected_provider_request = build_provider_request_binding(
-                task["prompt"], context
+                task["prompt"], provider_context
             )
         except ProviderObservationError as error:
             expected_provider_request = None
@@ -310,7 +322,9 @@ class OperationalShadowRunner:
         else:
             request_binding_reason = None
         try:
-            result = asyncio.run(self.model_adapter.infer(task["prompt"], context))
+            result = asyncio.run(
+                self.model_adapter.infer(task["prompt"], provider_context)
+            )
         except Exception as exc:
             error_artifact = type(exc).__name__
             task_result = {
@@ -345,6 +359,21 @@ class OperationalShadowRunner:
                 context_intervention,
             )
             return self._with_scoring_material(task_result, error_artifact, task)
+
+        finalize_transport = getattr(
+            self.model_adapter,
+            "finalize_transport_result",
+            None,
+        )
+        if callable(finalize_transport):
+            finalized_result = finalize_transport(
+                task["prompt"],
+                provider_context,
+                result,
+            )
+            if not isinstance(finalized_result, dict):
+                raise ValueError("provider_transport_result_invalid")
+            result = finalized_result
 
         text = str(result.get("text", ""))
         available = bool(result.get("available", True))

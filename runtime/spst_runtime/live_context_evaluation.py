@@ -56,6 +56,7 @@ class LiveContextPairedEvaluator:
         baseline_candidate_id: str,
         task_ids: list[str] | None = None,
         execution_plan: dict[str, Any] | None = None,
+        resume_registered_plan: bool = False,
     ) -> dict[str, Any]:
         valid, reason = validate_context_intervention(context_intervention)
         if not valid:
@@ -100,9 +101,14 @@ class LiveContextPairedEvaluator:
         }
         plan_record["record_sha256"] = canonical_live_pair_hash(plan_record)
         with self.repository.locked():
-            if asyncio.run(self.repository.load(plan_record_key)) is not None:
-                return self._blocked("live_pair_plan_already_registered")
-            asyncio.run(self.repository.save(plan_record_key, plan_record))
+            stored_plan = asyncio.run(self.repository.load(plan_record_key))
+            if stored_plan is not None:
+                if not resume_registered_plan:
+                    return self._blocked("live_pair_plan_already_registered")
+                if stored_plan != plan_record:
+                    return self._blocked("live_pair_registered_plan_mismatch")
+            else:
+                asyncio.run(self.repository.save(plan_record_key, plan_record))
 
         reports_by_task: dict[str, dict[str, dict[str, Any]]] = {}
         all_reports: list[dict[str, Any]] = []

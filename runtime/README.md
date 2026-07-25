@@ -244,3 +244,14 @@ adapter invocation. Concurrent callers cannot start a second run, ordinary
 adapter failures become terminal without storing raw error text, and interrupted
 runs surface as read-only `recovery_required` state with automatic retry
 disabled. See `../docs/operational-hardening.md`.
+
+## ARCH-08 provider transport recovery
+
+Adapters may opt into the ARCH-08 path only by declaring both transport
+idempotency and reconciliation and implementing `reconcile_transport`. Each
+call then receives a Program/Attempt/ordinal-bound idempotency request and must
+return an exact provider transport receipt. `RealPairedOutcomeProgram.recover()`
+requires an explicit recovery-authority artifact, reconciles uncertain results,
+and replays completed results without another inference. The no-charge test
+adapter validates this mechanism; the bundled OpenAI adapter does not claim the
+capability. See `../docs/provider-transport-recovery.md`.

@@ -24,6 +24,13 @@ from spst_runtime.provider_observation import (
     build_provider_observation,
     build_provider_request_binding,
 )
+from spst_runtime.provider_transport import (
+    RECOVERY_RECORD_PREFIX,
+    TRANSPORT_QUERY_PREFIX,
+    TRANSPORT_RECORD_PREFIX,
+    build_provider_transport_receipt,
+    build_recovery_authority,
+)
 from spst_runtime.real_paired_outcome import (
     PROGRAM_EXECUTION_PREFIX,
     PROVIDER_EXECUTION_AUTHORITY_SCHEMA,
@@ -99,6 +106,106 @@ class HardenedAdapter(ModelAdapter):
             "provider_observation_source": "in_process_provider_echo",
             "execution_environment": "in_process",
             "billing_class": "no_charge",
+        }
+
+
+class RecoverableTransportAdapter(HardenedAdapter):
+    def __init__(
+        self,
+        *,
+        loss_mode: str | None = None,
+        reconciliation_attack: str | None = None,
+        receipt_attack: str | None = None,
+    ):
+        super().__init__()
+        self.loss_mode = loss_mode
+        self.reconciliation_attack = reconciliation_attack
+        self.receipt_attack = receipt_attack
+        self.reconcile_calls = 0
+        self.transport_results: dict[str, dict[str, Any]] = {}
+        self.model_version = "provider-transport-v1"
+
+    async def infer(
+        self,
+        prompt: str,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        source = context or {}
+        transport_request = source.get("provider_transport")
+        assert isinstance(transport_request, dict)
+        idempotency_key = str(transport_request["idempotency_key"])
+        if idempotency_key in self.transport_results:
+            return deepcopy(self.transport_results[idempotency_key])
+        self.calls += 1
+        has_context = isinstance(source.get("evidence_context_intervention"), dict)
+        text = json.dumps({"answer": 1 if has_context else 0})
+        request = build_provider_request_binding(prompt, source)
+        response_id = f"transport-{idempotency_key[-16:]}"
+        observation = build_provider_observation(
+            request,
+            provider_name="hardened-in-process-provider",
+            model_version=self.model_version,
+            response_id=response_id,
+            response_status="completed",
+            output_text=text,
+            observation_source="in_process_provider_echo",
+            acknowledged_request_binding_sha256=request["request_binding_sha256"],
+        )
+        receipt = build_provider_transport_receipt(
+            transport_request,
+            request,
+            provider_name="hardened-in-process-provider",
+            model_version=self.model_version,
+            response_id=response_id,
+            response_status="completed",
+            output_text=text,
+            acknowledged_idempotency_key=(
+                None if self.receipt_attack == "missing_ack" else idempotency_key
+            ),
+        )
+        result = {
+            "provider": "hardened-in-process-provider",
+            "model_version": self.model_version,
+            "available": True,
+            "text": text,
+            "provider_observation": observation,
+            "provider_transport_receipt": receipt,
+            "provider_request_binding": request,
+        }
+        if self.calls == 1 and self.loss_mode == "after_provider_completion":
+            self.transport_results[idempotency_key] = deepcopy(result)
+            raise KeyboardInterrupt("response lost after provider completion")
+        if self.calls == 1 and self.loss_mode == "before_provider_completion":
+            raise KeyboardInterrupt("provider outcome unresolved")
+        self.transport_results[idempotency_key] = deepcopy(result)
+        return result
+
+    def reconcile_transport(
+        self,
+        idempotency_key: str,
+        provider_request_binding_sha256: str,
+    ) -> dict[str, Any] | None:
+        self.reconcile_calls += 1
+        result = self.transport_results.get(idempotency_key)
+        if result is None:
+            return None
+        resolved = deepcopy(result)
+        if self.reconciliation_attack == "altered_output":
+            resolved["text"] = json.dumps({"answer": 999})
+        elif self.reconciliation_attack == "wrong_request":
+            binding = deepcopy(
+                resolved.get("provider_request_binding")
+                or {"request_binding_sha256": provider_request_binding_sha256}
+            )
+            binding["request_binding_sha256"] = "f" * 64
+            resolved["provider_request_binding"] = binding
+        return resolved
+
+    def get_capabilities(self) -> dict[str, Any]:
+        return {
+            **super().get_capabilities(),
+            "supports_transport_idempotency": True,
+            "supports_transport_reconciliation": True,
         }
 
 
@@ -345,3 +452,272 @@ def test_resigned_attempt_tamper_and_execution_rebind_fail_closed(tmp_path: Path
     assert rebound_status is not None
     assert rebound_status["status"] == "blocked"
     assert rebound_status["reason"] == "real_paired_outcome_attempt_execution_binding_mismatch"
+
+
+def test_transport_receipts_bind_every_call_without_reconciliation(tmp_path: Path):
+    adapter = RecoverableTransportAdapter()
+    repository, program, intervention, registered = _fixture(tmp_path, adapter)
+    executed = program.execute(registered["id"], context_intervention=intervention)
+    assert executed["status"] == "pending_human_review"
+    hardening = executed["operational_hardening"]
+    assert hardening["assurance"] == "attempt_and_transport_bound"
+    transport = hardening["provider_transport"]
+    assert transport["record_count"] == 32
+    assert transport["completed_count"] == 32
+    assert transport["receipt_set_complete"] is True
+    assert transport["provider_idempotency_observed"] is True
+    assert transport["provider_identity_authenticated"] is False
+    assert transport["exactly_once_execution_proven"] is False
+    assert executed["outcome"]["provider_transport_attempt_count_observed"] is True
+    records = asyncio.run(repository.load_prefix(TRANSPORT_RECORD_PREFIX))
+    keys = {
+        value["transport_request"]["idempotency_key"]
+        for value in records.values()
+        if isinstance(value, dict)
+    }
+    assert len(keys) == 32
+    assert adapter.calls == 32
+    assert adapter.reconcile_calls == 0
+    assert repository.verify_provenance()["valid"] is True
+
+
+def test_lost_completed_response_reconciles_without_duplicate_inference(
+    tmp_path: Path,
+):
+    adapter = RecoverableTransportAdapter(loss_mode="after_provider_completion")
+    repository, program, intervention, registered = _fixture(tmp_path, adapter)
+    with pytest.raises(KeyboardInterrupt, match="response lost"):
+        program.execute(registered["id"], context_intervention=intervention)
+    interrupted = program.get(registered["id"])
+    assert interrupted is not None
+    assert interrupted["status"] == "recovery_required"
+    attempt = interrupted["operational_hardening"]["attempt"]
+    authority = build_recovery_authority(
+        program_id=registered["id"],
+        attempt_id=attempt["attempt_id"],
+        operator_id="human-recovery-reviewer",
+    )
+    recovered = program.recover(
+        registered["id"],
+        context_intervention=intervention,
+        recovery_authority=authority,
+    )
+    assert recovered["status"] == "pending_human_review"
+    assert recovered["operational_hardening"]["assurance"] == (
+        "attempt_and_transport_bound"
+    )
+    assert recovered["operational_hardening"]["recovery_authority"] == {
+        "cycle_count": 1,
+        "active": False,
+        "latest_outcome": "execution_completed",
+        "operator_identity_verified": False,
+        "verified": True,
+        "reason": None,
+    }
+    assert adapter.calls == 32
+    assert adapter.reconcile_calls == 1
+    queries = asyncio.run(repository.load_prefix(TRANSPORT_QUERY_PREFIX))
+    assert len(queries) == 1
+    query = next(iter(queries.values()))
+    assert query["state"] == "terminal"
+    assert query["provider_result_observed"] is True
+    assert len(query["result_transport_receipt_sha256"]) == 64
+    assert query["query_is_inference"] is False
+    assert repository.verify_provenance()["valid"] is True
+
+
+def test_unresolved_provider_result_never_resumes_new_calls(tmp_path: Path):
+    adapter = RecoverableTransportAdapter(loss_mode="before_provider_completion")
+    repository, program, intervention, registered = _fixture(tmp_path, adapter)
+    with pytest.raises(KeyboardInterrupt, match="outcome unresolved"):
+        program.execute(registered["id"], context_intervention=intervention)
+    interrupted = program.get(registered["id"])
+    assert interrupted is not None
+    attempt_id = interrupted["operational_hardening"]["attempt"]["attempt_id"]
+    authority = build_recovery_authority(
+        program_id=registered["id"],
+        attempt_id=attempt_id,
+        operator_id="human-recovery-reviewer",
+    )
+    first = program.recover(
+        registered["id"],
+        context_intervention=intervention,
+        recovery_authority=authority,
+    )
+    assert first["status"] == "recovery_required"
+    assert first["recovery"]["status"] == "held"
+    assert first["recovery"]["reason"] == "provider_transport_reconciliation_unresolved"
+    assert first["recovery"]["new_adapter_invocations"] == 0
+    second = program.recover(
+        registered["id"],
+        context_intervention=intervention,
+        recovery_authority=authority,
+    )
+    assert second["status"] == "recovery_required"
+    assert adapter.calls == 1
+    assert adapter.reconcile_calls == 2
+    assert repository.verify_provenance()["valid"] is True
+
+
+def test_reconciliation_tamper_and_wrong_authority_fail_closed(tmp_path: Path):
+    adapter = RecoverableTransportAdapter(
+        loss_mode="after_provider_completion",
+        reconciliation_attack="altered_output",
+    )
+    repository, program, intervention, registered = _fixture(tmp_path, adapter)
+    with pytest.raises(KeyboardInterrupt):
+        program.execute(registered["id"], context_intervention=intervention)
+    interrupted = program.get(registered["id"])
+    assert interrupted is not None
+    wrong = build_recovery_authority(
+        program_id=registered["id"],
+        attempt_id="RATT-wrong-authority",
+        operator_id="human-recovery-reviewer",
+    )
+    held = program.recover(
+        registered["id"],
+        context_intervention=intervention,
+        recovery_authority=wrong,
+    )
+    assert held["status"] == "recovery_required"
+    assert held["recovery"]["reason"] == "provider_transport_receipt_boundary_invalid"
+    assert adapter.calls == 1
+
+    adapter.reconciliation_attack = None
+    wrong_authority = program.recover(
+        registered["id"],
+        context_intervention=intervention,
+        recovery_authority=wrong,
+    )
+    assert wrong_authority["status"] == "recovery_required"
+    assert wrong_authority["recovery"]["reason"] == (
+        "provider_recovery_authority_binding_mismatch"
+    )
+    assert adapter.calls == 1
+    assert repository.verify_provenance()["valid"] is True
+
+
+def test_resigned_recovery_authority_tamper_blocks_completed_evidence(
+    tmp_path: Path,
+):
+    adapter = RecoverableTransportAdapter(loss_mode="after_provider_completion")
+    repository, program, intervention, registered = _fixture(tmp_path, adapter)
+    with pytest.raises(KeyboardInterrupt):
+        program.execute(registered["id"], context_intervention=intervention)
+    interrupted = program.get(registered["id"])
+    assert interrupted is not None
+    authority = build_recovery_authority(
+        program_id=registered["id"],
+        attempt_id=interrupted["operational_hardening"]["attempt"]["attempt_id"],
+        operator_id="human-recovery-reviewer",
+    )
+    assert program.recover(
+        registered["id"],
+        context_intervention=intervention,
+        recovery_authority=authority,
+    )["status"] == "pending_human_review"
+    records = asyncio.run(repository.load_prefix(RECOVERY_RECORD_PREFIX))
+    assert len(records) == 1
+    key, record = next(iter(records.items()))
+    tampered = deepcopy(record)
+    tampered_authority = deepcopy(tampered["authority"])
+    tampered_authority["automatic_retry_authorized"] = True
+    authority_unsigned = {
+        field: value
+        for field, value in tampered_authority.items()
+        if field != "authority_sha256"
+    }
+    tampered_authority["authority_sha256"] = canonical_live_pair_hash(
+        authority_unsigned
+    )
+    tampered["authority"] = tampered_authority
+    record_unsigned = {
+        field: value
+        for field, value in tampered.items()
+        if field != "recovery_record_sha256"
+    }
+    tampered["recovery_record_sha256"] = canonical_live_pair_hash(record_unsigned)
+    asyncio.run(repository.save(key, tampered))
+    assert repository.verify_provenance()["valid"] is True
+    blocked = program.get(registered["id"])
+    assert blocked is not None
+    assert blocked["status"] == "blocked"
+    assert blocked["reason"] == "provider_recovery_authority_binding_mismatch"
+
+
+def test_transport_capability_declaration_is_complete_and_callable(tmp_path: Path):
+    class PartialTransportAdapter(HardenedAdapter):
+        def get_capabilities(self) -> dict[str, Any]:
+            return {
+                **super().get_capabilities(),
+                "supports_transport_idempotency": True,
+                "supports_transport_reconciliation": False,
+            }
+
+    class MissingReconcileAdapter(HardenedAdapter):
+        def get_capabilities(self) -> dict[str, Any]:
+            return {
+                **super().get_capabilities(),
+                "supports_transport_idempotency": True,
+                "supports_transport_reconciliation": True,
+            }
+
+    repository = SQLiteRepository(str(tmp_path / "capabilities.db"))
+    corpus = OperationalEvaluationCorpus(repository)
+    partial = RealPairedOutcomeProgram(repository, corpus, PartialTransportAdapter())
+    missing = RealPairedOutcomeProgram(repository, corpus, MissingReconcileAdapter())
+    assert partial._adapter_contract(PartialTransportAdapter())[1] == (
+        "provider_transport_capability_incomplete"
+    )
+    assert missing._adapter_contract(MissingReconcileAdapter())[1] == (
+        "provider_transport_reconciliation_method_required"
+    )
+
+
+def test_missing_provider_idempotency_ack_is_unknown_and_never_retried(
+    tmp_path: Path,
+):
+    adapter = RecoverableTransportAdapter(receipt_attack="missing_ack")
+    repository, program, intervention, registered = _fixture(tmp_path, adapter)
+    result = program.execute(registered["id"], context_intervention=intervention)
+    assert result["status"] == "recovery_required"
+    assert result["operational_hardening"]["provider_transport"]["submitted_count"] == 1
+    retry = program.execute(registered["id"], context_intervention=intervention)
+    assert retry["status"] == "recovery_required"
+    assert adapter.calls == 1
+    assert repository.verify_provenance()["valid"] is True
+
+
+def test_reconciliation_query_cap_is_durable_and_blocks_further_queries(
+    tmp_path: Path,
+):
+    adapter = RecoverableTransportAdapter(loss_mode="before_provider_completion")
+    repository, program, intervention, registered = _fixture(tmp_path, adapter)
+    with pytest.raises(KeyboardInterrupt):
+        program.execute(registered["id"], context_intervention=intervention)
+    interrupted = program.get(registered["id"])
+    assert interrupted is not None
+    authority = build_recovery_authority(
+        program_id=registered["id"],
+        attempt_id=interrupted["operational_hardening"]["attempt"]["attempt_id"],
+        operator_id="human-recovery-reviewer",
+    )
+    maximum = registered["corpus"]["task_count"] * 4 * 2
+    for _ in range(maximum):
+        held = program.recover(
+            registered["id"],
+            context_intervention=intervention,
+            recovery_authority=authority,
+        )
+        assert held["status"] == "recovery_required"
+    exhausted = program.recover(
+        registered["id"],
+        context_intervention=intervention,
+        recovery_authority=authority,
+    )
+    assert exhausted["recovery"]["reason"] == (
+        "provider_transport_reconciliation_query_cap_exhausted"
+    )
+    assert adapter.calls == 1
+    assert adapter.reconcile_calls == maximum
+    assert repository.verify_provenance()["valid"] is True

@@ -21,6 +21,15 @@ from spst_runtime.live_pairing import (
 )
 from spst_runtime.persistence.sqlite_repository import SQLiteRepository
 from spst_runtime.provider_observation import PROVIDER_OBSERVATION_SOURCES
+from spst_runtime.provider_transport import (
+    IdempotentTransportAdapter,
+    PROVIDER_RECOVERY_AUTHORITY_SCHEMA,
+    PROVIDER_TRANSPORT_RECEIPT_SCHEMA,
+    PROVIDER_TRANSPORT_REQUEST_SCHEMA,
+    ProviderTransportLedger,
+    ProviderTransportOutcomeUnknown,
+    ProviderTransportRecoveryRequired,
+)
 from spst_runtime.real_paired_outcome_attempt import (
     ACTIVE_ATTEMPT_STATES,
     PROGRAM_ATTEMPT_PREFIX,
@@ -42,6 +51,7 @@ EXECUTION_ENVIRONMENTS = frozenset({"in_process", "external_network"})
 BILLING_CLASSES = frozenset({"no_charge", "paid", "unknown"})
 MECHANISM_OBSERVATION_SOURCE = "in_process_provider_echo"
 REMOTE_OBSERVATION_SOURCE = "https_response_metadata_echo"
+MAXIMUM_TRANSPORT_RECONCILIATION_MULTIPLIER = 2
 
 _identifier = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 _sha256 = re.compile(r"^[0-9a-f]{64}$")
@@ -193,6 +203,26 @@ class RealPairedOutcomeProgram:
                 "atomic_single_claim": True,
                 "automatic_retry_after_unknown_attempt": False,
                 "timeout_lease_steal_permitted": False,
+                "provider_transport_request_schema": (
+                    PROVIDER_TRANSPORT_REQUEST_SCHEMA
+                    if provider["transport_idempotency_supported"]
+                    else None
+                ),
+                "provider_transport_receipt_schema": (
+                    PROVIDER_TRANSPORT_RECEIPT_SCHEMA
+                    if provider["transport_idempotency_supported"]
+                    else None
+                ),
+                "provider_recovery_authority_schema": (
+                    PROVIDER_RECOVERY_AUTHORITY_SCHEMA
+                    if provider["transport_idempotency_supported"]
+                    else None
+                ),
+                "maximum_transport_reconciliation_queries": (
+                    expected_calls * MAXIMUM_TRANSPORT_RECONCILIATION_MULTIPLIER
+                    if provider["transport_idempotency_supported"]
+                    else 0
+                ),
             },
             "evaluation_contract": evaluation_contract,
             "claims": self._claim_boundary(),
@@ -368,10 +398,22 @@ class RealPairedOutcomeProgram:
                 running_reason or "real_paired_outcome_attempt_transition_failed"
             )
 
+        transport_ledger: ProviderTransportLedger | None = None
+        execution_adapter = self.model_adapter
+        if registration["provider"].get("transport_idempotency_supported") is True:
+            transport_ledger = ProviderTransportLedger(
+                self.repository,
+                registration,
+                running,
+            )
+            execution_adapter = IdempotentTransportAdapter(
+                self.model_adapter,
+                transport_ledger,
+            )
         evaluator = LiveContextPairedEvaluator(
             self.repository,
             self.corpus,
-            self.model_adapter,
+            execution_adapter,
             scoring_nonce_factory=self.scoring_nonce_factory,
         )
         try:
@@ -383,6 +425,10 @@ class RealPairedOutcomeProgram:
                 ),
                 task_ids=list(registration["corpus"]["task_ids"]),
                 execution_plan=deepcopy(registration["execution_plan"]),
+            )
+        except (ProviderTransportOutcomeUnknown, ProviderTransportRecoveryRequired):
+            return self.get(program_id) or self._blocked(
+                "real_paired_outcome_execution_recovery_required"
             )
         except Exception as error:
             _, failure_reason = self.attempts.complete(
@@ -398,13 +444,207 @@ class RealPairedOutcomeProgram:
             return self.get(program_id) or self._blocked(
                 "real_paired_outcome_adapter_execution_failed"
             )
-        return self._record_execution(registration, running, live)
+        return self._record_execution(
+            registration,
+            running,
+            live,
+            transport_ledger=transport_ledger,
+        )
+
+    def recover(
+        self,
+        program_id: str,
+        *,
+        context_intervention: dict[str, Any],
+        recovery_authority: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Explicitly reconcile provider transport before resuming an interrupted run."""
+
+        if self.repository.read_only:
+            return self._blocked("real_paired_outcome_store_read_only")
+        registration = self._registration(program_id)
+        registration_reason = self._registration_reason(registration, program_id)
+        if registration_reason or registration is None:
+            return self._blocked(
+                registration_reason or "real_paired_outcome_program_not_found"
+            )
+        valid_intervention, intervention_reason = validate_context_intervention(
+            context_intervention
+        )
+        if not valid_intervention:
+            return self._blocked(
+                intervention_reason or "real_paired_outcome_intervention_invalid"
+            )
+        if (
+            context_intervention.get("intervention_sha256")
+            != registration["context"]["intervention_sha256"]
+        ):
+            return self._blocked("real_paired_outcome_intervention_mismatch")
+        if self.repository.verify_provenance().get("valid") is not True:
+            return self._blocked("provenance_invalid")
+        current_reason = self._current_corpus_reason(registration)
+        if current_reason:
+            return self._blocked(current_reason)
+        attempt = self._attempt(program_id)
+        attempt_reason = self._attempt_reason(attempt, registration)
+        if attempt_reason or not isinstance(attempt, dict):
+            return self._blocked(
+                attempt_reason or "real_paired_outcome_attempt_missing"
+            )
+        if attempt.get("state") != "running":
+            return self._blocked("real_paired_outcome_recovery_not_running")
+        execution = self._execution(program_id)
+        execution_reason = self._execution_reason(execution, registration, attempt)
+        if execution_reason:
+            return self._blocked(execution_reason)
+        if execution is not None:
+            return self.execute(
+                program_id,
+                context_intervention=context_intervention,
+            )
+        if registration["provider"].get("transport_idempotency_supported") is not True:
+            return self._blocked("provider_transport_idempotency_capability_required")
+        if self.model_adapter is None:
+            return self._blocked("real_paired_outcome_adapter_required")
+        adapter, adapter_reason = self._adapter_contract(self.model_adapter)
+        if adapter is None or adapter != registration["provider"]:
+            return self._blocked(
+                adapter_reason or "real_paired_outcome_provider_contract_mismatch"
+            )
+        authority_reason = self._execution_authority_reason(registration, adapter)
+        if authority_reason:
+            return self._blocked(authority_reason)
+
+        ledger = ProviderTransportLedger(self.repository, registration, attempt)
+        expected_calls = int(registration["expected_adapter_invocations"])
+        maximum_queries = int(
+            registration["operational_hardening"][
+                "maximum_transport_reconciliation_queries"
+            ]
+        )
+        replay_results, reconciliation_reason = ledger.reconcile_existing(
+            self.model_adapter,
+            maximum_queries=maximum_queries,
+        )
+        if reconciliation_reason:
+            return {
+                **(
+                    self.get(program_id)
+                    or self._blocked(
+                        "real_paired_outcome_execution_recovery_required"
+                    )
+                ),
+                "recovery": {
+                    "status": "held",
+                    "reason": reconciliation_reason,
+                    "new_adapter_invocations": 0,
+                    "transport": ledger.summary(expected_calls=expected_calls),
+                },
+            }
+        if self._execution(program_id) is not None:
+            return self.execute(
+                program_id,
+                context_intervention=context_intervention,
+            )
+        recovery, recovery_reason = ledger.claim_recovery(
+            recovery_authority,
+            expected_calls=expected_calls,
+        )
+        if recovery_reason or recovery is None:
+            return {
+                **(
+                    self.get(program_id)
+                    or self._blocked(
+                        "real_paired_outcome_execution_recovery_required"
+                    )
+                ),
+                "recovery": {
+                    "status": "held",
+                    "reason": recovery_reason or "provider_recovery_claim_failed",
+                    "new_adapter_invocations": 0,
+                    "transport": ledger.summary(expected_calls=expected_calls),
+                },
+            }
+
+        execution_adapter = IdempotentTransportAdapter(
+            self.model_adapter,
+            ledger,
+            replay_results=replay_results,
+        )
+        evaluator = LiveContextPairedEvaluator(
+            self.repository,
+            self.corpus,
+            execution_adapter,
+            scoring_nonce_factory=self.scoring_nonce_factory,
+        )
+        try:
+            live = evaluator.run(
+                context_intervention=context_intervention,
+                candidate_id=str(registration["candidates"]["candidate_id"]),
+                baseline_candidate_id=str(
+                    registration["candidates"]["baseline_candidate_id"]
+                ),
+                task_ids=list(registration["corpus"]["task_ids"]),
+                execution_plan=deepcopy(registration["execution_plan"]),
+                resume_registered_plan=True,
+            )
+        except (ProviderTransportOutcomeUnknown, ProviderTransportRecoveryRequired):
+            terminal_reason = ledger.complete_recovery(
+                recovery,
+                outcome="transport_interrupted",
+                execution_sha256=None,
+                expected_calls=expected_calls,
+            )
+            return {
+                **(
+                    self.get(program_id)
+                    or self._blocked(
+                        "real_paired_outcome_execution_recovery_required"
+                    )
+                ),
+                "recovery": {
+                    "status": "interrupted",
+                    "reason": terminal_reason
+                    or "provider_transport_outcome_unknown",
+                    "transport": ledger.summary(expected_calls=expected_calls),
+                },
+            }
+        recovered = self._record_execution(
+            registration,
+            attempt,
+            live,
+            transport_ledger=ledger,
+        )
+        stored_execution = self._execution(program_id)
+        execution_sha256 = (
+            str(stored_execution.get("execution_sha256"))
+            if isinstance(stored_execution, dict)
+            else None
+        )
+        terminal_reason = ledger.complete_recovery(
+            recovery,
+            outcome="execution_completed",
+            execution_sha256=execution_sha256,
+            expected_calls=expected_calls,
+        )
+        if terminal_reason:
+            return {
+                **recovered,
+                "recovery": {
+                    "status": "blocked",
+                    "reason": terminal_reason,
+                    "transport": ledger.summary(expected_calls=expected_calls),
+                },
+            }
+        return self.get(program_id) or recovered
 
     def _record_execution(
         self,
         registration: dict[str, Any],
         running_attempt: dict[str, Any],
         live: dict[str, Any],
+        *,
+        transport_ledger: ProviderTransportLedger | None = None,
     ) -> dict[str, Any]:
         program_id = str(registration["id"])
         (
@@ -422,6 +662,14 @@ class RealPairedOutcomeProgram:
             "total_adapter_attempts"
         )
         expected_calls = registration["expected_adapter_invocations"]
+        transport_required = (
+            registration["provider"].get("transport_idempotency_supported") is True
+        )
+        transport_summary = (
+            transport_ledger.summary(expected_calls=expected_calls)
+            if transport_ledger is not None
+            else None
+        )
         order_evidence = self._registration_order_evidence(
             program_id,
             str(self._mapping(live.get("execution")).get("experiment_id") or ""),
@@ -451,6 +699,15 @@ class RealPairedOutcomeProgram:
             (
                 "real_paired_outcome_registration_order_unverified"
                 if order_evidence.get("verified") is not True
+                else ""
+            ),
+            (
+                "provider_transport_receipt_set_incomplete"
+                if transport_required
+                and (
+                    not isinstance(transport_summary, dict)
+                    or transport_summary.get("receipt_set_complete") is not True
+                )
                 else ""
             ),
         ]
@@ -489,6 +746,9 @@ class RealPairedOutcomeProgram:
             "evidence_class": evidence_class,
             "producer_record_keys": producer_record_keys,
             "registration_order": order_evidence,
+            "provider_transport": (
+                transport_summary
+            ),
         }
         execution = {
             **execution_unsigned,
@@ -555,16 +815,33 @@ class RealPairedOutcomeProgram:
         )
         attempt = self._attempt(program_id)
         attempt_reason = self._attempt_reason(attempt, registration)
+        transport_reason = (
+            ProviderTransportLedger(
+                self.repository,
+                registration,
+                attempt,
+            ).integrity_reason(
+                expected_calls=int(registration["expected_adapter_invocations"])
+            )
+            if isinstance(attempt, dict)
+            and registration["provider"].get("transport_idempotency_supported") is True
+            else None
+        )
         execution = self._execution(program_id)
         execution_reason = self._execution_reason(execution, registration, attempt)
-        if current_reason or attempt_reason or execution_reason:
+        if current_reason or attempt_reason or transport_reason or execution_reason:
             return self._projection(
                 registration,
                 execution,
                 attempt,
                 evaluation=None,
                 status="blocked",
-                reason=current_reason or attempt_reason or execution_reason,
+                reason=(
+                    current_reason
+                    or attempt_reason
+                    or transport_reason
+                    or execution_reason
+                ),
                 provenance=provenance,
             )
         if execution is None:
@@ -668,12 +945,21 @@ class RealPairedOutcomeProgram:
             by_status[status] = by_status.get(status, 0) + 1
         hardened = sum(
             self._mapping(record.get("operational_hardening")).get("assurance")
-            == "attempt_bound"
+            in {"attempt_bound", "attempt_and_transport_bound"}
             for record in records
         )
         legacy_unbound = sum(
             self._mapping(record.get("operational_hardening")).get("assurance")
             == "legacy_unbound"
+            for record in records
+        )
+        transport_bound = sum(
+            self._mapping(
+                self._mapping(record.get("operational_hardening")).get(
+                    "provider_transport"
+                )
+            ).get("receipt_set_complete")
+            is True
             for record in records
         )
         return {
@@ -684,6 +970,7 @@ class RealPairedOutcomeProgram:
             ),
             "cryptographically_verified_real_outcome_count": 0,
             "attempt_bound_execution_count": hardened,
+            "transport_bound_execution_count": transport_bound,
             "recovery_required_count": by_status.get("recovery_required", 0),
             "legacy_unbound_execution_count": legacy_unbound,
             "by_status": by_status,
@@ -720,8 +1007,28 @@ class RealPairedOutcomeProgram:
             and isinstance(execution, dict)
             and attempt.get("execution_sha256") == execution.get("execution_sha256")
         )
+        transport_ledger = (
+            ProviderTransportLedger(self.repository, registration, attempt)
+            if isinstance(attempt, dict)
+            and registration["provider"].get("transport_idempotency_supported") is True
+            else None
+        )
+        transport_summary = (
+            transport_ledger.summary(
+                expected_calls=int(registration["expected_adapter_invocations"])
+            )
+            if transport_ledger is not None
+            else None
+        )
+        transport_bound = (
+            attempt_bound
+            and isinstance(transport_summary, dict)
+            and transport_summary.get("receipt_set_complete") is True
+        )
         assurance = (
-            "attempt_bound"
+            "attempt_and_transport_bound"
+            if transport_bound
+            else "attempt_bound"
             if attempt_bound
             else "recovery_required"
             if isinstance(attempt, dict) and attempt.get("state") in ACTIVE_ATTEMPT_STATES
@@ -767,6 +1074,12 @@ class RealPairedOutcomeProgram:
                 "automatic_retry_permitted": False,
                 "timeout_lease_steal_permitted": False,
                 "provider_attempt_count_after_interruption_verified": False,
+                "provider_transport": deepcopy(transport_summary),
+                "recovery_authority": (
+                    transport_ledger.recovery_projection()
+                    if transport_ledger is not None
+                    else None
+                ),
             },
             "preregistration": {
                 "registered_before_adapter_invocations": (
@@ -805,6 +1118,7 @@ class RealPairedOutcomeProgram:
                         "observed_providers",
                         "evidence_class",
                         "registration_order",
+                        "provider_transport",
                     )
                 }
                 if execution is not None
@@ -845,6 +1159,7 @@ class RealPairedOutcomeProgram:
                     else 0
                 ),
                 "provider_transport_attempt_count_verified": False,
+                "provider_transport_attempt_count_observed": bool(transport_bound),
             },
             "revalidation": {
                 "program_valid": status != "blocked",
@@ -895,6 +1210,40 @@ class RealPairedOutcomeProgram:
             return "real_paired_outcome_program_binding_mismatch"
         if self._authority(value.get("execution_authority")) is None:
             return "real_paired_outcome_execution_authority_invalid"
+        provider = self._mapping(value.get("provider"))
+        hardening = self._mapping(value.get("operational_hardening"))
+        transport_fields_present = any(
+            field in provider
+            for field in (
+                "transport_idempotency_supported",
+                "transport_reconciliation_supported",
+            )
+        )
+        if transport_fields_present:
+            transport_supported = provider.get("transport_idempotency_supported")
+            if (
+                not isinstance(transport_supported, bool)
+                or provider.get("transport_reconciliation_supported")
+                is not transport_supported
+            ):
+                return "provider_transport_capability_binding_invalid"
+            expected_queries = (
+                int(value.get("expected_adapter_invocations") or 0)
+                * MAXIMUM_TRANSPORT_RECONCILIATION_MULTIPLIER
+                if transport_supported
+                else 0
+            )
+            if (
+                hardening.get("provider_transport_request_schema")
+                != (PROVIDER_TRANSPORT_REQUEST_SCHEMA if transport_supported else None)
+                or hardening.get("provider_transport_receipt_schema")
+                != (PROVIDER_TRANSPORT_RECEIPT_SCHEMA if transport_supported else None)
+                or hardening.get("provider_recovery_authority_schema")
+                != (PROVIDER_RECOVERY_AUTHORITY_SCHEMA if transport_supported else None)
+                or hardening.get("maximum_transport_reconciliation_queries")
+                != expected_queries
+            ):
+                return "provider_transport_program_binding_mismatch"
         return None
 
     def _execution_reason(
@@ -939,6 +1288,24 @@ class RealPairedOutcomeProgram:
                 return "real_paired_outcome_attempt_execution_binding_mismatch"
         elif attempt is not None:
             return "real_paired_outcome_legacy_execution_attempt_conflict"
+        transport_required = (
+            registration["provider"].get("transport_idempotency_supported") is True
+        )
+        if transport_required:
+            if not isinstance(attempt, dict):
+                return "real_paired_outcome_attempt_missing"
+            transport_summary = ProviderTransportLedger(
+                self.repository,
+                registration,
+                attempt,
+            ).summary(expected_calls=int(registration["expected_adapter_invocations"]))
+            if (
+                transport_summary.get("receipt_set_complete") is not True
+                or value.get("provider_transport") != transport_summary
+            ):
+                return "provider_transport_execution_binding_mismatch"
+        elif value.get("provider_transport") is not None:
+            return "provider_transport_unregistered_evidence"
         live_record_reason = self._live_record_reason(value, registration)
         if live_record_reason:
             return live_record_reason
@@ -1099,6 +1466,12 @@ class RealPairedOutcomeProgram:
         observation_source = capabilities.get("provider_observation_source")
         execution_environment = capabilities.get("execution_environment")
         billing_class = capabilities.get("billing_class")
+        transport_idempotency = (
+            capabilities.get("supports_transport_idempotency") is True
+        )
+        transport_reconciliation = (
+            capabilities.get("supports_transport_reconciliation") is True
+        )
         provider_name = health.get("provider") or health.get("active_provider")
         model_version = health.get("model_version") or health.get("model")
         if observation_source not in PROVIDER_OBSERVATION_SOURCES:
@@ -1107,6 +1480,12 @@ class RealPairedOutcomeProgram:
             return None, "real_paired_outcome_execution_environment_required"
         if billing_class not in BILLING_CLASSES:
             return None, "real_paired_outcome_billing_class_required"
+        if transport_idempotency is not transport_reconciliation:
+            return None, "provider_transport_capability_incomplete"
+        if transport_idempotency and not callable(
+            getattr(adapter, "reconcile_transport", None)
+        ):
+            return None, "provider_transport_reconciliation_method_required"
         if not self._safe_identifier(provider_name) or not self._safe_identifier(
             model_version
         ):
@@ -1118,6 +1497,8 @@ class RealPairedOutcomeProgram:
                 "provider_observation_source": str(observation_source),
                 "execution_environment": str(execution_environment),
                 "billing_class": str(billing_class),
+                "transport_idempotency_supported": transport_idempotency,
+                "transport_reconciliation_supported": transport_reconciliation,
                 "requires_api_key": bool(health.get("requires_api_key", False)),
                 "adapter_declaration_authenticated": False,
                 "provider_identity_cryptographically_verified": False,

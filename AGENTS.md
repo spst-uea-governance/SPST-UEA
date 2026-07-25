@@ -178,6 +178,17 @@ Run commands from `runtime/` unless noted otherwise:
 - ARCH-06 execution records without an ARCH-07 attempt binding may remain
   readable, but must be labeled `legacy_unbound` and must not be upgraded to
   attempt-bound operational evidence.
+- Enter the ARCH-08 recovery path only when an adapter declares both provider
+  transport idempotency and result reconciliation and exposes the reconciliation
+  method. A local key digest or submitted request is not a provider receipt.
+- Persist each transport call as prepared, submitted, and completed CAS states.
+  Require an exact provider acknowledgement of the Program/Attempt/ordinal-bound
+  idempotency key before treating a call as completed.
+- Recovery must be an explicit digest-bound authority action. Reconcile all
+  uncertain calls before resuming, replay completed results without new
+  inference, cap reconciliation queries, and fail closed on any mismatch.
+- Keep provider identity unauthenticated and exactly-once execution unproven
+  unless a separate external authenticity mechanism establishes them.
 
 ## Sovereign Governance Rules
 

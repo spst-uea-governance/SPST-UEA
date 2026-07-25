@@ -172,3 +172,13 @@ ARCH-07 adds a single durable execution claim, compare-and-set state
 transitions, and fail-closed interruption handling. See
 `docs/operational-hardening.md`. A `recovery_required` result is deliberately
 not auto-retried because the provider transport attempt count remains unknown.
+
+## ARCH-08 provider transport recovery
+
+For adapters that explicitly support provider-side idempotency and result
+reconciliation, ARCH-08 binds every call to a unique Program/Attempt/ordinal
+key and requires an exact provider acknowledgement receipt. An interrupted run
+can resume only through `RealPairedOutcomeProgram.recover()` with a digest-bound
+recovery authority. Submitted calls are reconciled first; completed calls are
+replayed without new inference, while unresolved or altered results remain
+`recovery_required`. See `docs/provider-transport-recovery.md`.

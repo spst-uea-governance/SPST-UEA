@@ -130,6 +130,14 @@ transitions, and read-only `recovery_required` status. It refuses automatic
 retry after an interrupted provider attempt because the transport call count is
 not established. See `docs/operational-hardening.md`.
 
+ARCH-08 adds an opt-in provider transport contract. Supporting adapters must
+acknowledge a Program-bound idempotency key and provide exact result
+reconciliation. Only an explicit digest-bound recovery authority may resume an
+interrupted run, and previously completed calls are replayed without new model
+inference. Missing acknowledgement, altered receipts, unresolved results, or an
+exhausted query cap remain blocked. Provider identity and exactly-once execution
+are not claimed. See `docs/provider-transport-recovery.md`.
+
 ## Current Runtime Status
 
 The runtime can be executed locally from `runtime/`:
