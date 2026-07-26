@@ -50,6 +50,8 @@ warn_unused_configs=true
 [tool.coverage.run]
 branch=true
 source=["spst_runtime"]
+parallel=true
+patch=["subprocess"]
 
 [tool.coverage.report]
 fail_under=80

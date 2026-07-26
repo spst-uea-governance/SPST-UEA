@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import os
+from contextlib import closing
 from copy import deepcopy
 from pathlib import Path
 import secrets
@@ -114,7 +115,7 @@ class DurableProcessProviderStore:
         return value
 
     def _identity_status(self) -> tuple[str | None, str | None]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             rows = dict(
                 connection.execute(
                     """
@@ -227,7 +228,7 @@ class DurableProcessProviderStore:
         result_sha256 = _sha256_text(result_json)
         transport_json = _canonical_json(transport_request)
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
@@ -329,7 +330,7 @@ class DurableProcessProviderStore:
         idempotency_key: str,
         provider_request_binding_sha256: str,
     ) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
@@ -428,7 +429,7 @@ class DurableProcessProviderStore:
             return result
 
     def status(self) -> dict[str, Any]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             rows = connection.execute(
                 """
                 SELECT idempotency_key, provider_request_binding_sha256,
@@ -593,7 +594,7 @@ class DurableProcessProviderStore:
             raise PermissionError("process_recovery_lease_store_read_only")
         self._validate_lease_inputs(resource_id, owner_id, ttl_ms)
         now_ms = time.time_ns() // 1_000_000
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
@@ -761,7 +762,7 @@ class DurableProcessProviderStore:
         )
 
     def recovery_lease_status(self, resource_id: str) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             row = connection.execute(
                 """
                 SELECT resource_id, owner_id, generation, lease_token_sha256,
@@ -802,7 +803,7 @@ class DurableProcessProviderStore:
         if not release and ttl_ms is not None:
             self._validate_lease_inputs(resource_id, owner_id, ttl_ms)
         now_ms = time.time_ns() // 1_000_000
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
@@ -953,7 +954,7 @@ class DurableProcessProviderStore:
 
     def _initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(str(self.path), timeout=30) as connection:
+        with closing(sqlite3.connect(str(self.path), timeout=30)) as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA synchronous=FULL")
             connection.execute(
@@ -1157,7 +1158,7 @@ class DurableProcessProviderStore:
         new_secret = secrets.token_hex(32).encode("utf-8")
         self._write_authentication_key(target, new_secret)
         new_key_id = hashlib.sha256(new_secret).hexdigest()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             generation = self._authentication_generation(connection) + 1
             result_rows = connection.execute(
@@ -1322,10 +1323,12 @@ class DurableProcessProviderStore:
         if not self.path.is_file():
             return None
         try:
-            with sqlite3.connect(
-                f"{self.path.as_uri()}?mode=ro",
-                timeout=30,
-                uri=True,
+            with closing(
+                sqlite3.connect(
+                    f"{self.path.as_uri()}?mode=ro",
+                    timeout=30,
+                    uri=True,
+                )
             ) as connection:
                 table = connection.execute(
                     """
@@ -1348,10 +1351,12 @@ class DurableProcessProviderStore:
 
     def _verify_database_trust_configuration(self) -> None:
         try:
-            with sqlite3.connect(
-                f"{self.path.as_uri()}?mode=ro",
-                timeout=30,
-                uri=True,
+            with closing(
+                sqlite3.connect(
+                    f"{self.path.as_uri()}?mode=ro",
+                    timeout=30,
+                    uri=True,
+                )
             ) as connection:
                 row = connection.execute(
                     """

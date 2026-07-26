@@ -1,7 +1,9 @@
 from pathlib import Path
+import tomllib
 
 
 WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "runtime-ci.yml"
+PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 
 
 def test_runtime_ci_keeps_live_db_guard_around_import_and_full_suite():
@@ -14,6 +16,8 @@ def test_runtime_ci_keeps_live_db_guard_around_import_and_full_suite():
         "python -m coverage run -m pytest -q",
         "Verify Live DB guard after full suite",
         "if: always()",
+        "Combine parent and subprocess coverage",
+        "python -m coverage combine",
         "python -m coverage report",
         "python -m mypy spst_runtime",
         "git diff --check",
@@ -30,6 +34,9 @@ def test_runtime_ci_keeps_live_db_guard_around_import_and_full_suite():
         "Verify Live DB guard after full suite"
     )
     assert workflow.index("Verify Live DB guard after full suite") < workflow.index(
+        "python -m coverage combine"
+    )
+    assert workflow.index("python -m coverage combine") < workflow.index(
         "python -m coverage report"
     )
 
@@ -40,3 +47,14 @@ def test_runtime_ci_resolves_runner_temp_during_step_execution():
     assert "${{ runner.temp }}" not in workflow
     assert 'guard_dir="${RUNNER_TEMP}/spst-live-db-hash-guard"' in workflow
     assert '>> "$GITHUB_ENV"' in workflow
+
+
+def test_runtime_ci_collects_subprocess_coverage_without_lowering_floor():
+    config = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    run_config = config["tool"]["coverage"]["run"]
+    report_config = config["tool"]["coverage"]["report"]
+
+    assert run_config["branch"] is True
+    assert run_config["parallel"] is True
+    assert run_config["patch"] == ["subprocess"]
+    assert report_config["fail_under"] == 80

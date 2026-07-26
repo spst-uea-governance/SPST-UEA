@@ -62,11 +62,16 @@ jobs:
           python scripts/live_db_hash_guard.py verify --manifest "$LIVE_DB_GUARD_MANIFEST"
       - name: Run full runtime suite with branch coverage
         working-directory: runtime
-        run: python -m coverage run -m pytest -q
+        run: |
+          python -m coverage erase
+          python -m coverage run -m pytest -q
       - name: Verify Live DB guard after full suite
         if: always()
         working-directory: runtime
         run: python scripts/live_db_hash_guard.py verify --manifest "$LIVE_DB_GUARD_MANIFEST"
+      - name: Combine parent and subprocess coverage
+        working-directory: runtime
+        run: python -m coverage combine
       - name: Enforce branch coverage floor
         working-directory: runtime
         run: python -m coverage report
