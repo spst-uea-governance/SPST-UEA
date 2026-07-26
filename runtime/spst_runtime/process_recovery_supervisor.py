@@ -149,6 +149,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--adoption-authority-file")
     parser.add_argument("--authority-trust-file")
     parser.add_argument("--authority-grant-file")
+    parser.add_argument("--authority-state-file")
+    parser.add_argument("--rollback-anchor-file")
     parser.add_argument("--supervisor-signing-key-file")
     parser.add_argument("--lease-owner")
     parser.add_argument("--lease-ttl-ms", type=int, default=1000)
@@ -164,10 +166,14 @@ def main(argv: list[str] | None = None) -> int:
             if args.resource_id is None:
                 raise ValueError("process_recovery_supervisor_resource_required")
             trust_anchor = _json_file(args.authority_trust_file, required=False)
+            authority_state = _json_file(args.authority_state_file, required=False)
+            rollback_anchor = _json_file(args.rollback_anchor_file, required=False)
             store = DurableProcessProviderStore(
                 args.provider_db,
                 authentication_key_file=args.provider_key_file,
                 recovery_authority_trust_anchor=trust_anchor,
+                recovery_authority_state=authority_state,
+                recovery_authority_rollback_anchor=rollback_anchor,
                 read_only=True,
             )
             program_status = None
@@ -222,6 +228,18 @@ def main(argv: list[str] | None = None) -> int:
                 args.authority_grant_file,
                 required=signed_authority,
             )
+            state_required = bool(
+                signed_authority
+                and (trust_anchor or {}).get("authority_state_required") is True
+            )
+            authority_state = _json_file(
+                args.authority_state_file,
+                required=state_required,
+            )
+            rollback_anchor = _json_file(
+                args.rollback_anchor_file,
+                required=state_required,
+            )
             if signed_authority and args.supervisor_signing_key_file is None:
                 raise ValueError(
                     "process_recovery_supervisor_signing_key_required"
@@ -243,6 +261,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.provider_db,
                 authentication_key_file=args.provider_key_file,
                 recovery_authority_trust_anchor=trust_anchor,
+                recovery_authority_state=authority_state,
+                recovery_authority_rollback_anchor=rollback_anchor,
             )
             attempt = current.get("operational_hardening", {}).get("attempt")
             attempt_id = attempt.get("attempt_id") if isinstance(attempt, dict) else None
@@ -275,6 +295,8 @@ def main(argv: list[str] | None = None) -> int:
                             "intervention_sha256"
                         ),
                     },
+                    authority_state=authority_state,
+                    rollback_anchor=rollback_anchor,
                 )
                 if grant_reason:
                     raise RecoveryAuthorityError(grant_reason)
@@ -289,6 +311,8 @@ def main(argv: list[str] | None = None) -> int:
                         ),
                         "private_key_persisted": False,
                     },
+                    authority_state=authority_state,
+                    rollback_anchor=rollback_anchor,
                 )
             lease = store.acquire_recovery_lease(
                 resource_id,
@@ -310,6 +334,8 @@ def main(argv: list[str] | None = None) -> int:
                     str(args.supervisor_signing_key_file),
                     event="lease_acquired",
                     details={"lease": _visible_lease(lease)},
+                    authority_state=authority_state,
+                    rollback_anchor=rollback_anchor,
                 )
             _marker(args.lease_marker, lease)
 
@@ -321,6 +347,8 @@ def main(argv: list[str] | None = None) -> int:
                         str(args.supervisor_signing_key_file),
                         event="lease_renewed",
                         details={"lease": _visible_lease(renewed)},
+                        authority_state=authority_state,
+                        rollback_anchor=rollback_anchor,
                     )
 
             heartbeat = _LeaseHeartbeat(
@@ -339,6 +367,8 @@ def main(argv: list[str] | None = None) -> int:
                 supervisor_authority=(
                     authority_grant if signed_authority else None
                 ),
+                authority_state=authority_state,
+                rollback_anchor=rollback_anchor,
             )
             heartbeat.stop()
             if signed_authority:
@@ -351,6 +381,8 @@ def main(argv: list[str] | None = None) -> int:
                         "lease_resource_id": resource_id,
                         "generation": int(lease["generation"]),
                     },
+                    authority_state=authority_state,
+                    rollback_anchor=rollback_anchor,
                 )
                 program.attest_supervisor(
                     str(args.program_id),
@@ -361,6 +393,8 @@ def main(argv: list[str] | None = None) -> int:
                         "result_status": result.get("status"),
                         "result_sha256": _canonical_hash(result),
                     },
+                    authority_state=authority_state,
+                    rollback_anchor=rollback_anchor,
                 )
             released = store.release_recovery_lease(
                 resource_id,
@@ -375,6 +409,8 @@ def main(argv: list[str] | None = None) -> int:
                     str(args.supervisor_signing_key_file),
                     event="lease_released",
                     details={"lease": _visible_lease(released)},
+                    authority_state=authority_state,
+                    rollback_anchor=rollback_anchor,
                 )
             projected = program.get(str(args.program_id))
             response = {

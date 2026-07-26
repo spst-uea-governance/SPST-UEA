@@ -37,6 +37,11 @@ from spst_runtime.recovery_authority import (
     issue_recovery_authority_grant,
     verify_recovery_authority_grant,
 )
+from spst_runtime.recovery_authority_state import (
+    build_recovery_key_custody_evidence,
+    issue_recovery_authority_state,
+    issue_recovery_rollback_anchor,
+)
 from spst_runtime.provider_observation import build_provider_request_binding
 from spst_runtime.provider_transport import (
     TRANSPORT_QUERY_PREFIX,
@@ -901,6 +906,8 @@ def _supervisor_arguments(
     authority_trust_file: Path | None = None,
     authority_grant_file: Path | None = None,
     supervisor_signing_key_file: Path | None = None,
+    authority_state_file: Path | None = None,
+    rollback_anchor_file: Path | None = None,
 ) -> list[str]:
     arguments = [
         sys.executable,
@@ -940,6 +947,10 @@ def _supervisor_arguments(
         arguments.extend(
             ["--supervisor-signing-key-file", str(supervisor_signing_key_file)]
         )
+    if authority_state_file is not None:
+        arguments.extend(["--authority-state-file", str(authority_state_file)])
+    if rollback_anchor_file is not None:
+        arguments.extend(["--rollback-anchor-file", str(rollback_anchor_file)])
     return arguments
 
 
@@ -1053,7 +1064,11 @@ def test_killed_supervisor_requires_expired_lease_adoption_without_duplicate_cal
     assert repository.verify_provenance()["valid"] is True
 
 
-def _pki_material(tmp_path: Path) -> dict[str, Any]:
+def _pki_material(
+    tmp_path: Path,
+    *,
+    authority_state_required: bool = False,
+) -> dict[str, Any]:
     now_ms = time.time_ns() // 1_000_000
     root_private = tmp_path / "authority-root.private.pem"
     operator_private = tmp_path / "recovery-operator.private.pem"
@@ -1063,12 +1078,13 @@ def _pki_material(tmp_path: Path) -> dict[str, Any]:
         operator_id="local-recovery-operator",
         valid_from_ms=now_ms - 1000,
         valid_until_ms=now_ms + 600_000,
+        authority_state_required=authority_state_required,
     )
     trust_file = tmp_path / "authority-trust.json"
     certificate_file = tmp_path / "operator-certificate.json"
     _write_json(trust_file, trust)
     _write_json(certificate_file, certificate)
-    return {
+    material = {
         "root_private": root_private,
         "operator_private": operator_private,
         "trust": trust,
@@ -1076,6 +1092,32 @@ def _pki_material(tmp_path: Path) -> dict[str, Any]:
         "certificate": certificate,
         "certificate_file": certificate_file,
     }
+    if authority_state_required:
+        custody = build_recovery_key_custody_evidence(trust["root_key_id"])
+        state = issue_recovery_authority_state(
+            trust,
+            root_private,
+            custody,
+            generation=1,
+            issued_at_ms=now_ms - 100,
+            valid_until_ms=now_ms + 600_000,
+            minimum_accepted_time_ms=now_ms - 100,
+        )
+        anchor = issue_recovery_rollback_anchor(trust, root_private, state)
+        state_file = tmp_path / "authority-state.json"
+        anchor_file = tmp_path / "rollback-anchor.json"
+        _write_json(state_file, state)
+        _write_json(anchor_file, anchor)
+        material.update(
+            {
+                "custody": custody,
+                "state": state,
+                "state_file": state_file,
+                "anchor": anchor,
+                "anchor_file": anchor_file,
+            }
+        )
+    return material
 
 
 def _signed_recovery_material(
@@ -1129,6 +1171,8 @@ def _signed_recovery_material(
         context_intervention_sha256=str(intervention["intervention_sha256"]),
         previous_owner_id=previous_owner_id,
         expired_generation=expired_generation,
+        authority_state=pki.get("state"),
+        rollback_anchor=pki.get("anchor"),
     )
     grant_file = tmp_path / f"recovery-grant-{suffix}.json"
     _write_json(grant_file, grant)
@@ -1377,6 +1421,171 @@ def test_signed_supervisor_lifecycle_is_program_bound_and_replay_fails(
     ]["attestation"]["lifecycle_complete"] is True
     assert hashlib.sha256(database.read_bytes()).hexdigest() == before_program
     assert hashlib.sha256(provider_database.read_bytes()).hexdigest() == before_provider
+    assert repository.verify_provenance()["valid"] is True
+
+
+def test_arch12_supervisor_binds_live_revocation_state_and_rollback_anchor(
+    tmp_path: Path,
+):
+    pki = _pki_material(tmp_path, authority_state_required=True)
+    repository, program, intervention, registered, database, provider_database = (
+        _fixture(
+            tmp_path,
+            recovery_authority_trust_anchor=pki["trust"],
+        )
+    )
+    assert registered["provider"]["process_transport_protocol"] == (
+        "subprocess-stdio-sqlite-hmac-lease-pki-state-v4"
+    )
+    intervention_file = tmp_path / "intervention-arch12.json"
+    _write_json(intervention_file, intervention)
+    _crash_after_provider_commit(
+        database=database,
+        provider_database=provider_database,
+        program_id=registered["id"],
+        intervention_file=intervention_file,
+        marker=tmp_path / "provider-committed-arch12.json",
+        authority_trust_file=pki["trust_file"],
+    )
+    material = _signed_recovery_material(
+        tmp_path,
+        program=program,
+        registered=registered,
+        intervention=intervention,
+        pki=pki,
+        owner_id="arch12-supervisor",
+        suffix="arch12",
+    )
+
+    recovered = _run_bridge(
+        _supervisor_arguments(
+            database=database,
+            provider_database=provider_database,
+            provider_key_file=Path(f"{provider_database}.provider_key"),
+            program_id=registered["id"],
+            intervention_file=intervention_file,
+            recovery_authority_file=material["recovery_authority_file"],
+            owner_id="arch12-supervisor",
+            ttl_ms=5000,
+            authority_trust_file=pki["trust_file"],
+            authority_grant_file=material["grant_file"],
+            supervisor_signing_key_file=material["supervisor_private"],
+            authority_state_file=pki["state_file"],
+            rollback_anchor_file=pki["anchor_file"],
+        )
+    )
+
+    attestation = recovered["supervisor_attestation"]
+    assert attestation["status"] == "complete"
+    assert attestation["authority_state_sha256"] == pki["state"]["state_sha256"]
+    assert attestation["authority_state_generation"] == 1
+    assert attestation["rollback_anchor_sha256"] == pki["anchor"][
+        "anchor_sha256"
+    ]
+    assert attestation["revocation_checked"] is True
+    assert attestation["trusted_time_source_verified"] is False
+    assert attestation["hardware_key_custody_verified"] is False
+    assert attestation["full_rollback_resistance_verified"] is False
+    provider_status = DurableProcessProviderStore(
+        provider_database,
+        authentication_key_file=Path(f"{provider_database}.provider_key"),
+        recovery_authority_trust_anchor=pki["trust"],
+        recovery_authority_state=pki["state"],
+        recovery_authority_rollback_anchor=pki["anchor"],
+        read_only=True,
+    ).status()
+    assert provider_status["recovery_authority_state_sha256"] == pki["state"][
+        "state_sha256"
+    ]
+    assert provider_status["total_execution_count"] == 32
+    assert provider_status["total_infer_request_count"] == 32
+    assert repository.verify_provenance()["valid"] is True
+
+
+def test_arch12_attestation_ledger_rejects_authority_state_generation_downgrade(
+    tmp_path: Path,
+):
+    pki = _pki_material(tmp_path, authority_state_required=True)
+    repository, program, _, registered, _, _ = _fixture(
+        tmp_path,
+        recovery_authority_trust_anchor=pki["trust"],
+    )
+    now_ms = time.time_ns() // 1_000_000
+    state_two = issue_recovery_authority_state(
+        pki["trust"],
+        pki["root_private"],
+        pki["custody"],
+        generation=2,
+        previous_state_sha256=pki["state"]["state_sha256"],
+        issued_at_ms=now_ms - 10,
+        valid_until_ms=now_ms + 600_000,
+        minimum_accepted_time_ms=now_ms - 10,
+    )
+    anchor_two = issue_recovery_rollback_anchor(
+        pki["trust"],
+        pki["root_private"],
+        state_two,
+        previous_anchor_sha256=pki["anchor"]["anchor_sha256"],
+    )
+
+    def grant_for(
+        suffix: str,
+        state: dict[str, Any],
+        anchor: dict[str, Any],
+    ) -> tuple[dict[str, Any], Path]:
+        private_key = tmp_path / f"downgrade-{suffix}.private.pem"
+        public_key = generate_supervisor_attestation_key(private_key)
+        grant = issue_recovery_authority_grant(
+            pki["trust"],
+            pki["certificate"],
+            pki["operator_private"],
+            public_key,
+            program_id=registered["id"],
+            program_sha256=registered["program_sha256"],
+            attempt_id=f"attempt-{suffix}",
+            provider_instance_sha256=registered["provider"][
+                "transport_instance_sha256"
+            ],
+            lease_resource_id=hashlib.sha256(suffix.encode("utf-8")).hexdigest(),
+            lease_owner_id=f"owner-{suffix}",
+            transport_recovery_authority_sha256="a" * 64,
+            context_intervention_sha256="b" * 64,
+            issued_at_ms=now_ms,
+            expires_at_ms=now_ms + 300_000,
+            nonce=f"nonce-{suffix}",
+            authority_state=state,
+            rollback_anchor=anchor,
+        )
+        return grant, private_key
+
+    newer_grant, newer_private = grant_for("generation-two", state_two, anchor_two)
+    program.attest_supervisor(
+        registered["id"],
+        newer_grant,
+        str(newer_private),
+        event="authority_accepted",
+        details={"generation": 2},
+        authority_state=state_two,
+        rollback_anchor=anchor_two,
+    )
+    older_grant, older_private = grant_for(
+        "generation-one",
+        pki["state"],
+        pki["anchor"],
+    )
+    with pytest.raises(
+        RecoveryAuthorityError,
+        match="supervisor_authority_state_generation_rollback",
+    ):
+        program.attest_supervisor(
+            registered["id"],
+            older_grant,
+            str(older_private),
+            event="authority_accepted",
+            details={"generation": 1},
+            authority_state=pki["state"],
+            rollback_anchor=pki["anchor"],
+        )
     assert repository.verify_provenance()["valid"] is True
 
 

@@ -161,6 +161,16 @@ authenticates local key authority and event integrity, not a real human identity
 or remote provider. See
 `docs/recovery-authority-pki-supervisor-attestation.md`.
 
+ARCH-12 adds a root-signed current authority state and rollback anchor to the
+optional v4 process profile. Live recovery now checks certificate and grant
+revocation, an authenticated time floor, nondecreasing state generations, and
+an explicit key-custody policy before acquiring a lease. Historical grants may
+verify their embedded state for audit, but cannot substitute it for the current
+live state. This detects bounded local rollback and revocation failures; it does
+not establish a trusted clock, hardware custody, or rollback resistance when
+all local copies are reverted together. See
+`docs/recovery-authority-state-rollback-defense.md`.
+
 ## Current Runtime Status
 
 The runtime can be executed locally from `runtime/`:

@@ -290,3 +290,16 @@ repository. `process_recovery_supervisor status` can project that lifecycle
 through a read-only Program and provider path. Local certificate verification
 does not establish real-world operator identity or hardware-backed key custody.
 See `../docs/recovery-authority-pki-supervisor-attestation.md`.
+
+## ARCH-12 authority state and rollback defense
+
+The optional v4 local-process profile requires a current root-signed authority
+state and rollback anchor at every live recovery boundary. The grant binds the
+state generation, revocation snapshot, authenticated time floor, custody
+evidence, and anchor. Store lease acquisition and Program recovery reject
+missing or older live state, revocation, clock rollback below the floor, and
+state/anchor rewrites. Historical event validation may use the grant-embedded
+snapshot, while new supervisor sessions must not lower the accepted generation.
+The built-in local-file custody profile keeps trusted time, hardware custody,
+and full rollback resistance explicitly false. See
+`../docs/recovery-authority-state-rollback-defense.md`.

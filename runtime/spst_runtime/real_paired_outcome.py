@@ -511,6 +511,8 @@ class RealPairedOutcomeProgram:
         *,
         event: str,
         details: dict[str, Any],
+        authority_state: dict[str, Any] | None = None,
+        rollback_anchor: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         registration = self._registration(program_id)
         registration_reason = self._registration_reason(registration, program_id)
@@ -525,6 +527,8 @@ class RealPairedOutcomeProgram:
         return SupervisorAttestationLedger(
             self.repository,
             registration,
+            authority_state=authority_state,
+            rollback_anchor=rollback_anchor,
         ).append(
             authority_grant,
             supervisor_private_key_file,
@@ -539,6 +543,8 @@ class RealPairedOutcomeProgram:
         context_intervention: dict[str, Any],
         recovery_authority: dict[str, Any],
         supervisor_authority: dict[str, Any] | None = None,
+        authority_state: dict[str, Any] | None = None,
+        rollback_anchor: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Explicitly reconcile provider transport before resuming an interrupted run."""
 
@@ -630,6 +636,8 @@ class RealPairedOutcomeProgram:
                         "intervention_sha256"
                     ),
                 },
+                authority_state=authority_state,
+                rollback_anchor=rollback_anchor,
             )
             if signed_reason:
                 return self._blocked(signed_reason)
@@ -1506,10 +1514,21 @@ class RealPairedOutcomeProgram:
                 ):
                     return "process_transport_capability_binding_invalid"
                 if authenticated_process:
+                    stateful_signed_process = bool(
+                        signed_process
+                        and self._mapping(
+                            provider.get("recovery_authority_trust_anchor")
+                        ).get("authority_state_required")
+                        is True
+                    )
                     expected_protocol = (
-                        "subprocess-stdio-sqlite-hmac-lease-pki-v3"
-                        if signed_process
-                        else "subprocess-stdio-sqlite-hmac-lease-v2"
+                        "subprocess-stdio-sqlite-hmac-lease-pki-state-v4"
+                        if stateful_signed_process
+                        else (
+                            "subprocess-stdio-sqlite-hmac-lease-pki-v3"
+                            if signed_process
+                            else "subprocess-stdio-sqlite-hmac-lease-v2"
+                        )
                     )
                     if (
                         provider.get("process_transport_protocol")
@@ -1887,10 +1906,21 @@ class RealPairedOutcomeProgram:
         ):
             return None, "provider_transport_reconciliation_method_required"
         if execution_environment == "local_process":
+            stateful_recovery_authority = bool(
+                signed_recovery_authority
+                and self._mapping(recovery_authority_trust_anchor).get(
+                    "authority_state_required"
+                )
+                is True
+            )
             expected_process_protocol = (
-                "subprocess-stdio-sqlite-hmac-lease-pki-v3"
-                if signed_recovery_authority
-                else "subprocess-stdio-sqlite-hmac-lease-v2"
+                "subprocess-stdio-sqlite-hmac-lease-pki-state-v4"
+                if stateful_recovery_authority
+                else (
+                    "subprocess-stdio-sqlite-hmac-lease-pki-v3"
+                    if signed_recovery_authority
+                    else "subprocess-stdio-sqlite-hmac-lease-v2"
+                )
             )
             if (
                 not transport_idempotency
