@@ -90,7 +90,7 @@ Each fixed profile owns its repository-relative execution root; callers select
 the repository boundary, not an arbitrary command working directory.
 
 Repository tasks should route with `chat_bridge --repository-root <git-top-level>`.
-The resulting v3 Routing Receipt includes a path-free identity for the exact
+The resulting v4 Routing Receipt includes a path-free identity for the exact
 HEAD, index, tracked files, and non-ignored untracked files. Read-only receipt
 verification separates an intact historical binding from a live
 `current_match`; this is byte-level Git state and not semantic equivalence.
@@ -106,6 +106,60 @@ attestation can bind a caller-supplied result digest and the repository state
 captured at attestation time to the provenance chain, but it remains
 source-unauthenticated and does not become verified execution. See
 `docs/action-manifest-binding.md` for commands and evidence boundaries.
+
+ARCH-05 can freeze an ordered, Receipt-bound action denominator before any
+Manifest is created, then project its coverage through a read-only status path.
+Missing, duplicate, out-of-plan, out-of-order, pre-plan, and wrong-workspace
+actions prevent complete coverage. Fixed runtime actions and external
+attestations remain separate; the latter never become verified execution.
+This measures only declared task actions, so declaration completeness remains
+unverified and global Codex tool coverage remains unavailable. See
+`docs/governed-execution-coverage.md`.
+
+ARCH-06 pre-registers a consented paired-outcome cohort, exact context and
+provider contract, balanced condition schedule, fixed stop rule, adapter-call
+cap, and external/paid execution authority before any provider request. It
+recomputes the observation source from stored Producer records, so an in-process
+fixture or post-hoc HTTPS relabel cannot become real outcome evidence. The
+read-only projection separates mechanism validation, reviewed fixture outcomes,
+and observed real-workload outcomes while keeping provider, reviewer, and
+workload identity unverified. See `docs/real-paired-outcome-program.md`.
+
+ARCH-07 adds a durable single-execution attempt, atomic compare-and-set
+transitions, and read-only `recovery_required` status. It refuses automatic
+retry after an interrupted provider attempt because the transport call count is
+not established. See `docs/operational-hardening.md`.
+
+ARCH-08 adds an opt-in provider transport contract. Supporting adapters must
+acknowledge a Program-bound idempotency key and provide exact result
+reconciliation. Only an explicit digest-bound recovery authority may resume an
+interrupted run, and previously completed calls are replayed without new model
+inference. Missing acknowledgement, altered receipts, unresolved results, or an
+exhausted query cap remain blocked. Provider identity and exactly-once execution
+are not claimed. See `docs/provider-transport-recovery.md`.
+
+ARCH-09 exercises that recovery path across actual operating-system process
+boundaries. A no-network provider worker commits to a dedicated durable SQLite
+store, the submitting client is terminated before receiving the response, and
+a fresh client reconciles and resumes without a duplicate logical inference.
+The provider instance is Program-bound, but it remains locally simulated and
+unauthenticated. See `docs/process-isolated-transport-recovery.md`.
+
+ARCH-10 HMAC-authenticates the local provider-store rows with key material held
+outside SQLite and fences recovery through a durable, heartbeat-renewed lease.
+A killed supervisor may be adopted only after lease expiry and an exact
+authority binding; stale tokens and unkeyed database rewrites are rejected. It
+still does not authenticate an external provider or prove remote exactly-once
+execution. See `docs/authenticated-provider-store-supervisor.md`.
+
+ARCH-11 adds a Program-bound Ed25519 recovery authority chain: a local root
+signs an operator certificate, the operator signs one exact recovery grant,
+and that grant authorizes a per-run supervisor attestation key. The supervisor
+appends signed authority, lease, heartbeat, recovery-return, and release events
+to the parent Program. Private keys remain outside both SQLite stores. This
+authenticates local key authority and event integrity, not a real human identity
+or remote provider. See
+`docs/recovery-authority-pki-supervisor-attestation.md`.
 
 ## Current Runtime Status
 

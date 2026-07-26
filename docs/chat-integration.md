@@ -42,9 +42,45 @@ python -m spst_runtime.chat_bridge "<prompt>" --profile auto --repository-root .
 Use an explicit profile for reproducible experiments. A requested lower
 profile never overrides the deterministic risk or continuity floor.
 
+## Context Mediation
+
+`standard` and `strict` routes build a bounded context packet from eligible
+accumulated memory before the seven-stage route runs. Only a `ready` packet's
+items enter the local `ModelAdapter` context. Each item must be bound to its
+verified producer Receipt, and the packet, task, and origin-index digests are
+bound into the resulting Routing Receipt. Preview the packet without recording
+a turn or changing the databases:
+
+```powershell
+python -m spst_runtime.chat_bridge --context-preview "query" --repository-root ..
+```
+
+The packet treats selected text as untrusted evidence, rejects unresolved
+integrity and recognized injection/secret patterns, recomputes relevance under
+`deterministic-lexical-v2`, and fails closed below the configured relevance
+floor. Caller-provided relevance scores cannot make an unrelated item eligible.
+See `docs/context-mediation.md`.
+
+The `ModelAdapter` receives the complete digest-sealed packet and an identical
+copy of its selected items. It validates both before constructing
+`spst-model-input-binding-v2`. The resulting model-input digest, packet digest,
+item count, reviewed artifact and semantic-review digest sets, context status,
+and delivery status are included in the Routing Receipt. The no-key adapter
+reports `recorded_not_executed` and
+`scaffold_only`; only the optional API adapter can report
+`submitted_to_provider`, and that still does not establish causal quality
+improvement.
+
+ARCH-04 requires more than submission for paired live evidence. A supported
+adapter must receive the canonical request-binding digest and return the same
+digest through its response metadata together with a response identifier and
+output whose binding recomputes. Absence or mismatch remains unresolved. Even
+a valid echo is only provider-transport observation: it does not authenticate
+the provider, prove semantic context use, or establish a causal quality effect.
+
 ## Repository Identity Binding
 
-Repository tasks use `spst-routing-receipt-v3`. Before session or memory writes,
+Repository tasks use `spst-routing-receipt-v4`. Before session or memory writes,
 the bridge captures the exact Git object format and HEAD plus a canonical
 SHA-256 over the index and every tracked or non-ignored untracked worktree
 entry. Paths and file bodies are inputs to that digest but are not stored in
@@ -56,10 +92,15 @@ provenance chain. `current_match: true` is only returned when
 `--repository-root` is supplied and a new read-only capture matches both HEAD
 and worktree identity. A later edit leaves the historical receipt valid while
 setting `current_match: false`. This byte-level identity is not evidence of
-semantic independence or model-quality improvement. v1/v2 receipts remain
-verifiable but explicitly report `legacy_receipt_repository_unbound`.
+semantic independence or model-quality improvement. v1/v2/v3 receipts remain
+verifiable; v1/v2 explicitly report `legacy_receipt_repository_unbound`, while
+v3 remains a legacy repository binding without the v4 context-origin contract.
 Gitlinks/submodules and special filesystem entries are rejected rather than
 silently producing a partial identity.
+
+The read-only `routing` status separates `context_bound_receipts`,
+`repository_context_bound_receipts`, and `context_unbound_receipts`; it does not
+silently count older or light-profile Receipts as context-bound.
 
 ## Prompt Persistence and Redaction
 
@@ -102,6 +143,27 @@ captured before-state, refuses execution after intervening repository drift,
 and stores the captured after-state in immutable execution evidence. External
 tools bind only the before-state and keep the after-state explicitly
 unobserved.
+
+## Declared Governed Execution Coverage
+
+When a task needs an explicit action denominator, register its ordered plan
+before any child Action Manifest exists:
+
+```powershell
+python -m spst_runtime.execution_coverage_bridge register --session-db <session.db> --receipt-id <receipt-id> --plan-file <plan.json> --repository-root ..
+python -m spst_runtime.execution_coverage_bridge status --session-db <session.db> --receipt-id <receipt-id>
+```
+
+Receipt verification exposes this read-only projection under
+`execution_coverage`. It detects missing, extra, duplicate, pre-plan,
+out-of-order, and wrong-workspace Action Manifests. Complete coverage requires
+successful runtime-verified execution and a verified Repository transition for
+every declared slot. An external attestation can complete bounded result
+evidence but cannot complete runtime execution coverage. The declaration itself
+is not an authenticated list of every Codex tool call; therefore
+`declaration_completeness_verified` remains false and
+`global_codex_tool_coverage` remains null. See
+`docs/governed-execution-coverage.md`.
 
 ## Boundary
 

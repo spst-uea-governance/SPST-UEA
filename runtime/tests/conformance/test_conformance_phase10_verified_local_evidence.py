@@ -69,7 +69,15 @@ def test_phase10_runs_only_governed_fixed_profiles_and_compacts_outputs(monkeypa
     assert profile_result["output_digest"]
     assert captured["shell"] is False
     assert captured["cwd"] == tmp_path.resolve()
+    assert captured["timeout"] == 600
     assert "pytest" in captured["command"]
+    historical_result = provider.execute_verification_profile(
+        "pytest",
+        governance_authorized=True,
+        profile_contract_version=2,
+    )
+    assert historical_result["status"] == "completed"
+    assert captured["timeout"] == 120
     assert provider.execute_verification_profile(
         "arbitrary_command",
         governance_authorized=True,

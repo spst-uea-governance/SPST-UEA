@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ from spst_runtime.intelligence_amplifier import IntelligenceAmplifier
 from spst_runtime.memory.long_term_memory import (
     CURRENT_MEMORY_POLICY_VERSION,
     LongTermMemoryStore,
+    memory_record_binding_sha256,
 )
 from spst_runtime.persistence.sqlite_repository import SQLiteRepository
 from spst_runtime.routing_receipt import RoutingReceiptLedger, build_profiled_routing_receipt
@@ -84,6 +86,7 @@ def summarize_session(state: dict[str, Any]) -> dict[str, Any]:
     evaluation = state.get("evaluation", evaluate_session(state))
     memory = state.get("memory", {})
     retrieval_health = memory.get("retrieval_health", {})
+    context_mediation = state.get("context_mediation", {})
     return {
         "status": "stable" if evaluation.get("esi", 0.0) >= 0.95 else "watch",
         "turn_count": state.get("turn_count", 0),
@@ -94,6 +97,10 @@ def summarize_session(state: dict[str, Any]) -> dict[str, Any]:
         "memory_quarantined_count": retrieval_health.get("quarantined_records", 0),
         "last_prompt": prompts[-1] if prompts else None,
         "execution_profile": state.get("execution_profile", {}).get("name"),
+        "context_packet_status": context_mediation.get("status"),
+        "context_packet_items": context_mediation.get("selection", {}).get(
+            "selected_count", 0
+        ),
         "next_actions": [
             "preserve_no_key_codex_mediated_boundary",
             "continue_recording_governance_audit",
@@ -113,6 +120,7 @@ def record_turn(
     memory_path: str | None = None,
     execution_profile: dict[str, Any] | None = None,
     repository_identity: dict[str, Any] | None = None,
+    context_packet: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     store = ChatSessionStore(session_path)
     state = store.load()
@@ -133,6 +141,7 @@ def record_turn(
         "minimum_memory_confidence": 0.5,
         "reasons": ["compatibility_default"],
     }
+    memory_binding: dict[str, Any]
     if profile.get("memory_mode") == "session_only":
         previous_memory = state.get("memory", {})
         state["memory"] = {
@@ -200,7 +209,34 @@ def record_turn(
             "status": "persisted_and_policy_filtered",
             "record_id": memory_record.id,
             "policy_version": CURRENT_MEMORY_POLICY_VERSION,
+            "record_text_sha256": hashlib.sha256(
+                memory_record.text.encode("utf-8")
+            ).hexdigest(),
+            "record_sha256": memory_record_binding_sha256(memory_record),
+            "record_source": memory_record.source,
+            "record_kind": memory_record.kind,
+            "record_created_turn": memory_record.created_turn,
         }
+
+    if context_packet is not None:
+        state["context_mediation"] = context_packet
+        packet_sha256 = context_packet.get("packet_sha256")
+        if (
+            context_packet.get("status") != "skipped"
+            and isinstance(packet_sha256, str)
+            and len(packet_sha256) == 64
+        ):
+            memory_binding["context_packet_sha256"] = packet_sha256
+            task_sha256 = context_packet.get("task_sha256")
+            if isinstance(task_sha256, str) and len(task_sha256) == 64:
+                memory_binding["context_task_sha256"] = task_sha256
+            origin_index_sha256 = (
+                context_packet.get("evidence", {})
+                .get("origin_index", {})
+                .get("index_sha256")
+            )
+            if isinstance(origin_index_sha256, str) and len(origin_index_sha256) == 64:
+                memory_binding["context_origin_index_sha256"] = origin_index_sha256
 
     state["mode"] = CONFIG.mode
     state["provider"] = CONFIG.provider

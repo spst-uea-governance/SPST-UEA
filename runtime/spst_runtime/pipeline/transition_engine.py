@@ -61,6 +61,15 @@ class TransitionEngine:
             state.metadata["execution_profile"] = deepcopy(payload["execution_profile"])
 
     def _retrieve(self, state: Any, event: Any) -> None:
+        payload = deepcopy(getattr(event, "payload", {}) or {})
+        packet = payload.get("context_packet")
+        if isinstance(packet, dict):
+            state.metadata["context_packet"] = packet
+            items = packet.get("items", []) if packet.get("status") == "ready" else []
+            state.metadata["retrieved_context"] = (
+                deepcopy(items) if isinstance(items, list) else []
+            )
+            return
         state.metadata.setdefault("retrieved_context", [])
 
     def _infer(self, state: Any, event: Any) -> None:
@@ -75,6 +84,8 @@ class TransitionEngine:
             "evaluation": state.metadata.get("evaluation", {}),
             "memory": {"retrieved": state.metadata.get("retrieved_context", [])},
         }
+        if "context_packet" in state.metadata:
+            session_state["context_mediation"] = state.metadata["context_packet"]
         state.metadata["intelligence_amplification"] = self.intelligence_amplifier.amplify(
             prompt,
             session_state,

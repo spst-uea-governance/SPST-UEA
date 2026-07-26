@@ -52,11 +52,13 @@ coverage remains `null` because SPST-UEA cannot observe tasks that bypass the
 bridge. `task_quality_delta` also remains `null` until the same task has
 independently verified normal and SPST-routed outcomes.
 
-Repository-bound turns use `spst-routing-receipt-v3` and bind HEAD plus a
+Repository-bound turns use `spst-routing-receipt-v4` and bind HEAD plus a
 canonical index/tracked/untracked worktree digest alongside the adaptive
 `light`, `standard`, or `strict` profile. `binding_verified` protects the
 recorded historical identity; `current_match` requires a read-only recapture
-with `--repository-root`. Existing unbound v1/v2 receipts remain verifiable.
+with `--repository-root`. v4 also binds the mediated context packet, task, and
+per-record origin index. Existing v1/v2/v3 receipts remain verifiable as legacy
+evidence with their narrower contracts.
 See `docs/adaptive-task-profiles.md` for risk floors and memory lifecycle.
 
 Supported post-route local verification commands can be attached as immutable

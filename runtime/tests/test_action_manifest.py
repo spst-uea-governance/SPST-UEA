@@ -20,7 +20,10 @@ from spst_runtime.repository_identity import (
     RepositoryIdentityError,
     capture_repository_identity,
 )
-from spst_runtime.verification_profiles import profile_contract_for
+from spst_runtime.verification_profiles import (
+    PROFILE_CONTRACT_VERSION,
+    profile_contract_for,
+)
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -111,6 +114,13 @@ def _reidentify_manifest(manifest: dict) -> dict:
     return manifest
 
 
+def _canonical_hash(value: dict) -> str:
+    serialized = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 @pytest.mark.parametrize(
     ("profile", "execution_root"),
     [
@@ -118,6 +128,8 @@ def _reidentify_manifest(manifest: dict) -> dict:
         ("git_status", "."),
         ("git_diff_check", "."),
         ("pytest", "runtime"),
+        ("pytest_coverage", "runtime"),
+        ("coverage_report", "runtime"),
         ("ruff", "runtime"),
         ("mypy", "runtime"),
     ],
@@ -128,8 +140,73 @@ def test_every_fixed_profile_owns_an_execution_root(
     contract = profile_contract_for(profile)
 
     assert contract is not None
-    assert contract["version"] == 2
+    assert contract["version"] == PROFILE_CONTRACT_VERSION
     assert contract["execution_root"] == execution_root
+
+
+def test_pytest_profile_v5_preserves_frozen_v2_through_v4_contracts():
+    version_two = profile_contract_for("pytest", contract_version=2)
+    version_three = profile_contract_for("pytest", contract_version=3)
+    version_four = profile_contract_for("pytest", contract_version=4)
+    current = profile_contract_for("pytest")
+
+    assert version_two is not None
+    assert version_three is not None
+    assert version_four is not None
+    assert current is not None
+    assert version_two["version"] == 2
+    assert version_two["timeout_seconds"] == 120
+    assert version_three["version"] == 3
+    assert version_three["timeout_seconds"] == 300
+    assert version_four["version"] == 4
+    assert version_four["timeout_seconds"] == 300
+    assert current["version"] == 5
+    assert current["timeout_seconds"] == 600
+    assert current["command"] == version_two["command"]
+    assert current["command"] == version_three["command"]
+    assert current["command"] == version_four["command"]
+    assert current["execution_root"] == version_two["execution_root"]
+
+
+def test_action_only_coverage_profiles_do_not_expand_evaluation_profile_set():
+    from spst_runtime.verification_profiles import (
+        ACTION_PROFILE_NAMES,
+        VERIFICATION_PROFILE_NAMES,
+    )
+
+    assert "pytest_coverage" in ACTION_PROFILE_NAMES
+    assert "coverage_report" in ACTION_PROFILE_NAMES
+    assert "pytest_coverage" not in VERIFICATION_PROFILE_NAMES
+    assert "coverage_report" not in VERIFICATION_PROFILE_NAMES
+
+
+def test_historical_v2_fixed_profile_manifest_remains_valid(tmp_path: Path):
+    turn, session_path = _routed_turn(tmp_path)
+    ledger = ActionManifestLedger(str(session_path))
+    manifest = ledger.prepare_fixed_profile(
+        turn["routing_receipt"]["receipt_id"],
+        "pytest",
+        repository_root=str(REPOSITORY_ROOT),
+    )
+    historical = json.loads(json.dumps(manifest))
+    action = historical["payload"]["action"]
+    contract = profile_contract_for("pytest", contract_version=2)
+    assert contract is not None
+    contract_sha256 = _canonical_hash(contract)
+    action["profile_contract_version"] = 2
+    action["profile_contract_sha256"] = contract_sha256
+    action["arguments_sha256"] = _canonical_hash(
+        {
+            "profile": "pytest",
+            "profile_contract_sha256": contract_sha256,
+        }
+    )
+    action["command_sha256"] = _canonical_hash(
+        {"command": contract["command"]}
+    )
+    _reidentify_manifest(historical)
+
+    assert validate_action_manifest(historical) == (True, None)
 
 
 def test_fixed_profile_execution_is_bound_to_verified_parent_receipt(tmp_path: Path):
@@ -148,7 +225,10 @@ def test_fixed_profile_execution_is_bound_to_verified_parent_receipt(tmp_path: P
     assert manifest["schema"] == "spst-action-manifest-v1"
     assert manifest["payload"]["parent_receipt"]["receipt_id"] == receipt_id
     assert manifest["payload"]["action"]["profile"] == "git_status"
-    assert manifest["payload"]["action"]["profile_contract_version"] == 2
+    assert (
+        manifest["payload"]["action"]["profile_contract_version"]
+        == PROFILE_CONTRACT_VERSION
+    )
     assert manifest["payload"]["action"]["execution_root"] == "."
     assert manifest["payload"]["action"]["repository_sha256"]
     assert manifest["payload"]["action"]["execution_root_sha256"]
@@ -229,9 +309,16 @@ def test_profile_definition_controls_execution_root(monkeypatch, tmp_path: Path)
     ledger = ActionManifestLedger(str(session_path))
     captured: dict[str, object] = {}
 
-    def fake_profile(self, profile: str, *, governance_authorized: bool) -> dict:
+    def fake_profile(
+        self,
+        profile: str,
+        *,
+        governance_authorized: bool,
+        profile_contract_version: int | None = None,
+    ) -> dict:
         captured["cwd"] = self._workspace_root
         captured["profile"] = profile
+        captured["profile_contract_version"] = profile_contract_version
         assert governance_authorized is True
         return {
             "profile": profile,
@@ -256,6 +343,7 @@ def test_profile_definition_controls_execution_root(monkeypatch, tmp_path: Path)
     assert captured == {
         "cwd": (REPOSITORY_ROOT / "runtime").resolve(),
         "profile": "pytest",
+        "profile_contract_version": PROFILE_CONTRACT_VERSION,
     }
     assert result["manifest"]["payload"]["action"]["execution_root"] == "runtime"
 
@@ -363,7 +451,13 @@ def test_execute_rejects_repository_change_between_manifest_and_action(
     (repository / "tracked.txt").write_text("changed before action\n", encoding="utf-8")
     called = False
 
-    def must_not_execute(self, profile: str, *, governance_authorized: bool) -> dict:
+    def must_not_execute(
+        self,
+        profile: str,
+        *,
+        governance_authorized: bool,
+        profile_contract_version: int | None = None,
+    ) -> dict:
         nonlocal called
         called = True
         raise AssertionError("verification profile must not execute")
@@ -392,7 +486,13 @@ def test_after_repository_identity_records_unexpected_action_mutation(
     )
     ledger = ActionManifestLedger(str(session_path))
 
-    def mutating_profile(self, profile: str, *, governance_authorized: bool) -> dict:
+    def mutating_profile(
+        self,
+        profile: str,
+        *,
+        governance_authorized: bool,
+        profile_contract_version: int | None = None,
+    ) -> dict:
         assert governance_authorized is True
         (self._workspace_root / "tracked.txt").write_text(
             "mutated by action\n",
@@ -463,7 +563,7 @@ def test_after_repository_identity_capture_failure_is_recorded_not_hidden(
     )
     monkeypatch.setattr(
         "spst_runtime.action_manifest.ToolProvider.execute_verification_profile",
-        lambda self, profile, governance_authorized: {
+        lambda self, profile, governance_authorized, profile_contract_version=None: {
             "profile": profile,
             "status": "completed",
             "returncode": 0,
@@ -545,7 +645,7 @@ def test_failed_fixed_profile_is_execution_verified_but_not_successful(
 
     monkeypatch.setattr(
         "spst_runtime.action_manifest.ToolProvider.execute_verification_profile",
-        lambda self, profile, governance_authorized: {
+        lambda self, profile, governance_authorized, profile_contract_version=None: {
             "profile": profile,
             "status": "failed",
             "returncode": 1,
@@ -580,7 +680,7 @@ def test_missing_or_tampered_parent_receipt_cannot_bind_action(tmp_path: Path):
     receipt_id = turn["routing_receipt"]["receipt_id"]
     _tamper_record(
         session_path,
-        f"routing_receipt:v3:{receipt_id}",
+        f"routing_receipt:v4:{receipt_id}",
         lambda record: record["payload"]["route"].__setitem__("event", "tampered"),
     )
     with pytest.raises(ValueError, match="parent_receipt_unverified"):

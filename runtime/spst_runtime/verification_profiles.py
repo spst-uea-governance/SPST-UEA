@@ -7,7 +7,11 @@ from typing import Any
 SNAPSHOT_PROFILE_NAMES = ("git_head", "git_status")
 QUALITY_PROFILE_NAMES = ("pytest", "ruff", "mypy", "git_diff_check")
 VERIFICATION_PROFILE_NAMES = (*SNAPSHOT_PROFILE_NAMES, *QUALITY_PROFILE_NAMES)
-PROFILE_CONTRACT_VERSION = 2
+ACTION_ONLY_PROFILE_NAMES = ("pytest_coverage", "coverage_report")
+ACTION_QUALITY_PROFILE_NAMES = (*QUALITY_PROFILE_NAMES, *ACTION_ONLY_PROFILE_NAMES)
+ACTION_PROFILE_NAMES = (*VERIFICATION_PROFILE_NAMES, *ACTION_ONLY_PROFILE_NAMES)
+PROFILE_CONTRACT_VERSION = 5
+SUPPORTED_PROFILE_CONTRACT_VERSIONS = frozenset({2, 3, 4, PROFILE_CONTRACT_VERSION})
 
 
 @dataclass(frozen=True)
@@ -20,7 +24,7 @@ class VerificationProfile:
     required_paths: tuple[str, ...]
 
 
-_PROFILES = {
+_PROFILES_V2 = {
     "git_head": VerificationProfile(
         command=("git", "rev-parse", "HEAD"),
         execution_root=".",
@@ -59,19 +63,73 @@ _PROFILES = {
     ),
 }
 
+_PROFILES_V3 = {
+    **_PROFILES_V2,
+    "pytest": VerificationProfile(
+        command=(sys.executable, "-m", "pytest", "-q"),
+        execution_root="runtime",
+        timeout_seconds=300,
+        required_paths=("pyproject.toml", "spst_runtime"),
+    ),
+}
 
-def profile_for(profile: str) -> VerificationProfile | None:
+_PROFILES_V4 = {
+    **_PROFILES_V3,
+    "pytest_coverage": VerificationProfile(
+        command=(sys.executable, "-m", "coverage", "run", "-m", "pytest", "-q"),
+        execution_root="runtime",
+        timeout_seconds=300,
+        required_paths=("pyproject.toml", "spst_runtime"),
+    ),
+    "coverage_report": VerificationProfile(
+        command=(sys.executable, "-m", "coverage", "report"),
+        execution_root="runtime",
+        timeout_seconds=60,
+        required_paths=("pyproject.toml", ".coverage"),
+    ),
+}
+
+_PROFILES_V5 = {
+    **_PROFILES_V4,
+    "pytest": VerificationProfile(
+        command=(sys.executable, "-m", "pytest", "-q"),
+        execution_root="runtime",
+        timeout_seconds=600,
+        required_paths=("pyproject.toml", "spst_runtime"),
+    ),
+}
+
+_PROFILES_BY_CONTRACT_VERSION = {
+    2: _PROFILES_V2,
+    3: _PROFILES_V3,
+    4: _PROFILES_V4,
+    PROFILE_CONTRACT_VERSION: _PROFILES_V5,
+}
+
+
+def profile_for(
+    profile: str,
+    *,
+    contract_version: int | None = None,
+) -> VerificationProfile | None:
     """Return the immutable definition for a permitted profile."""
-    return _PROFILES.get(profile)
+    version = PROFILE_CONTRACT_VERSION if contract_version is None else contract_version
+    definitions = _PROFILES_BY_CONTRACT_VERSION.get(version)
+    return definitions.get(profile) if definitions is not None else None
 
 
-def profile_contract_for(profile: str) -> dict[str, Any] | None:
+def profile_contract_for(
+    profile: str,
+    *,
+    contract_version: int | None = None,
+) -> dict[str, Any] | None:
     """Return the canonical profile contract bound into new action manifests."""
-    definition = profile_for(profile)
+    version = PROFILE_CONTRACT_VERSION if contract_version is None else contract_version
+    definition = profile_for(profile, contract_version=version)
     if definition is None:
         return None
     return {
-        "version": PROFILE_CONTRACT_VERSION,
+        "version": version,
         "profile": profile,
         "command": list(definition.command),
         "execution_root": definition.execution_root,
@@ -80,9 +138,14 @@ def profile_contract_for(profile: str) -> dict[str, Any] | None:
     }
 
 
-def resolve_execution_root(profile: str, repository_root: str | Path) -> tuple[Path, Path]:
+def resolve_execution_root(
+    profile: str,
+    repository_root: str | Path,
+    *,
+    contract_version: int | None = None,
+) -> tuple[Path, Path]:
     """Resolve a profile cwd from a validated repository boundary."""
-    definition = profile_for(profile)
+    definition = profile_for(profile, contract_version=contract_version)
     if definition is None:
         raise ValueError("verification_profile_not_permitted")
 
@@ -103,15 +166,19 @@ def resolve_execution_root(profile: str, repository_root: str | Path) -> tuple[P
     return repository, execution_root
 
 
-def command_for(profile: str) -> tuple[str, ...] | None:
+def command_for(
+    profile: str,
+    *,
+    contract_version: int | None = None,
+) -> tuple[str, ...] | None:
     """Return the fixed, shell-free command for a local verification profile."""
-    definition = profile_for(profile)
+    definition = profile_for(profile, contract_version=contract_version)
     return definition.command if definition is not None else None
 
 
-def timeout_for(profile: str) -> int:
+def timeout_for(profile: str, *, contract_version: int | None = None) -> int:
     """Return the bounded execution timeout for a fixed profile."""
-    definition = profile_for(profile)
+    definition = profile_for(profile, contract_version=contract_version)
     if definition is None:
         raise ValueError("verification_profile_not_permitted")
     return definition.timeout_seconds

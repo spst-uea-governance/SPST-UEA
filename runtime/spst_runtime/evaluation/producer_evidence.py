@@ -4,8 +4,21 @@ import hashlib
 import json
 from typing import Any
 
+from spst_runtime.context_review import validate_producer_context_binding
+from spst_runtime.evaluation.quality_evidence import (
+    validate_producer_scoring_material,
+)
+from spst_runtime.live_pairing import validate_live_pair_execution
+from spst_runtime.provider_observation import (
+    canonical_provider_value_sha256,
+    validate_provider_observation_binding,
+)
 
-SCHEMA_VERSION = "producer-evidence-v2"
+
+SCHEMA_VERSION = "producer-evidence-v3"
+CONTEXT_SCHEMA_VERSION = "producer-evidence-v4"
+UPTAKE_SCHEMA_VERSION = "producer-evidence-v5"
+LEGACY_SCHEMA_VERSION = "producer-evidence-v2"
 ARMS = ("baseline", "maximized")
 ARTIFACT_SEMANTIC_PROFILE = "contract-json-v1"
 MAX_CANONICAL_ARTIFACT_BYTES = 1_000_000
@@ -137,11 +150,34 @@ def build_producer_evidence(report: dict[str, Any]) -> list[dict[str, Any]]:
                 case=case,
                 result=result,
             )
+            context_intervention = _context_intervention_binding(
+                result.get("context_intervention")
+            )
             artifact_semantics = _artifact_semantic_binding(
                 result.get("artifact_semantics")
             )
+            scoring_material_present = "scoring_material" in result
+            scoring_material = _scoring_material_binding(
+                result.get("scoring_material")
+            )
+            provider_observation = _provider_observation_binding(
+                result,
+                context_intervention,
+                task_id=str(task_id),
+                arm=arm,
+                suite_version=str(suite.get("version") or ""),
+            )
             binding = {
-                "schema_version": SCHEMA_VERSION,
+                "schema_version": (
+                    UPTAKE_SCHEMA_VERSION
+                    if scoring_material_present
+                    and provider_observation["status"] == "verified"
+                    else CONTEXT_SCHEMA_VERSION
+                    if scoring_material_present and context_intervention["present"]
+                    else SCHEMA_VERSION
+                    if scoring_material_present
+                    else LEGACY_SCHEMA_VERSION
+                ),
                 "producer_run_id": producer_run_id,
                 "task_id": task_id,
                 "candidate_id": candidate_id,
@@ -162,6 +198,46 @@ def build_producer_evidence(report: dict[str, Any]) -> list[dict[str, Any]]:
                     "status"
                 ),
             }
+            if scoring_material_present:
+                binding.update(
+                    {
+                        **scoring_material,
+                        "producer_run_instance_id": report.get(
+                            "producer_run_instance_id"
+                        ),
+                        "producer_execution_id": result.get(
+                            "producer_execution_id"
+                        ),
+                    }
+                )
+            if context_intervention["present"]:
+                binding.update(
+                    {
+                        "context_intervention_status": context_intervention["status"],
+                        "context_intervention_reason": context_intervention["reason"],
+                        "context_intervention": context_intervention["binding"],
+                    }
+                )
+            if provider_observation["status"] == "verified":
+                binding.update(
+                    {
+                        "provider_observation_status": "verified",
+                        "provider_observation_reason": None,
+                        "provider_observation": provider_observation["binding"],
+                    }
+                )
+                if provider_observation.get("live_pair_execution") is not None:
+                    binding.update(
+                        {
+                            "live_pair_execution_status": "verified",
+                            "live_pair_execution": provider_observation[
+                                "live_pair_execution"
+                            ],
+                            "adapter_execution_position": provider_observation[
+                                "adapter_execution_position"
+                            ],
+                        }
+                    )
             binding["binding_id"] = f"PBIND-{_digest(binding)[:16]}"
             bindings.append(binding)
     return sorted(bindings, key=lambda item: (str(item["task_id"]), str(item["arm"])))
@@ -222,7 +298,15 @@ def _semantic_configuration(
         for value in counts
     ):
         return _unresolved_configuration("semantic_configuration_plan_invalid")
-    semantic_value = {
+    context_intervention = _context_intervention_binding(result.get("context_intervention"))
+    if context_intervention["present"] and context_intervention["status"] != "ready":
+        return _unresolved_configuration(
+            str(context_intervention["reason"] or "context_intervention_unresolved")
+        )
+    evaluation_profile = result.get("evaluation_profile")
+    if evaluation_profile is not None and not isinstance(evaluation_profile, str):
+        return _unresolved_configuration("semantic_configuration_evaluation_profile_invalid")
+    semantic_value: dict[str, Any] = {
         "suite": {
             "version": suite.get("version"),
             "split": suite.get("split"),
@@ -242,6 +326,22 @@ def _semantic_configuration(
             "strategy_count": plan.get("strategy_count"),
             "verification_check_count": plan.get("verification_check_count"),
         },
+        "evaluation_profile": evaluation_profile,
+        "context_intervention": (
+            {
+                "artifact_sha256": context_intervention["binding"].get(
+                    "artifact_sha256"
+                ),
+                "semantic_review_sha256": context_intervention["binding"].get(
+                    "semantic_review_sha256"
+                ),
+                "producer_context_binding_sha256": context_intervention["binding"].get(
+                    "producer_context_binding_sha256"
+                ),
+            }
+            if context_intervention["status"] == "ready"
+            else None
+        ),
     }
     required = (
         semantic_value["suite"]["version"],
@@ -295,6 +395,140 @@ def _artifact_semantic_binding(value: Any) -> dict[str, Any]:
         "reason": "semantic_artifact_record_invalid",
         "semantic_digest": None,
     }
+
+
+def _context_intervention_binding(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {
+            "present": False,
+            "status": "absent",
+            "reason": None,
+            "binding": {},
+        }
+    valid, reason = validate_producer_context_binding(value)
+    if not valid or not isinstance(value, dict):
+        return {
+            "present": True,
+            "status": "unresolved",
+            "reason": reason or "producer_context_binding_invalid",
+            "binding": {},
+        }
+    return {
+        "present": True,
+        "status": "ready",
+        "reason": None,
+        "binding": deepcopy(value),
+    }
+
+
+def _scoring_material_binding(value: Any) -> dict[str, Any]:
+    valid, reason = validate_producer_scoring_material(value)
+    material = _mapping(value)
+    if not valid:
+        return {
+            "scoring_material_status": "invalid",
+            "scoring_material_reason": reason or "scoring_material_invalid",
+            "scoring_material_digest": None,
+            "quality_rubric_digest": None,
+        }
+    return {
+        "scoring_material_status": material.get("status"),
+        "scoring_material_reason": material.get("reason"),
+        "scoring_material_digest": material.get("material_digest"),
+        "quality_rubric_digest": material.get("rubric_digest"),
+    }
+
+
+def _provider_observation_binding(
+    result: dict[str, Any],
+    context_intervention: dict[str, Any],
+    *,
+    task_id: str,
+    arm: str,
+    suite_version: str,
+) -> dict[str, Any]:
+    observation = result.get("provider_observation")
+    intervention_sha256 = (
+        context_intervention["binding"].get("intervention_sha256")
+        if context_intervention["status"] == "ready"
+        else None
+    )
+    valid, reason = validate_provider_observation_binding(
+        observation,
+        expected_output_sha256=str(result.get("output_digest") or ""),
+        expected_context_intervention_sha256=(
+            str(intervention_sha256) if intervention_sha256 is not None else None
+        ),
+    )
+    if not valid or not isinstance(observation, dict):
+        return {
+            "status": "unresolved",
+            "reason": reason or "provider_observation_unresolved",
+            "binding": {},
+        }
+    live_pair_execution = result.get("live_pair_execution")
+    adapter_execution_position = result.get("execution_position")
+    if live_pair_execution is not None:
+        expected_condition = "control" if arm == "baseline" else "treatment"
+        live_valid, live_reason = validate_live_pair_execution(
+            live_pair_execution,
+            expected_task_id=task_id,
+            expected_condition=expected_condition,
+            expected_selected_arm=arm,
+            expected_context_intervention_sha256=str(
+                live_pair_execution.get("context_intervention_sha256")
+            )
+            if isinstance(live_pair_execution, dict)
+            else None,
+        )
+        if not live_valid:
+            return {
+                "status": "unresolved",
+                "reason": live_reason or "live_pair_execution_invalid",
+                "binding": {},
+            }
+        if (
+            not isinstance(adapter_execution_position, int)
+            or isinstance(adapter_execution_position, bool)
+            or adapter_execution_position not in {1, 2}
+            or result.get("evaluation_arm") != arm
+        ):
+            return {
+                "status": "unresolved",
+                "reason": "live_pair_adapter_execution_position_invalid",
+                "binding": {},
+            }
+        expected_evaluation = {
+            "mode": "context_control",
+            "suite_version": suite_version,
+            "case_id": task_id,
+            "shadow_only": True,
+            "execution_position": adapter_execution_position,
+            "arm": arm,
+            "live_pair_execution": live_pair_execution,
+        }
+        request = _mapping(observation.get("request"))
+        if request.get("evaluation_context_sha256") != (
+            canonical_provider_value_sha256(expected_evaluation)
+        ):
+            return {
+                "status": "unresolved",
+                "reason": "live_pair_provider_request_binding_mismatch",
+                "binding": {},
+            }
+    response = {
+        "status": "verified",
+        "reason": None,
+        "binding": deepcopy(observation),
+    }
+    if live_pair_execution is not None:
+        response.update(
+            {
+                "live_pair_execution": deepcopy(live_pair_execution),
+                "adapter_execution_position": adapter_execution_position,
+            }
+        )
+    return response
 
 
 def _expected_keys(value: Any) -> list[str] | None:

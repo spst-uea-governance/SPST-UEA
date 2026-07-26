@@ -16,9 +16,10 @@ from spst_runtime.repository_identity import (
 )
 from spst_runtime.routing_receipt import RoutingReceiptLedger
 from spst_runtime.verification_profiles import (
+    ACTION_QUALITY_PROFILE_NAMES,
     PROFILE_CONTRACT_VERSION,
-    QUALITY_PROFILE_NAMES,
     SNAPSHOT_PROFILE_NAMES,
+    SUPPORTED_PROFILE_CONTRACT_VERSIONS,
     command_for,
     profile_contract_for,
     resolve_execution_root,
@@ -84,29 +85,33 @@ def _workspace_digest(path: Path) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def _command_digest(profile: str) -> str:
-    command = command_for(profile)
+def _command_digest(profile: str, contract_version: int | None = None) -> str:
+    command = command_for(profile, contract_version=contract_version)
     if command is None:
         raise ValueError("verification_profile_not_permitted")
     return _canonical_hash({"command": list(command)})
 
 
-def _profile_contract(profile: str) -> dict[str, Any]:
-    contract = profile_contract_for(profile)
+def _profile_contract(
+    profile: str, contract_version: int | None = None
+) -> dict[str, Any]:
+    contract = profile_contract_for(profile, contract_version=contract_version)
     if contract is None:
         raise ValueError("verification_profile_not_permitted")
     return contract
 
 
-def _profile_contract_digest(profile: str) -> str:
-    return _canonical_hash(_profile_contract(profile))
+def _profile_contract_digest(profile: str, contract_version: int | None = None) -> str:
+    return _canonical_hash(_profile_contract(profile, contract_version))
 
 
-def _profile_arguments_digest(profile: str) -> str:
+def _profile_arguments_digest(profile: str, contract_version: int | None = None) -> str:
     return _canonical_hash(
         {
             "profile": profile,
-            "profile_contract_sha256": _profile_contract_digest(profile),
+            "profile_contract_sha256": _profile_contract_digest(
+                profile, contract_version
+            ),
         }
     )
 
@@ -238,7 +243,7 @@ def _risk_for_profile(profile: str) -> dict[str, Any]:
             "reasons": ["fixed_read_only_profile"],
             "requires_human_approval": False,
         }
-    if profile in QUALITY_PROFILE_NAMES:
+    if profile in ACTION_QUALITY_PROFILE_NAMES:
         return {
             "level": "R1",
             "reasons": ["fixed_local_quality_profile"],
@@ -322,11 +327,19 @@ def validate_action_manifest(manifest: dict[str, Any]) -> tuple[bool, str | None
     kind = action.get("kind")
     if kind == "fixed_profile":
         profile = str(action.get("profile") or "")
+        contract_version = action.get("profile_contract_version")
+        if (
+            contract_version is not None
+            and contract_version not in SUPPORTED_PROFILE_CONTRACT_VERSIONS
+        ):
+            return False, "fixed_profile_contract_mismatch"
         try:
             expected_risk = _risk_for_profile(profile)
-            expected_command = _command_digest(profile)
-            expected_contract = _profile_contract(profile)
-            expected_contract_digest = _profile_contract_digest(profile)
+            expected_command = _command_digest(profile, contract_version)
+            expected_contract = _profile_contract(profile, contract_version)
+            expected_contract_digest = _profile_contract_digest(
+                profile, contract_version
+            )
         except ValueError:
             return False, "verification_profile_not_permitted"
         if (
@@ -336,7 +349,6 @@ def validate_action_manifest(manifest: dict[str, Any]) -> tuple[bool, str | None
             or risk != expected_risk
         ):
             return False, "fixed_profile_binding_mismatch"
-        contract_version = action.get("profile_contract_version")
         contract_fields_present = any(
             key in action
             for key in FIXED_PROFILE_CONTRACT_FIELDS
@@ -345,10 +357,9 @@ def validate_action_manifest(manifest: dict[str, Any]) -> tuple[bool, str | None
         if contract_version is None and contract_fields_present:
             return False, "fixed_profile_contract_mismatch"
         if contract_version is not None and (
-            contract_version != PROFILE_CONTRACT_VERSION
-            or action.get("profile_contract_sha256")
-            != expected_contract_digest
-            or action.get("arguments_sha256") != _profile_arguments_digest(profile)
+            action.get("profile_contract_sha256") != expected_contract_digest
+            or action.get("arguments_sha256")
+            != _profile_arguments_digest(profile, contract_version)
             or action.get("execution_root")
             != expected_contract["execution_root"]
             or not _is_sha256(action.get("repository_sha256"))
@@ -447,7 +458,7 @@ def _validate_evidence(evidence: dict[str, Any]) -> tuple[bool, str | None]:
     if contract_version is None and contract_fields_present:
         return False, "action_evidence_profile_contract_incomplete"
     if contract_version is not None and (
-        contract_version != PROFILE_CONTRACT_VERSION
+        contract_version not in SUPPORTED_PROFILE_CONTRACT_VERSIONS
         or not _is_sha256(payload.get("profile_contract_sha256"))
         or not _is_sha256(payload.get("repository_sha256"))
         or not _is_sha256(payload.get("execution_root_sha256"))
@@ -560,10 +571,14 @@ class ActionManifestLedger:
         *,
         repository_root: str,
     ) -> dict[str, Any]:
-        repository, execution_root = resolve_execution_root(profile, repository_root)
+        repository, execution_root = resolve_execution_root(
+            profile,
+            repository_root,
+            contract_version=PROFILE_CONTRACT_VERSION,
+        )
         before_repository_identity = capture_repository_identity(repository)
-        contract = _profile_contract(profile)
-        contract_digest = _profile_contract_digest(profile)
+        contract = _profile_contract(profile, PROFILE_CONTRACT_VERSION)
+        contract_digest = _profile_contract_digest(profile, PROFILE_CONTRACT_VERSION)
         risk = _risk_for_profile(profile)
         action = {
             "kind": "fixed_profile",
@@ -573,8 +588,10 @@ class ActionManifestLedger:
             "executor": FIXED_EXECUTOR,
             "profile_contract_version": PROFILE_CONTRACT_VERSION,
             "profile_contract_sha256": contract_digest,
-            "arguments_sha256": _profile_arguments_digest(profile),
-            "command_sha256": _command_digest(profile),
+            "arguments_sha256": _profile_arguments_digest(
+                profile, PROFILE_CONTRACT_VERSION
+            ),
+            "command_sha256": _command_digest(profile, PROFILE_CONTRACT_VERSION),
             "repository_sha256": _workspace_digest(repository),
             "execution_root": contract["execution_root"],
             "execution_root_sha256": _workspace_digest(execution_root),
@@ -671,9 +688,12 @@ class ActionManifestLedger:
 
         if repository_root is None:
             return {**current, "reason": "repository_root_required"}
+        contract_version = action.get("profile_contract_version")
         try:
             repository, execution_root = resolve_execution_root(
-                str(action["profile"]), repository_root
+                str(action["profile"]),
+                repository_root,
+                contract_version=contract_version,
             )
         except ValueError as error:
             return {**current, "reason": str(error)}
@@ -710,7 +730,9 @@ class ActionManifestLedger:
         raw = ToolProvider(
             workspace_root=str(execution_root)
         ).execute_verification_profile(
-            str(action["profile"]), governance_authorized=True
+            str(action["profile"]),
+            governance_authorized=True,
+            profile_contract_version=contract_version,
         )
         output_digest = raw.get("output_digest")
         if not _is_sha256(output_digest):

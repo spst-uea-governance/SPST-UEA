@@ -2,8 +2,15 @@ import asyncio
 from copy import deepcopy
 import hashlib
 import json
+import math
 from typing import Any
 
+from spst_runtime.evaluation.quality_evidence import (
+    CONTRACT_PROXY_SCHEMA,
+    CONTRACT_PROXY_SCOPE,
+    contract_compliance_proxy,
+    validate_contract_compliance_proxy,
+)
 from spst_runtime.persistence.sqlite_repository import SQLiteRepository
 
 
@@ -132,13 +139,15 @@ class CalibrationRegistry:
         baseline: dict[str, Any] | None,
         requested_baseline: str | None,
     ) -> dict[str, Any]:
-        task_quality = observations["task_quality"]
-        if not task_quality["available"]:
+        measurement, metric_scope, semantic_quality = self._measurement(observations)
+        if not measurement.get("available", False):
             return self._comparison_result(
                 "scaffold_only",
                 baseline,
                 comparable=False,
                 reasons=["task_quality_unavailable"],
+                metric_scope=metric_scope,
+                semantic_task_quality_established=semantic_quality,
             )
         if baseline is None:
             if requested_baseline:
@@ -147,12 +156,16 @@ class CalibrationRegistry:
                     None,
                     comparable=False,
                     reasons=["baseline_not_found"],
+                    metric_scope=metric_scope,
+                    semantic_task_quality_established=semantic_quality,
                 )
             return self._comparison_result(
                 "baseline_recorded",
                 None,
                 comparable=False,
                 reasons=["immutable_baseline_recorded"],
+                metric_scope=metric_scope,
+                semantic_task_quality_established=semantic_quality,
             )
 
         reasons = self._contract_mismatch_reasons(baseline.get("contract", {}), contract)
@@ -162,10 +175,12 @@ class CalibrationRegistry:
                 baseline,
                 comparable=False,
                 reasons=reasons,
+                metric_scope=metric_scope,
+                semantic_task_quality_established=semantic_quality,
             )
 
-        baseline_scores = self._score_map(baseline.get("observations", {}))
-        candidate_scores = self._score_map(observations)
+        baseline_scores = self._score_map(baseline.get("observations", {}), metric_scope)
+        candidate_scores = self._score_map(observations, metric_scope)
         common_case_ids = sorted(set(baseline_scores) & set(candidate_scores))
         deltas = [
             round(candidate_scores[case_id] - baseline_scores[case_id], 6)
@@ -178,6 +193,8 @@ class CalibrationRegistry:
                 comparable=True,
                 reasons=["minimum_sample_count_not_met"],
                 sample_count=len(deltas),
+                metric_scope=metric_scope,
+                semantic_task_quality_established=semantic_quality,
             )
 
         mean_delta = self._mean(deltas)
@@ -191,6 +208,8 @@ class CalibrationRegistry:
                 sample_count=len(deltas),
                 mean_delta=mean_delta,
                 variance=variance,
+                metric_scope=metric_scope,
+                semantic_task_quality_established=semantic_quality,
             )
         if mean_delta >= self.MINIMUM_EFFECT_SIZE:
             status = "improved"
@@ -206,6 +225,8 @@ class CalibrationRegistry:
             sample_count=len(deltas),
             mean_delta=mean_delta,
             variance=variance,
+            metric_scope=metric_scope,
+            semantic_task_quality_established=semantic_quality,
         )
 
     def _comparison_result(
@@ -218,6 +239,8 @@ class CalibrationRegistry:
         sample_count: int = 0,
         mean_delta: float | None = None,
         variance: float | None = None,
+        metric_scope: str | None = None,
+        semantic_task_quality_established: bool = False,
     ) -> dict[str, Any]:
         confidence = (
             "bounded"
@@ -236,43 +259,127 @@ class CalibrationRegistry:
             "variance": variance,
             "minimum_effect_size": self.MINIMUM_EFFECT_SIZE,
             "confidence": confidence,
+            "metric_scope": metric_scope,
+            "semantic_task_quality_established": semantic_task_quality_established,
             "reasons": reasons,
         }
 
     def _contract(self, evaluation: dict[str, Any]) -> dict[str, Any]:
         suite = self._mapping(evaluation.get("suite"))
         provider = self._mapping(evaluation.get("provider"))
+        proxy = self._mapping(evaluation.get("contract_compliance_proxy"))
+        semantic_quality = False
+        measurement_scope = (
+            CONTRACT_PROXY_SCOPE
+            if proxy.get("schema") == CONTRACT_PROXY_SCHEMA
+            and proxy.get("metric_scope") == CONTRACT_PROXY_SCOPE
+            else None
+        )
         contract = {
             "suite_version": suite.get("version"),
             "suite_hash": suite.get("hash"),
             "provider_name": provider.get("name"),
             "provider_model_version": provider.get("model_version"),
+            "contract_scoring_supported": bool(
+                provider.get(
+                    "contract_scoring_supported",
+                    provider.get("task_scoring_supported", False),
+                )
+            ),
             "task_scoring_supported": bool(provider.get("task_scoring_supported", False)),
+            "measurement_scope": measurement_scope,
+            "semantic_task_quality_established": semantic_quality,
         }
         return {**contract, "hash": self._digest(contract)}
 
     def _observations(self, evaluation: dict[str, Any]) -> dict[str, Any]:
         task_quality = self._mapping(evaluation.get("task_quality"))
+        source_proxy = self._mapping(evaluation.get("contract_compliance_proxy"))
         scaffold = self._mapping(evaluation.get("scaffold_contract"))
         latency = self._mapping(evaluation.get("latency"))
-        case_scores = []
-        for case in evaluation.get("cases", []):
-            if not isinstance(case, dict):
-                continue
+        source_cases = evaluation.get("cases")
+        cases = (
+            [case for case in source_cases if isinstance(case, dict)]
+            if isinstance(source_cases, list)
+            else []
+        )
+        source_proxy_valid, source_proxy_reason = validate_contract_compliance_proxy(
+            source_proxy
+        )
+        recomputed_proxy = contract_compliance_proxy(cases, source_proxy_valid)
+        proxy_matches_cases = source_proxy_valid and all(
+            source_proxy.get(field) == recomputed_proxy.get(field)
+            for field in (
+                "schema",
+                "available",
+                "metric_scope",
+                "baseline_mean",
+                "maximized_mean",
+                "paired_delta",
+                "pair_count",
+                "semantic_task_quality_established",
+                "claim_eligible",
+            )
+        )
+        proxy = (
+            recomputed_proxy
+            if proxy_matches_cases
+            else contract_compliance_proxy(cases, False)
+        )
+        proxy_validation_reason = (
+            None
+            if proxy_matches_cases
+            else source_proxy_reason or "contract_proxy_case_recomputation_mismatch"
+        )
+        case_contract_scores = []
+        rejected_task_score_count = 0
+        rejected_contract_score_count = 0
+        for case in cases:
             maximized = self._mapping(case.get("maximized"))
             case_id = case.get("case_id")
-            task_score = self._float_or_none(maximized.get("task_score"))
-            if isinstance(case_id, str) and task_score is not None:
-                case_scores.append({"case_id": case_id, "maximized_task_score": task_score})
+            if maximized.get("task_score") is not None:
+                rejected_task_score_count += 1
+            contract_score = self._score_or_none(maximized.get("contract_score"))
+            if maximized.get("contract_score") is not None and contract_score is None:
+                rejected_contract_score_count += 1
+            if (
+                proxy_matches_cases
+                and isinstance(case_id, str)
+                and contract_score is not None
+            ):
+                case_contract_scores.append(
+                    {"case_id": case_id, "maximized_contract_score": contract_score}
+                )
         return {
             "status": evaluation.get("status"),
             "task_quality": {
-                "available": bool(task_quality.get("available", False)),
-                "baseline_mean": self._float_or_none(task_quality.get("baseline_mean")),
-                "maximized_mean": self._float_or_none(task_quality.get("maximized_mean")),
-                "paired_delta": self._float_or_none(task_quality.get("paired_delta")),
+                "available": False,
+                "baseline_mean": None,
+                "maximized_mean": None,
+                "paired_delta": None,
+                "semantic_task_quality_established": False,
+                "claim_eligible": False,
+                "source_available_attested": bool(task_quality.get("available", False)),
+                "reason": "independent_quality_evidence_verifier_unavailable",
             },
-            "case_task_scores": case_scores,
+            "contract_compliance_proxy": {
+                "schema": proxy.get("schema"),
+                "available": proxy.get("available") is True,
+                "metric_scope": proxy.get("metric_scope"),
+                "baseline_mean": self._float_or_none(proxy.get("baseline_mean")),
+                "maximized_mean": self._float_or_none(proxy.get("maximized_mean")),
+                "paired_delta": self._float_or_none(proxy.get("paired_delta")),
+                "pair_count": proxy.get("pair_count", 0),
+                "semantic_task_quality_established": False,
+                "claim_eligible": False,
+                "validation_status": "verified" if proxy_matches_cases else "rejected",
+                "validation_reason": proxy_validation_reason,
+                "case_recomputed": proxy_matches_cases,
+            },
+            "case_task_scores": [],
+            "rejected_task_score_count": rejected_task_score_count,
+            "case_contract_scores": case_contract_scores,
+            "rejected_contract_score_count": rejected_contract_score_count,
             "scaffold_contract": {
                 "baseline_mean": self._float_or_none(scaffold.get("baseline_mean")),
                 "maximized_mean": self._float_or_none(scaffold.get("maximized_mean")),
@@ -292,10 +399,11 @@ class CalibrationRegistry:
     ) -> dict[str, Any]:
         source_claims = self._mapping(evaluation.get("claims"))
         return {
-            "task_quality_uplift_claimed": bool(
-                comparison.get("status") == "improved"
-                and source_claims.get("task_quality_uplift_claimed", False)
+            "task_quality_uplift_claimed": False,
+            "source_uplift_claim_rejected": bool(
+                source_claims.get("task_quality_uplift_claimed", False)
             ),
+            "measurement_scope": comparison.get("metric_scope"),
             "requires_human_interpretation": True,
             "automatic_adoption": False,
         }
@@ -319,13 +427,35 @@ class CalibrationRegistry:
             "official_benchmark_claimed": False,
         }
 
-    def _score_map(self, observations: dict[str, Any]) -> dict[str, float]:
+    def _measurement(
+        self,
+        observations: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None, bool]:
+        proxy = self._mapping(observations.get("contract_compliance_proxy"))
+        proxy_valid, _ = validate_contract_compliance_proxy(proxy)
+        if proxy_valid and proxy.get("validation_status") == "verified":
+            return proxy, CONTRACT_PROXY_SCOPE, False
+        return {"available": False}, CONTRACT_PROXY_SCOPE, False
+
+    def _score_map(
+        self,
+        observations: dict[str, Any],
+        metric_scope: str | None,
+    ) -> dict[str, float]:
         scores: dict[str, float] = {}
-        for item in observations.get("case_task_scores", []):
+        proxy = self._mapping(observations.get("contract_compliance_proxy"))
+        proxy_valid, _ = validate_contract_compliance_proxy(proxy)
+        if (
+            not proxy_valid
+            or proxy.get("validation_status") != "verified"
+            or metric_scope != proxy.get("metric_scope")
+        ):
+            return scores
+        for item in observations.get("case_contract_scores", []):
             if not isinstance(item, dict):
                 continue
             case_id = item.get("case_id")
-            score = self._float_or_none(item.get("maximized_task_score"))
+            score = self._score_or_none(item.get("maximized_contract_score"))
             if isinstance(case_id, str) and score is not None:
                 scores[case_id] = score
         return scores
@@ -340,7 +470,13 @@ class CalibrationRegistry:
             ("suite_hash", "suite_hash_mismatch"),
             ("provider_name", "provider_name_mismatch"),
             ("provider_model_version", "provider_model_version_mismatch"),
+            ("contract_scoring_supported", "contract_scoring_contract_mismatch"),
             ("task_scoring_supported", "task_scoring_contract_mismatch"),
+            ("measurement_scope", "measurement_scope_mismatch"),
+            (
+                "semantic_task_quality_established",
+                "semantic_task_quality_contract_mismatch",
+            ),
         )
         return [
             reason
@@ -411,8 +547,15 @@ class CalibrationRegistry:
         if isinstance(value, bool):
             return None
         if isinstance(value, (int, float)):
-            return float(value)
+            result = float(value)
+            return result if math.isfinite(result) else None
         return None
+
+    @staticmethod
+    def _score_or_none(value: Any) -> float | None:
+        if not isinstance(value, float) or not math.isfinite(value):
+            return None
+        return value if 0.0 <= value <= 1.0 else None
 
     @staticmethod
     def _mean(values: list[float]) -> float:

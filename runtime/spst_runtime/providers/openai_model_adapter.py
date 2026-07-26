@@ -6,6 +6,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from spst_runtime.interfaces.model_adapter import ModelAdapter
+from spst_runtime.model_input_binding import bind_model_input, binding_evidence
 
 
 class OpenAIModelAdapterError(RuntimeError):
@@ -26,6 +27,8 @@ class OpenAIModelAdapter(ModelAdapter):
         return bool(os.getenv(self.api_key_env))
 
     async def infer(self, prompt: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
+        resolved_context = context or {}
+        binding = bind_model_input(prompt, resolved_context)
         api_key = os.getenv(self.api_key_env)
         if not api_key:
             return {
@@ -34,17 +37,27 @@ class OpenAIModelAdapter(ModelAdapter):
                 "available": False,
                 "text": "",
                 "error": f"{self.api_key_env} is not set.",
+                "model_input_binding": binding_evidence(
+                    binding,
+                    delivery_status="not_submitted_no_api_key",
+                ),
             }
 
         payload: dict[str, Any] = {
             "model": os.getenv("SPST_OPENAI_MODEL", self.model),
-            "input": prompt,
+            "input": binding["canonical_input"],
             "metadata": {
                 "runtime": "spst-uea",
+                "model_input_sha256": binding["model_input_sha256"],
             },
         }
-        if context:
-            payload["instructions"] = context.get("instructions")
+        if binding["context_packet_sha256"] is not None:
+            payload["metadata"]["context_packet_sha256"] = binding[
+                "context_packet_sha256"
+            ]
+        instructions = resolved_context.get("instructions")
+        if instructions:
+            payload["instructions"] = instructions
 
         request = Request(
             self.endpoint,
@@ -70,6 +83,10 @@ class OpenAIModelAdapter(ModelAdapter):
             "response_id": data.get("id"),
             "status": data.get("status"),
             "text": self._extract_text(data),
+            "model_input_binding": binding_evidence(
+                binding,
+                delivery_status="submitted_to_provider",
+            ),
         }
 
     def _extract_text(self, data: dict[str, Any]) -> str:

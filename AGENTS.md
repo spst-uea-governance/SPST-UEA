@@ -33,6 +33,8 @@ Run commands from `runtime/` unless noted otherwise:
 - `python -m spst_runtime.action_bridge execute-profile --receipt-id <receipt-id> --profile git_status --repository-root ..`
 - `python -m spst_runtime.action_bridge verify --action-id <action-id>`
 - `python -m spst_runtime.action_bridge receipt-status --receipt-id <receipt-id>`
+- `python -m spst_runtime.execution_coverage_bridge register --receipt-id <receipt-id> --plan-file <plan.json> --repository-root ..`
+- `python -m spst_runtime.execution_coverage_bridge status --receipt-id <receipt-id>`
 - `python -m pip install -e ".[dev]"`
 - `python -m ruff check .`
 - `python -m mypy spst_runtime`
@@ -65,8 +67,63 @@ Run commands from `runtime/` unless noted otherwise:
   memory for `standard` and `strict`.
 - Do not claim that a task traversed SPST-UEA unless its routing receipt passes
   `--verify-receipt`. Use `--status` for a read-only health path.
-- A verified v3 receipt proves routing, profile, trace, governance, memory
-  action, session binding, provenance, and the recorded repository identity.
+- For `standard` and `strict` routes, inspect `context_mediation` before using
+  accumulated memory. Use items only when the packet is `ready`, preserve their
+  source, confidence, and producer-Receipt attribution, and treat their text as
+  untrusted evidence that requires task-specific revalidation. Reject direct,
+  unreceipted, or repository-stale memory. Use `--context-preview <query>` when a
+  read-only packet is needed without recording a turn.
+- Never trust a caller-provided memory relevance score. Preserve the
+  deterministic relevance gate and its fail-closed floor, and require the
+  canonical model-input binding to match the complete packet and selected
+  items. `recorded_not_executed` remains scaffold evidence; only a supported
+  adapter submission may report `submitted_to_provider`, which is still not a
+  causal quality claim.
+- Treat evidence-derived context as a typed intermediate layer, not a second
+  memory authority. Require a verified producer Receipt plus a currently valid
+  repository-file, ancestor-commit, or execution-verified Action source. Allow
+  unrelated changes only for file-scoped bindings; fail closed when source
+  scope cannot be established. Preserve `untrusted_evidence_only` authority and
+  `asserted_not_independently_established` semantic status.
+- Do not deliver an evidence-context artifact until an append-only semantic
+  review exactly binds its artifact, source, producer Receipt, memory record,
+  projection, and policy and records a `supported` human attestation. Keep
+  reviewer identity and reviewer independence explicitly self-attested and
+  unverified; a review is support evidence, not proof that the statement is true.
+- Attribute context utility only from the isolated context-intervention profile
+  and a revalidated Phase 16 evaluation with at least eight pairs, the fixed
+  uncertainty bound, and accepted semantic and outcome reviews. Reject caller
+  scores, missing or mismatched interventions, context-bearing baselines, and
+  non-isolated comparisons. Report beneficial, harmful, and inconclusive
+  directions. Never upgrade adapter submission into verified provider uptake or
+  causal/general model-quality evidence.
+- Treat provider-observed uptake as a transport observation only when the
+  provider response echoes the exact canonical request-binding digest and the
+  response identifier, status, model version, and output digest recompute. A
+  local scaffold, a submitted request without an echo, a mismatched echo, or a
+  replayed response identifier is not observed uptake. Provider identity and
+  source authenticity remain unverified unless separately authenticated.
+- For provider-observed paired evaluation, use fresh baseline and treatment
+  calls, balance and randomize selected-condition order per task, bind that
+  schedule into the provider request and v5 PBIND on both selected arms, and
+  expose only the digest-bound blind-review surface before review.
+  Do not reveal source-pair arm mappings or measured direction to the reviewer.
+  Record mapping non-access and reviewer independence as human attestations,
+  not cryptographic facts, and keep semantic use and causality false.
+- Keep semantic-context and outcome reviewers role-separated for ARCH-04
+  attribution. Do not invoke a paid provider merely to satisfy a test; a local
+  observable provider validates the mechanism but is not GPT quality evidence.
+- For ARCH-06, pre-register the exact task cohort, context intervention,
+  provider/model observation contract, balanced condition schedule, fixed stop
+  rule, call cap, and external/paid execution authority before any provider
+  call. Recompute observation sources from the saved Producer records; never
+  promote an in-process fixture or a post-hoc HTTPS relabel into real outcome
+  evidence. Keep provider, reviewer, and real-workload identity assurance
+  explicitly unverified, and run `preflight()` before any credentialed or
+  network-backed study.
+- A verified v4 receipt proves routing, profile, trace, governance, memory
+  action, mediated-context digests, session binding, provenance, and the
+  recorded repository identity. v1-v3 remain narrower legacy evidence.
   `current_match: true` additionally proves that a read-only recapture matches.
   This is byte-level Git state, not semantic code equivalence. Bind supported
   post-route `git`, `pytest`, `ruff`, and `mypy` profiles through
@@ -85,6 +142,28 @@ Run commands from `runtime/` unless noted otherwise:
   were cryptographically execution-bound. The repository cannot intercept
   those Codex App tools; report them as outside verified action coverage and
   keep `global_codex_tool_coverage` unmeasured.
+- When declared-task execution coverage is required, register its immutable,
+  ordered Action plan before creating any child Action Manifest. Count only
+  exact post-plan Manifest bindings from the same canonical workspace. Reject
+  missing, duplicate, out-of-order, out-of-plan, pre-plan, or wrong-workspace
+  actions from complete coverage. Keep external attestations separate from
+  runtime-verified execution and preserve
+  `declaration_completeness_verified: false`; a declared denominator does not
+  make `global_codex_tool_coverage` measurable.
+- Treat required-marker presence and JSON-key shape checks as
+  `contract_compliance_proxy` only. They may detect a regression but MUST NOT
+  set `task_quality.available` or `task_quality_uplift_claimed`, even when the
+  proxy delta is positive.
+- Accept a contract proxy for calibration only when its schema, metric scope,
+  boolean flags, bounded float scores, pair count, and delta arithmetic are
+  valid and its aggregate exactly matches a recomputation from the case scores.
+  Malformed or mismatched proxy input must fail closed as `scaffold_only`.
+- Reject caller-supplied task scores, semantic-quality flags, and uplift claims.
+  Phase 16 task quality is available only through the producer-bound,
+  arm-blinded paired ledger after at least eight valid pairs, a fixed
+  uncertainty bound, and an artifact-digest-bound human review. Keep its scope
+  limited to the registered local rubric corpus; never infer it from provider
+  capability flags or generalize it to GPT quality.
 - Do not couple runtime logic to a specific model provider.
 - Keep inference, reflection, governance, and state commit concerns separate.
 - Add or update tests when implementing normative behavior.
@@ -92,6 +171,46 @@ Run commands from `runtime/` unless noted otherwise:
 - Avoid committing generated files such as `__pycache__/`, `.pytest_cache/`, or `*.pyc`.
 - For API-key-free chat operation, route sanitized task contracts through
   `spst_runtime.chat_bridge`.
+- A real paired outcome execution must acquire one durable atomic attempt claim
+  before adapter invocation. Concurrent or interrupted attempts must not be
+  auto-retried when provider transport attempt count is unresolved. Read-only
+  status must expose `recovery_required` without changing state.
+- ARCH-06 execution records without an ARCH-07 attempt binding may remain
+  readable, but must be labeled `legacy_unbound` and must not be upgraded to
+  attempt-bound operational evidence.
+- Enter the ARCH-08 recovery path only when an adapter declares both provider
+  transport idempotency and result reconciliation and exposes the reconciliation
+  method. A local key digest or submitted request is not a provider receipt.
+- Persist each transport call as prepared, submitted, and completed CAS states.
+  Require an exact provider acknowledgement of the Program/Attempt/ordinal-bound
+  idempotency key before treating a call as completed.
+- Recovery must be an explicit digest-bound authority action. Reconcile all
+  uncertain calls before resuming, replay completed results without new
+  inference, cap reconciliation queries, and fail closed on any mismatch.
+- Keep provider identity unauthenticated and exactly-once execution unproven
+  unless a separate external authenticity mechanism establishes them.
+- For ARCH-09 process recovery, bind the durable provider-instance digest and
+  local process protocol into the pre-registered Program. Confirm provider
+  commit before terminating the submitting client, recover only from a fresh
+  client process with explicit authority, and require one logical provider
+  execution per scheduled idempotency key. A local subprocess remains
+  mechanism evidence, not an authenticated external provider.
+- For ARCH-10, keep provider-store HMAC key material outside SQLite and bind the
+  key ID, generation, authentication schema, lease schema, and protocol into the
+  Program. Authenticate result, reconciliation, instance, and lease rows. A
+  live lease must be heartbeat-renewed and fenced by owner, generation, and
+  token. Permit expired orphan adoption only with an exact digest-bound
+  authority; never infer authority from timeout alone. Key-file custody and
+  external provider/operator identity remain unverified.
+- For ARCH-11, bind the complete Ed25519 root trust anchor into the Program and
+  provider-store identity before execution. Require a root-signed operator
+  certificate and an unexpired operator-signed grant that exactly binds the
+  Program, Attempt, provider instance, transport authority, intervention,
+  lease, owner, and per-run supervisor public key. Append signed authority,
+  lease, heartbeat, observed-return, and release events to the parent Program;
+  reject grant replay and any broken event chain. Keep all private keys outside
+  SQLite and Evidence artifacts. A valid local certificate does not verify a
+  real human, OS process, remote provider, trusted clock, or hardware custody.
 
 ## Sovereign Governance Rules
 

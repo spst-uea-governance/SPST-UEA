@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from spst_runtime.interfaces.model_adapter import ModelAdapter
+from spst_runtime.model_input_binding import bind_model_input, binding_evidence
 
 
 @dataclass
@@ -11,7 +12,9 @@ class LocalCodexAdapter(ModelAdapter):
     name: str = "codex-mediated-local"
 
     async def infer(self, prompt: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
-        context_summary = self._summarize_context(context or {})
+        resolved_context = context or {}
+        binding = bind_model_input(prompt, resolved_context)
+        context_summary = self._summarize_context(resolved_context)
         return {
             "provider": self.name,
             "available": True,
@@ -21,8 +24,13 @@ class LocalCodexAdapter(ModelAdapter):
                 "calling OpenAI API."
             ),
             "prompt": prompt,
-            "context": context or {},
+            "context": resolved_context,
             "context_summary": context_summary,
+            "model_input_binding": binding_evidence(
+                binding,
+                delivery_status="recorded_not_executed",
+            ),
+            "inference_scope": "scaffold_only",
             "requires_api_key": False,
         }
 
