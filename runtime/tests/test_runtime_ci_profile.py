@@ -58,3 +58,20 @@ def test_runtime_ci_collects_subprocess_coverage_without_lowering_floor():
     assert run_config["parallel"] is True
     assert run_config["patch"] == ["subprocess"]
     assert report_config["fail_under"] == 80
+
+
+def test_runtime_ci_direct_verification_toolchain_is_exactly_pinned():
+    config = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    dev_dependencies = config["project"]["optional-dependencies"]["dev"]
+
+    assert dev_dependencies == [
+        "pytest==9.0.3",
+        "pytest-asyncio==1.3.0",
+        "coverage[toml]==7.13.5",
+        "ruff==0.15.13",
+        "mypy==1.20.1",
+    ]
+
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert 'python -m pip install -e "./runtime[dev]"' in workflow
+    assert "python -m pip check" in workflow
