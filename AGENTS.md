@@ -202,6 +202,15 @@ Run commands from `runtime/` unless noted otherwise:
   token. Permit expired orphan adoption only with an exact digest-bound
   authority; never infer authority from timeout alone. Key-file custody and
   external provider/operator identity remain unverified.
+- For ARCH-11, bind the complete Ed25519 root trust anchor into the Program and
+  provider-store identity before execution. Require a root-signed operator
+  certificate and an unexpired operator-signed grant that exactly binds the
+  Program, Attempt, provider instance, transport authority, intervention,
+  lease, owner, and per-run supervisor public key. Append signed authority,
+  lease, heartbeat, observed-return, and release events to the parent Program;
+  reject grant replay and any broken event chain. Keep all private keys outside
+  SQLite and Evidence artifacts. A valid local certificate does not verify a
+  real human, OS process, remote provider, trusted clock, or hardware custody.
 
 ## Sovereign Governance Rules
 

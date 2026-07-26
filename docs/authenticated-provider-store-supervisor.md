@@ -106,3 +106,8 @@ provider organization, a human operator, the operating-system account, or key
 custody. An actor able to rewrite both the database and key file can establish a
 new local trust root. The process experiment does not prove remote-provider
 exactly-once behavior, GPT quality improvement, or production availability.
+
+ARCH-11 adds an optional Program-bound public-key authority and signed
+supervisor lifecycle above this HMAC/lease layer. It does not retroactively
+upgrade ARCH-10 records. See
+`docs/recovery-authority-pki-supervisor-attestation.md`.

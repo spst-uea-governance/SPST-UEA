@@ -144,22 +144,27 @@ def test_every_fixed_profile_owns_an_execution_root(
     assert contract["execution_root"] == execution_root
 
 
-def test_pytest_profile_v4_preserves_frozen_v2_and_v3_contracts():
+def test_pytest_profile_v5_preserves_frozen_v2_through_v4_contracts():
     version_two = profile_contract_for("pytest", contract_version=2)
     version_three = profile_contract_for("pytest", contract_version=3)
+    version_four = profile_contract_for("pytest", contract_version=4)
     current = profile_contract_for("pytest")
 
     assert version_two is not None
     assert version_three is not None
+    assert version_four is not None
     assert current is not None
     assert version_two["version"] == 2
     assert version_two["timeout_seconds"] == 120
     assert version_three["version"] == 3
     assert version_three["timeout_seconds"] == 300
-    assert current["version"] == 4
-    assert current["timeout_seconds"] == 300
+    assert version_four["version"] == 4
+    assert version_four["timeout_seconds"] == 300
+    assert current["version"] == 5
+    assert current["timeout_seconds"] == 600
     assert current["command"] == version_two["command"]
     assert current["command"] == version_three["command"]
+    assert current["command"] == version_four["command"]
     assert current["execution_root"] == version_two["execution_root"]
 
 

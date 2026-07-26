@@ -20,6 +20,7 @@ from spst_runtime.live_pairing import (
     validate_live_pair_plan,
 )
 from spst_runtime.persistence.sqlite_repository import SQLiteRepository
+from spst_runtime.process_transport import build_recovery_lease_resource_id
 from spst_runtime.provider_observation import PROVIDER_OBSERVATION_SOURCES
 from spst_runtime.provider_transport import (
     IdempotentTransportAdapter,
@@ -29,6 +30,14 @@ from spst_runtime.provider_transport import (
     ProviderTransportLedger,
     ProviderTransportOutcomeUnknown,
     ProviderTransportRecoveryRequired,
+)
+from spst_runtime.recovery_authority import (
+    RECOVERY_AUTHORITY_GRANT_SCHEMA,
+    RECOVERY_AUTHORITY_TRUST_SCHEMA,
+    SUPERVISOR_ATTESTATION_SCHEMA,
+    SupervisorAttestationLedger,
+    validate_recovery_authority_trust_anchor,
+    verify_recovery_authority_grant,
 )
 from spst_runtime.real_paired_outcome_attempt import (
     ACTIVE_ATTEMPT_STATES,
@@ -250,6 +259,21 @@ class RealPairedOutcomeProgram:
                 "recovery_lease_schema": provider.get("recovery_lease_schema"),
                 "recovery_supervisor_authority_schema": provider.get(
                     "recovery_supervisor_authority_schema"
+                ),
+                "signed_recovery_authority_supported": provider.get(
+                    "signed_recovery_authority_supported", False
+                ),
+                "recovery_authority_grant_schema": provider.get(
+                    "recovery_authority_grant_schema"
+                ),
+                "recovery_authority_trust_schema": provider.get(
+                    "recovery_authority_trust_schema"
+                ),
+                "recovery_authority_trust_anchor_sha256": provider.get(
+                    "recovery_authority_trust_anchor_sha256"
+                ),
+                "supervisor_attestation_schema": provider.get(
+                    "supervisor_attestation_schema"
                 ),
             },
             "evaluation_contract": evaluation_contract,
@@ -479,12 +503,42 @@ class RealPairedOutcomeProgram:
             transport_ledger=transport_ledger,
         )
 
+    def attest_supervisor(
+        self,
+        program_id: str,
+        authority_grant: dict[str, Any],
+        supervisor_private_key_file: str,
+        *,
+        event: str,
+        details: dict[str, Any],
+    ) -> dict[str, Any]:
+        registration = self._registration(program_id)
+        registration_reason = self._registration_reason(registration, program_id)
+        if registration_reason or registration is None:
+            raise ValueError(
+                registration_reason or "real_paired_outcome_program_not_found"
+            )
+        if registration["provider"].get(
+            "signed_recovery_authority_supported"
+        ) is not True:
+            raise ValueError("signed_recovery_authority_not_registered")
+        return SupervisorAttestationLedger(
+            self.repository,
+            registration,
+        ).append(
+            authority_grant,
+            supervisor_private_key_file,
+            event=event,
+            details=details,
+        )
+
     def recover(
         self,
         program_id: str,
         *,
         context_intervention: dict[str, Any],
         recovery_authority: dict[str, Any],
+        supervisor_authority: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Explicitly reconcile provider transport before resuming an interrupted run."""
 
@@ -542,6 +596,45 @@ class RealPairedOutcomeProgram:
         authority_reason = self._execution_authority_reason(registration, adapter)
         if authority_reason:
             return self._blocked(authority_reason)
+
+        signed_authority = registration["provider"].get(
+            "signed_recovery_authority_supported"
+        ) is True
+        if signed_authority:
+            resource_id = build_recovery_lease_resource_id(
+                program_id=program_id,
+                attempt_id=str(attempt["attempt_id"]),
+                provider_instance_sha256=str(
+                    registration["provider"]["transport_instance_sha256"]
+                ),
+            )
+            _, signed_reason = verify_recovery_authority_grant(
+                supervisor_authority,
+                self._mapping(
+                    registration["provider"].get(
+                        "recovery_authority_trust_anchor"
+                    )
+                ),
+                expected={
+                    "program_id": program_id,
+                    "program_sha256": registration["program_sha256"],
+                    "attempt_id": attempt["attempt_id"],
+                    "provider_instance_sha256": registration["provider"][
+                        "transport_instance_sha256"
+                    ],
+                    "lease_resource_id": resource_id,
+                    "transport_recovery_authority_sha256": recovery_authority.get(
+                        "authority_sha256"
+                    ),
+                    "context_intervention_sha256": context_intervention.get(
+                        "intervention_sha256"
+                    ),
+                },
+            )
+            if signed_reason:
+                return self._blocked(signed_reason)
+        elif supervisor_authority is not None:
+            return self._blocked("signed_recovery_authority_not_registered")
 
         ledger = ProviderTransportLedger(self.repository, registration, attempt)
         expected_calls = int(registration["expected_adapter_invocations"])
@@ -855,9 +948,29 @@ class RealPairedOutcomeProgram:
             and registration["provider"].get("transport_idempotency_supported") is True
             else None
         )
+        attestation_summary = (
+            SupervisorAttestationLedger(self.repository, registration).summary()
+            if registration["provider"].get(
+                "signed_recovery_authority_supported"
+            )
+            is True
+            else None
+        )
+        attestation_reason = (
+            str(attestation_summary.get("reason"))
+            if isinstance(attestation_summary, dict)
+            and attestation_summary.get("integrity_verified") is not True
+            else None
+        )
         execution = self._execution(program_id)
         execution_reason = self._execution_reason(execution, registration, attempt)
-        if current_reason or attempt_reason or transport_reason or execution_reason:
+        if (
+            current_reason
+            or attempt_reason
+            or transport_reason
+            or attestation_reason
+            or execution_reason
+        ):
             return self._projection(
                 registration,
                 execution,
@@ -868,6 +981,7 @@ class RealPairedOutcomeProgram:
                     current_reason
                     or attempt_reason
                     or transport_reason
+                    or attestation_reason
                     or execution_reason
                 ),
                 provenance=provenance,
@@ -1152,6 +1266,23 @@ class RealPairedOutcomeProgram:
                     "authority_schema": registration["provider"].get(
                         "recovery_supervisor_authority_schema"
                     ),
+                    "signed_authority_supported": registration["provider"].get(
+                        "signed_recovery_authority_supported", False
+                    ),
+                    "trust_anchor_sha256": registration["provider"].get(
+                        "recovery_authority_trust_anchor_sha256"
+                    ),
+                    "attestation": (
+                        SupervisorAttestationLedger(
+                            self.repository,
+                            registration,
+                        ).summary()
+                        if registration["provider"].get(
+                            "signed_recovery_authority_supported"
+                        )
+                        is True
+                        else None
+                    ),
                     "operator_identity_verified": False,
                 },
             },
@@ -1333,6 +1464,12 @@ class RealPairedOutcomeProgram:
                 "leased_recovery_supervisor_supported",
                 "recovery_lease_schema",
                 "recovery_supervisor_authority_schema",
+                "signed_recovery_authority_supported",
+                "recovery_authority_grant_schema",
+                "recovery_authority_trust_schema",
+                "recovery_authority_trust_anchor",
+                "recovery_authority_trust_anchor_sha256",
+                "supervisor_attestation_schema",
             )
         )
         if process_fields_present:
@@ -1348,6 +1485,17 @@ class RealPairedOutcomeProgram:
             authenticated_process = any(
                 field in provider for field in authentication_fields
             )
+            signed_authority_fields = (
+                "signed_recovery_authority_supported",
+                "recovery_authority_grant_schema",
+                "recovery_authority_trust_schema",
+                "recovery_authority_trust_anchor",
+                "recovery_authority_trust_anchor_sha256",
+                "supervisor_attestation_schema",
+            )
+            signed_process = any(
+                field in provider for field in signed_authority_fields
+            ) and provider.get("signed_recovery_authority_supported") is True
             if local_process:
                 if (
                     provider.get("process_isolated_recovery_supported") is not True
@@ -1358,9 +1506,14 @@ class RealPairedOutcomeProgram:
                 ):
                     return "process_transport_capability_binding_invalid"
                 if authenticated_process:
+                    expected_protocol = (
+                        "subprocess-stdio-sqlite-hmac-lease-pki-v3"
+                        if signed_process
+                        else "subprocess-stdio-sqlite-hmac-lease-v2"
+                    )
                     if (
                         provider.get("process_transport_protocol")
-                        != "subprocess-stdio-sqlite-hmac-lease-v2"
+                        != expected_protocol
                         or provider.get("provider_store_authenticated") is not True
                         or provider.get("provider_store_authentication_schema")
                         != "spst-process-provider-store-authentication-v1"
@@ -1375,6 +1528,33 @@ class RealPairedOutcomeProgram:
                         != "spst-process-recovery-supervisor-authority-v1"
                     ):
                         return "process_transport_capability_binding_invalid"
+                    if signed_process:
+                        trust_anchor = provider.get(
+                            "recovery_authority_trust_anchor"
+                        )
+                        if (
+                            validate_recovery_authority_trust_anchor(
+                                trust_anchor
+                            )
+                            is not None
+                            or provider.get("recovery_authority_grant_schema")
+                            != RECOVERY_AUTHORITY_GRANT_SCHEMA
+                            or provider.get("recovery_authority_trust_schema")
+                            != RECOVERY_AUTHORITY_TRUST_SCHEMA
+                            or provider.get("recovery_authority_trust_anchor_sha256")
+                            != self._mapping(trust_anchor).get(
+                                "trust_anchor_sha256"
+                            )
+                            or provider.get("supervisor_attestation_schema")
+                            != SUPERVISOR_ATTESTATION_SCHEMA
+                        ):
+                            return "process_recovery_authority_capability_invalid"
+                    elif any(
+                        provider.get(field) is not None
+                        for field in signed_authority_fields
+                        if field != "signed_recovery_authority_supported"
+                    ):
+                        return "process_recovery_authority_scope_invalid"
                 elif (
                     provider.get("process_transport_protocol")
                     != "subprocess-stdio-sqlite-v1"
@@ -1390,6 +1570,12 @@ class RealPairedOutcomeProgram:
                 or provider.get("leased_recovery_supervisor_supported") is not False
                 or provider.get("recovery_lease_schema") is not None
                 or provider.get("recovery_supervisor_authority_schema") is not None
+                or provider.get("signed_recovery_authority_supported") is not False
+                or provider.get("recovery_authority_grant_schema") is not None
+                or provider.get("recovery_authority_trust_schema") is not None
+                or provider.get("recovery_authority_trust_anchor") is not None
+                or provider.get("recovery_authority_trust_anchor_sha256") is not None
+                or provider.get("supervisor_attestation_schema") is not None
             ):
                 return "process_transport_capability_scope_invalid"
             if (
@@ -1406,6 +1592,12 @@ class RealPairedOutcomeProgram:
                 for field in authentication_fields
             ):
                 return "process_transport_program_binding_mismatch"
+            if signed_process and any(
+                hardening.get(field) != provider.get(field)
+                for field in signed_authority_fields
+                if field != "recovery_authority_trust_anchor"
+            ):
+                return "process_recovery_authority_program_binding_mismatch"
         return None
 
     def _execution_reason(
@@ -1655,9 +1847,30 @@ class RealPairedOutcomeProgram:
         recovery_supervisor_authority_schema = capabilities.get(
             "recovery_supervisor_authority_schema"
         )
+        signed_recovery_authority = (
+            capabilities.get("supports_signed_recovery_authority") is True
+        )
+        recovery_authority_grant_schema = capabilities.get(
+            "recovery_authority_grant_schema"
+        )
+        recovery_authority_trust_schema = capabilities.get(
+            "recovery_authority_trust_schema"
+        )
+        recovery_authority_trust_anchor = capabilities.get(
+            "recovery_authority_trust_anchor"
+        )
+        recovery_authority_trust_anchor_sha256 = capabilities.get(
+            "recovery_authority_trust_anchor_sha256"
+        )
+        supervisor_attestation_schema = capabilities.get(
+            "supervisor_attestation_schema"
+        )
         health_transport_instance = health.get("provider_instance_sha256")
         health_authentication_key_id = health.get(
             "provider_store_authentication_key_id"
+        )
+        health_recovery_authority_trust_sha256 = health.get(
+            "recovery_authority_trust_anchor_sha256"
         )
         provider_name = health.get("provider") or health.get("active_provider")
         model_version = health.get("model_version") or health.get("model")
@@ -1674,11 +1887,16 @@ class RealPairedOutcomeProgram:
         ):
             return None, "provider_transport_reconciliation_method_required"
         if execution_environment == "local_process":
+            expected_process_protocol = (
+                "subprocess-stdio-sqlite-hmac-lease-pki-v3"
+                if signed_recovery_authority
+                else "subprocess-stdio-sqlite-hmac-lease-v2"
+            )
             if (
                 not transport_idempotency
                 or not process_isolated_recovery
                 or process_transport_protocol
-                != "subprocess-stdio-sqlite-hmac-lease-v2"
+                != expected_process_protocol
                 or not self._valid_sha256(transport_instance_sha256)
                 or health_transport_instance != transport_instance_sha256
                 or not authenticated_provider_store
@@ -1693,10 +1911,51 @@ class RealPairedOutcomeProgram:
                 != "spst-process-recovery-supervisor-authority-v1"
             ):
                 return None, "process_transport_capability_binding_invalid"
+            trust_reason = (
+                validate_recovery_authority_trust_anchor(
+                    recovery_authority_trust_anchor
+                )
+                if signed_recovery_authority
+                else None
+            )
+            if signed_recovery_authority:
+                if (
+                    trust_reason
+                    or recovery_authority_grant_schema
+                    != RECOVERY_AUTHORITY_GRANT_SCHEMA
+                    or recovery_authority_trust_schema
+                    != RECOVERY_AUTHORITY_TRUST_SCHEMA
+                    or not self._valid_sha256(
+                        recovery_authority_trust_anchor_sha256
+                    )
+                    or self._mapping(recovery_authority_trust_anchor).get(
+                        "trust_anchor_sha256"
+                    )
+                    != recovery_authority_trust_anchor_sha256
+                    or health_recovery_authority_trust_sha256
+                    != recovery_authority_trust_anchor_sha256
+                    or health.get("recovery_authority_trust_verified") is not True
+                    or supervisor_attestation_schema
+                    != SUPERVISOR_ATTESTATION_SCHEMA
+                ):
+                    return None, "process_recovery_authority_capability_invalid"
+            elif any(
+                value is not None
+                for value in (
+                    recovery_authority_grant_schema,
+                    recovery_authority_trust_schema,
+                    recovery_authority_trust_anchor,
+                    recovery_authority_trust_anchor_sha256,
+                    supervisor_attestation_schema,
+                    health_recovery_authority_trust_sha256,
+                )
+            ):
+                return None, "process_recovery_authority_scope_invalid"
         elif (
             process_isolated_recovery
             or authenticated_provider_store
             or leased_recovery_supervisor
+            or signed_recovery_authority
             or any(
             value is not None
             for value in (
@@ -1708,6 +1967,12 @@ class RealPairedOutcomeProgram:
                 health_authentication_key_id,
                 recovery_lease_schema,
                 recovery_supervisor_authority_schema,
+                recovery_authority_grant_schema,
+                recovery_authority_trust_schema,
+                recovery_authority_trust_anchor,
+                recovery_authority_trust_anchor_sha256,
+                supervisor_attestation_schema,
+                health_recovery_authority_trust_sha256,
             )
             )
         ):
@@ -1761,6 +2026,34 @@ class RealPairedOutcomeProgram:
                 "recovery_supervisor_authority_schema": (
                     str(recovery_supervisor_authority_schema)
                     if recovery_supervisor_authority_schema is not None
+                    else None
+                ),
+                "signed_recovery_authority_supported": (
+                    signed_recovery_authority
+                ),
+                "recovery_authority_grant_schema": (
+                    str(recovery_authority_grant_schema)
+                    if recovery_authority_grant_schema is not None
+                    else None
+                ),
+                "recovery_authority_trust_schema": (
+                    str(recovery_authority_trust_schema)
+                    if recovery_authority_trust_schema is not None
+                    else None
+                ),
+                "recovery_authority_trust_anchor": (
+                    deepcopy(recovery_authority_trust_anchor)
+                    if isinstance(recovery_authority_trust_anchor, dict)
+                    else None
+                ),
+                "recovery_authority_trust_anchor_sha256": (
+                    str(recovery_authority_trust_anchor_sha256)
+                    if recovery_authority_trust_anchor_sha256 is not None
+                    else None
+                ),
+                "supervisor_attestation_schema": (
+                    str(supervisor_attestation_schema)
+                    if supervisor_attestation_schema is not None
                     else None
                 ),
             },

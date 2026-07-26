@@ -202,3 +202,14 @@ with a heartbeat while the supervisor remains alive. Expired orphan adoption
 requires a separate exact authority. These fields authenticate local store rows
 against the supplied key file; provider, operator, and remote-service identity
 remain unverified. See `docs/authenticated-provider-store-supervisor.md`.
+
+## ARCH-11 signed recovery authority and Program attestation
+
+The v3 process profile pre-registers a public Ed25519 root trust anchor. A
+root-signed operator certificate must sign an exact recovery grant before the
+Program can reconcile transport state. The grant binds the Program, Attempt,
+provider instance, context intervention, existing transport authority, lease,
+expiry, and one supervisor attestation key. Signed supervisor lifecycle events
+are appended beneath the Program and independently revalidated in every status
+projection. Local certificate validity is not external human identity proof.
+See `docs/recovery-authority-pki-supervisor-attestation.md`.

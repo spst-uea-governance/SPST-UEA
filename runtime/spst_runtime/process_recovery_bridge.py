@@ -31,6 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--program-id", required=True)
     parser.add_argument("--intervention-file", required=True)
     parser.add_argument("--authority-file")
+    parser.add_argument("--authority-trust-file")
     parser.add_argument("--commit-marker")
     parser.add_argument("--response-delay-ms", type=int, default=0)
     parser.add_argument("--failure-mode", choices=("before_commit_exit",))
@@ -42,6 +43,11 @@ def main(argv: list[str] | None = None) -> int:
         adapter = ProcessIsolatedTransportAdapter(
             args.provider_db,
             provider_authentication_key_file=args.provider_key_file,
+            recovery_authority_trust_anchor=(
+                _json_file(args.authority_trust_file)
+                if args.authority_trust_file is not None
+                else None
+            ),
             first_response_delay_ms=args.response_delay_ms,
             first_commit_marker=args.commit_marker,
             first_failure_mode=args.failure_mode,

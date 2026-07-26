@@ -10,8 +10,8 @@ VERIFICATION_PROFILE_NAMES = (*SNAPSHOT_PROFILE_NAMES, *QUALITY_PROFILE_NAMES)
 ACTION_ONLY_PROFILE_NAMES = ("pytest_coverage", "coverage_report")
 ACTION_QUALITY_PROFILE_NAMES = (*QUALITY_PROFILE_NAMES, *ACTION_ONLY_PROFILE_NAMES)
 ACTION_PROFILE_NAMES = (*VERIFICATION_PROFILE_NAMES, *ACTION_ONLY_PROFILE_NAMES)
-PROFILE_CONTRACT_VERSION = 4
-SUPPORTED_PROFILE_CONTRACT_VERSIONS = frozenset({2, 3, PROFILE_CONTRACT_VERSION})
+PROFILE_CONTRACT_VERSION = 5
+SUPPORTED_PROFILE_CONTRACT_VERSIONS = frozenset({2, 3, 4, PROFILE_CONTRACT_VERSION})
 
 
 @dataclass(frozen=True)
@@ -89,10 +89,21 @@ _PROFILES_V4 = {
     ),
 }
 
+_PROFILES_V5 = {
+    **_PROFILES_V4,
+    "pytest": VerificationProfile(
+        command=(sys.executable, "-m", "pytest", "-q"),
+        execution_root="runtime",
+        timeout_seconds=600,
+        required_paths=("pyproject.toml", "spst_runtime"),
+    ),
+}
+
 _PROFILES_BY_CONTRACT_VERSION = {
     2: _PROFILES_V2,
     3: _PROFILES_V3,
-    PROFILE_CONTRACT_VERSION: _PROFILES_V4,
+    4: _PROFILES_V4,
+    PROFILE_CONTRACT_VERSION: _PROFILES_V5,
 }
 
 

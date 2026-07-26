@@ -10,7 +10,8 @@ license={text="Apache-2.0"}
 requires-python=">=3.11"
 dependencies=[
   "pydantic>=2",
-  "fastapi>=0.115"
+  "fastapi>=0.115",
+  "cryptography>=43"
 ]
 
 [project.optional-dependencies]

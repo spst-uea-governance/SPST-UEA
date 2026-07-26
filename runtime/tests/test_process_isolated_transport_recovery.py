@@ -26,7 +26,16 @@ from spst_runtime.process_transport import (
     DurableProcessProviderStore,
     ProcessIsolatedTransportAdapter,
     ProcessTransportError,
+    build_recovery_lease_resource_id,
     build_recovery_supervisor_authority,
+)
+from spst_runtime.recovery_authority import (
+    RecoveryAuthorityError,
+    SupervisorAttestationLedger,
+    generate_recovery_authority_pki,
+    generate_supervisor_attestation_key,
+    issue_recovery_authority_grant,
+    verify_recovery_authority_grant,
 )
 from spst_runtime.provider_observation import build_provider_request_binding
 from spst_runtime.provider_transport import (
@@ -120,6 +129,8 @@ def _task(task_id: str) -> dict[str, Any]:
 
 def _fixture(
     tmp_path: Path,
+    *,
+    recovery_authority_trust_anchor: dict[str, Any] | None = None,
 ) -> tuple[
     SQLiteRepository,
     RealPairedOutcomeProgram,
@@ -136,7 +147,10 @@ def _fixture(
     for task_id in task_ids:
         assert corpus.register(_task(task_id))["status"] == "registered"
     intervention = _intervention()
-    adapter = ProcessIsolatedTransportAdapter(provider_database)
+    adapter = ProcessIsolatedTransportAdapter(
+        provider_database,
+        recovery_authority_trust_anchor=recovery_authority_trust_anchor,
+    )
     program = RealPairedOutcomeProgram(
         repository,
         corpus,
@@ -181,6 +195,18 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
     )
 
 
+def _canonical_digest(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _bridge_arguments(
     command: str,
     *,
@@ -192,6 +218,7 @@ def _bridge_arguments(
     commit_marker: Path | None = None,
     response_delay_ms: int = 0,
     failure_mode: str | None = None,
+    authority_trust_file: Path | None = None,
 ) -> list[str]:
     arguments = [
         sys.executable,
@@ -209,6 +236,8 @@ def _bridge_arguments(
     ]
     if authority_file is not None:
         arguments.extend(["--authority-file", str(authority_file)])
+    if authority_trust_file is not None:
+        arguments.extend(["--authority-trust-file", str(authority_trust_file)])
     if commit_marker is not None:
         arguments.extend(["--commit-marker", str(commit_marker)])
     if response_delay_ms:
@@ -256,6 +285,7 @@ def _crash_after_provider_commit(
     program_id: str,
     intervention_file: Path,
     marker: Path,
+    authority_trust_file: Path | None = None,
 ) -> tuple[int, dict[str, Any]]:
     process = subprocess.Popen(
         _bridge_arguments(
@@ -266,6 +296,7 @@ def _crash_after_provider_commit(
             intervention_file=intervention_file,
             commit_marker=marker,
             response_delay_ms=3000,
+            authority_trust_file=authority_trust_file,
         ),
         cwd=RUNTIME_ROOT,
         stdout=subprocess.PIPE,
@@ -820,6 +851,12 @@ def test_arch09_program_remains_readable_as_legacy_unauthenticated_record(
         "leased_recovery_supervisor_supported",
         "recovery_lease_schema",
         "recovery_supervisor_authority_schema",
+        "signed_recovery_authority_supported",
+        "recovery_authority_grant_schema",
+        "recovery_authority_trust_schema",
+        "recovery_authority_trust_anchor",
+        "recovery_authority_trust_anchor_sha256",
+        "supervisor_attestation_schema",
     )
     for field in authentication_fields:
         legacy["provider"].pop(field, None)
@@ -861,6 +898,9 @@ def _supervisor_arguments(
     lease_marker: Path | None = None,
     post_lease_delay_ms: int = 0,
     adoption_authority_file: Path | None = None,
+    authority_trust_file: Path | None = None,
+    authority_grant_file: Path | None = None,
+    supervisor_signing_key_file: Path | None = None,
 ) -> list[str]:
     arguments = [
         sys.executable,
@@ -891,6 +931,14 @@ def _supervisor_arguments(
     if adoption_authority_file is not None:
         arguments.extend(
             ["--adoption-authority-file", str(adoption_authority_file)]
+        )
+    if authority_trust_file is not None:
+        arguments.extend(["--authority-trust-file", str(authority_trust_file)])
+    if authority_grant_file is not None:
+        arguments.extend(["--authority-grant-file", str(authority_grant_file)])
+    if supervisor_signing_key_file is not None:
+        arguments.extend(
+            ["--supervisor-signing-key-file", str(supervisor_signing_key_file)]
         )
     return arguments
 
@@ -1002,4 +1050,531 @@ def test_killed_supervisor_requires_expired_lease_adoption_without_duplicate_cal
     assert provider_status["total_infer_request_count"] == 32
     assert provider_status["orphan_adoption_count"] == 1
     assert provider_status["provider_store_authenticity_verified"] is True
+    assert repository.verify_provenance()["valid"] is True
+
+
+def _pki_material(tmp_path: Path) -> dict[str, Any]:
+    now_ms = time.time_ns() // 1_000_000
+    root_private = tmp_path / "authority-root.private.pem"
+    operator_private = tmp_path / "recovery-operator.private.pem"
+    trust, certificate = generate_recovery_authority_pki(
+        root_private,
+        operator_private,
+        operator_id="local-recovery-operator",
+        valid_from_ms=now_ms - 1000,
+        valid_until_ms=now_ms + 600_000,
+    )
+    trust_file = tmp_path / "authority-trust.json"
+    certificate_file = tmp_path / "operator-certificate.json"
+    _write_json(trust_file, trust)
+    _write_json(certificate_file, certificate)
+    return {
+        "root_private": root_private,
+        "operator_private": operator_private,
+        "trust": trust,
+        "trust_file": trust_file,
+        "certificate": certificate,
+        "certificate_file": certificate_file,
+    }
+
+
+def _signed_recovery_material(
+    tmp_path: Path,
+    *,
+    program: RealPairedOutcomeProgram,
+    registered: dict[str, Any],
+    intervention: dict[str, Any],
+    pki: dict[str, Any],
+    owner_id: str,
+    suffix: str,
+    previous_owner_id: str | None = None,
+    expired_generation: int | None = None,
+) -> dict[str, Any]:
+    status = program.get(str(registered["id"]))
+    assert status is not None
+    assert status["status"] == "recovery_required"
+    attempt_id = status["operational_hardening"]["attempt"]["attempt_id"]
+    recovery_authority = build_recovery_authority(
+        program_id=str(registered["id"]),
+        attempt_id=str(attempt_id),
+        operator_id="local-recovery-operator",
+    )
+    recovery_authority_file = tmp_path / f"transport-authority-{suffix}.json"
+    _write_json(recovery_authority_file, recovery_authority)
+    supervisor_private = tmp_path / f"supervisor-{suffix}.private.pem"
+    supervisor_public = generate_supervisor_attestation_key(supervisor_private)
+    resource_id = build_recovery_lease_resource_id(
+        program_id=str(registered["id"]),
+        attempt_id=str(attempt_id),
+        provider_instance_sha256=str(
+            registered["provider"]["transport_instance_sha256"]
+        ),
+    )
+    grant = issue_recovery_authority_grant(
+        pki["trust"],
+        pki["certificate"],
+        pki["operator_private"],
+        supervisor_public,
+        program_id=str(registered["id"]),
+        program_sha256=str(registered["program_sha256"]),
+        attempt_id=str(attempt_id),
+        provider_instance_sha256=str(
+            registered["provider"]["transport_instance_sha256"]
+        ),
+        lease_resource_id=resource_id,
+        lease_owner_id=owner_id,
+        transport_recovery_authority_sha256=str(
+            recovery_authority["authority_sha256"]
+        ),
+        context_intervention_sha256=str(intervention["intervention_sha256"]),
+        previous_owner_id=previous_owner_id,
+        expired_generation=expired_generation,
+    )
+    grant_file = tmp_path / f"recovery-grant-{suffix}.json"
+    _write_json(grant_file, grant)
+    return {
+        "attempt_id": attempt_id,
+        "resource_id": resource_id,
+        "recovery_authority": recovery_authority,
+        "recovery_authority_file": recovery_authority_file,
+        "supervisor_private": supervisor_private,
+        "supervisor_public": supervisor_public,
+        "grant": grant,
+        "grant_file": grant_file,
+    }
+
+
+def test_recovery_authority_pki_rejects_tamper_expiry_and_wrong_root(
+    tmp_path: Path,
+):
+    pki = _pki_material(tmp_path / "primary")
+    supervisor_private = tmp_path / "primary" / "supervisor.private.pem"
+    supervisor_public = generate_supervisor_attestation_key(supervisor_private)
+    now_ms = time.time_ns() // 1_000_000
+    grant = issue_recovery_authority_grant(
+        pki["trust"],
+        pki["certificate"],
+        pki["operator_private"],
+        supervisor_public,
+        program_id="RPOP-pki",
+        program_sha256="1" * 64,
+        attempt_id="RATT-pki",
+        provider_instance_sha256="2" * 64,
+        lease_resource_id="3" * 64,
+        lease_owner_id="supervisor-pki",
+        transport_recovery_authority_sha256="4" * 64,
+        context_intervention_sha256="5" * 64,
+        issued_at_ms=now_ms,
+        expires_at_ms=now_ms + 10_000,
+        nonce="pki-grant-nonce",
+    )
+    projection, reason = verify_recovery_authority_grant(
+        grant,
+        pki["trust"],
+        expected={"lease_owner_id": "supervisor-pki"},
+        verification_time_ms=now_ms + 1,
+    )
+    assert reason is None
+    assert projection is not None and projection["verified"] is True
+
+    tampered = json.loads(json.dumps(grant))
+    tampered["claims"]["lease_owner_id"] = "attacker"
+    tampered["claims_sha256"] = _canonical_digest(tampered["claims"])
+    tampered_unsigned = {
+        key: value for key, value in tampered.items() if key != "grant_sha256"
+    }
+    tampered["grant_sha256"] = _canonical_digest(tampered_unsigned)
+    assert verify_recovery_authority_grant(
+        tampered,
+        pki["trust"],
+        verification_time_ms=now_ms + 1,
+    )[1] == "signed_recovery_authority_signature_invalid"
+    assert verify_recovery_authority_grant(
+        grant,
+        pki["trust"],
+        verification_time_ms=now_ms + 10_001,
+    )[1] == "signed_recovery_authority_binding_invalid"
+
+    other = _pki_material(tmp_path / "other")
+    assert verify_recovery_authority_grant(
+        grant,
+        other["trust"],
+        verification_time_ms=now_ms + 1,
+    )[1] == "recovery_operator_certificate_signature_invalid"
+
+
+def test_signed_program_rejects_unsigned_recovery_and_store_trust_downgrade(
+    tmp_path: Path,
+):
+    pki = _pki_material(tmp_path)
+    repository, program, intervention, registered, database, provider_database = (
+        _fixture(
+            tmp_path,
+            recovery_authority_trust_anchor=pki["trust"],
+        )
+    )
+    intervention_file = tmp_path / "intervention.json"
+    _write_json(intervention_file, intervention)
+    _crash_after_provider_commit(
+        database=database,
+        provider_database=provider_database,
+        program_id=registered["id"],
+        intervention_file=intervention_file,
+        marker=tmp_path / "provider-committed.json",
+        authority_trust_file=pki["trust_file"],
+    )
+    material = _signed_recovery_material(
+        tmp_path,
+        program=program,
+        registered=registered,
+        intervention=intervention,
+        pki=pki,
+        owner_id="signed-supervisor",
+        suffix="unsigned-reject",
+    )
+    rejected = program.recover(
+        registered["id"],
+        context_intervention=intervention,
+        recovery_authority=material["recovery_authority"],
+    )
+    assert rejected["status"] == "blocked"
+    assert rejected["reason"] == "signed_recovery_authority_required"
+    provider_key_file = Path(f"{provider_database}.provider_key")
+    downgraded = DurableProcessProviderStore(
+        provider_database,
+        authentication_key_file=provider_key_file,
+    )
+    with pytest.raises(ProcessTransportError, match="trust_unavailable"):
+        downgraded.acquire_recovery_lease(
+            str(material["resource_id"]),
+            "signed-supervisor",
+            ttl_ms=1000,
+            adoption_authority=build_recovery_supervisor_authority(
+                resource_id=str(material["resource_id"]),
+                provider_instance_sha256=str(
+                    registered["provider"]["transport_instance_sha256"]
+                ),
+                previous_owner_id="previous",
+                expired_generation=1,
+                operator_id="legacy-operator",
+            ),
+        )
+    assert b"BEGIN PRIVATE KEY" not in database.read_bytes()
+    assert b"BEGIN PRIVATE KEY" not in provider_database.read_bytes()
+    assert repository.verify_provenance()["valid"] is True
+
+
+def test_signed_supervisor_lifecycle_is_program_bound_and_replay_fails(
+    tmp_path: Path,
+):
+    pki = _pki_material(tmp_path)
+    repository, program, intervention, registered, database, provider_database = (
+        _fixture(
+            tmp_path,
+            recovery_authority_trust_anchor=pki["trust"],
+        )
+    )
+    intervention_file = tmp_path / "intervention.json"
+    _write_json(intervention_file, intervention)
+    _crash_after_provider_commit(
+        database=database,
+        provider_database=provider_database,
+        program_id=registered["id"],
+        intervention_file=intervention_file,
+        marker=tmp_path / "provider-committed.json",
+        authority_trust_file=pki["trust_file"],
+    )
+    material = _signed_recovery_material(
+        tmp_path,
+        program=program,
+        registered=registered,
+        intervention=intervention,
+        pki=pki,
+        owner_id="signed-supervisor",
+        suffix="complete",
+    )
+    recovered = _run_bridge(
+        _supervisor_arguments(
+            database=database,
+            provider_database=provider_database,
+            provider_key_file=Path(f"{provider_database}.provider_key"),
+            program_id=registered["id"],
+            intervention_file=intervention_file,
+            recovery_authority_file=material["recovery_authority_file"],
+            owner_id="signed-supervisor",
+            ttl_ms=5000,
+            authority_trust_file=pki["trust_file"],
+            authority_grant_file=material["grant_file"],
+            supervisor_signing_key_file=material["supervisor_private"],
+        )
+    )
+    attestation = recovered["supervisor_attestation"]
+    assert attestation["status"] == "complete"
+    assert attestation["integrity_verified"] is True
+    assert attestation["lifecycle_complete"] is True
+    assert attestation["program_bound"] is True
+    assert attestation["operator_certificate_verified"] is True
+    assert attestation["operator_identity_external_verified"] is False
+    assert attestation["supervisor_attestation_key_verified"] is True
+    assert attestation["events"][:3] == [
+        "authority_accepted",
+        "lease_acquired",
+        "lease_renewed",
+    ]
+    assert attestation["events"][-3:] == [
+        "heartbeat_stopped",
+        "recovery_returned",
+        "lease_released",
+    ]
+    with pytest.raises(RecoveryAuthorityError, match="grant_replay"):
+        program.attest_supervisor(
+            registered["id"],
+            material["grant"],
+            str(material["supervisor_private"]),
+            event="authority_accepted",
+            details={"replayed": True},
+        )
+    provider_status = DurableProcessProviderStore(
+        provider_database,
+        authentication_key_file=Path(f"{provider_database}.provider_key"),
+        recovery_authority_trust_anchor=pki["trust"],
+        read_only=True,
+    ).status()
+    assert provider_status["total_execution_count"] == 32
+    assert provider_status["total_infer_request_count"] == 32
+    before_program = hashlib.sha256(database.read_bytes()).hexdigest()
+    before_provider = hashlib.sha256(provider_database.read_bytes()).hexdigest()
+    read_only_status = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "spst_runtime.process_recovery_supervisor",
+            "status",
+            "--database",
+            str(database),
+            "--program-id",
+            str(registered["id"]),
+            "--provider-db",
+            str(provider_database),
+            "--provider-key-file",
+            str(Path(f"{provider_database}.provider_key")),
+            "--authority-trust-file",
+            str(pki["trust_file"]),
+            "--resource-id",
+            str(material["resource_id"]),
+        ],
+        cwd=RUNTIME_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+        timeout=30,
+    )
+    assert read_only_status.returncode == 0, read_only_status.stderr
+    status_value = json.loads(read_only_status.stdout)
+    assert status_value["program"]["operational_hardening"][
+        "recovery_supervisor"
+    ]["attestation"]["lifecycle_complete"] is True
+    assert hashlib.sha256(database.read_bytes()).hexdigest() == before_program
+    assert hashlib.sha256(provider_database.read_bytes()).hexdigest() == before_provider
+    assert repository.verify_provenance()["valid"] is True
+
+
+def test_signed_attestation_detects_rewrite_accepted_by_local_provenance(
+    tmp_path: Path,
+):
+    pki = _pki_material(tmp_path)
+    repository, program, intervention, registered, database, provider_database = (
+        _fixture(
+            tmp_path,
+            recovery_authority_trust_anchor=pki["trust"],
+        )
+    )
+    intervention_file = tmp_path / "intervention.json"
+    _write_json(intervention_file, intervention)
+    _crash_after_provider_commit(
+        database=database,
+        provider_database=provider_database,
+        program_id=registered["id"],
+        intervention_file=intervention_file,
+        marker=tmp_path / "provider-committed.json",
+        authority_trust_file=pki["trust_file"],
+    )
+    material = _signed_recovery_material(
+        tmp_path,
+        program=program,
+        registered=registered,
+        intervention=intervention,
+        pki=pki,
+        owner_id="tamper-supervisor",
+        suffix="tamper",
+    )
+    _run_bridge(
+        _supervisor_arguments(
+            database=database,
+            provider_database=provider_database,
+            provider_key_file=Path(f"{provider_database}.provider_key"),
+            program_id=registered["id"],
+            intervention_file=intervention_file,
+            recovery_authority_file=material["recovery_authority_file"],
+            owner_id="tamper-supervisor",
+            ttl_ms=5000,
+            authority_trust_file=pki["trust_file"],
+            authority_grant_file=material["grant_file"],
+            supervisor_signing_key_file=material["supervisor_private"],
+        )
+    )
+    ledger = SupervisorAttestationLedger(
+        repository,
+        asyncio.run(repository.load(f"{PROGRAM_RECORD_PREFIX}{registered['id']}"))
+        or {},
+    )
+    records = asyncio.run(
+        repository.load_prefix(
+            f"runtime:real_paired_outcome:supervisor_attestation:{registered['id']}:"
+        )
+    )
+    first_key = sorted(records)[0]
+    tampered = json.loads(json.dumps(records[first_key]))
+    tampered["details"]["authority_grant_sha256"] = "0" * 64
+    tampered["details_sha256"] = _canonical_digest(tampered["details"])
+    unsigned = {
+        key: value
+        for key, value in tampered.items()
+        if key not in {"attestation_sha256", "supervisor_signature"}
+    }
+    tampered["attestation_sha256"] = _canonical_digest(unsigned)
+    asyncio.run(repository.save(first_key, tampered))
+    assert repository.verify_provenance()["valid"] is True
+    summary = ledger.summary()
+    assert summary["integrity_verified"] is False
+    assert summary["reason"] == "supervisor_attestation_signature_invalid"
+    blocked = program.get(registered["id"])
+    assert blocked is not None
+    assert blocked["status"] == "blocked"
+    assert blocked["reason"] == "supervisor_attestation_signature_invalid"
+
+
+def test_killed_signed_supervisor_requires_exact_pki_adoption_without_duplicate(
+    tmp_path: Path,
+):
+    pki = _pki_material(tmp_path)
+    repository, program, intervention, registered, database, provider_database = (
+        _fixture(
+            tmp_path,
+            recovery_authority_trust_anchor=pki["trust"],
+        )
+    )
+    provider_key_file = Path(f"{provider_database}.provider_key")
+    intervention_file = tmp_path / "intervention.json"
+    _write_json(intervention_file, intervention)
+    _crash_after_provider_commit(
+        database=database,
+        provider_database=provider_database,
+        program_id=registered["id"],
+        intervention_file=intervention_file,
+        marker=tmp_path / "provider-committed.json",
+        authority_trust_file=pki["trust_file"],
+    )
+    first = _signed_recovery_material(
+        tmp_path,
+        program=program,
+        registered=registered,
+        intervention=intervention,
+        pki=pki,
+        owner_id="signed-supervisor-one",
+        suffix="killed",
+    )
+    lease_marker = tmp_path / "signed-supervisor-lease.json"
+    first_supervisor = subprocess.Popen(
+        _supervisor_arguments(
+            database=database,
+            provider_database=provider_database,
+            provider_key_file=provider_key_file,
+            program_id=registered["id"],
+            intervention_file=intervention_file,
+            recovery_authority_file=first["recovery_authority_file"],
+            owner_id="signed-supervisor-one",
+            ttl_ms=800,
+            lease_marker=lease_marker,
+            post_lease_delay_ms=5000,
+            authority_trust_file=pki["trust_file"],
+            authority_grant_file=first["grant_file"],
+            supervisor_signing_key_file=first["supervisor_private"],
+        ),
+        cwd=RUNTIME_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    marker = _wait_for_marker(first_supervisor, lease_marker)
+    first_supervisor.kill()
+    first_supervisor.communicate(timeout=10)
+    assert first_supervisor.returncode != 0
+    time.sleep(0.9)
+    lease = marker["lease"]
+    wrong = _signed_recovery_material(
+        tmp_path,
+        program=program,
+        registered=registered,
+        intervention=intervention,
+        pki=pki,
+        owner_id="signed-supervisor-two",
+        suffix="wrong-adoption",
+        previous_owner_id="wrong-previous-owner",
+        expired_generation=int(lease["generation"]),
+    )
+    store = DurableProcessProviderStore(
+        provider_database,
+        authentication_key_file=provider_key_file,
+        recovery_authority_trust_anchor=pki["trust"],
+    )
+    with pytest.raises(ProcessTransportError, match="previous_owner_id_mismatch"):
+        store.acquire_recovery_lease(
+            str(first["resource_id"]),
+            "signed-supervisor-two",
+            ttl_ms=5000,
+            adoption_authority=wrong["grant"],
+        )
+    second = _signed_recovery_material(
+        tmp_path,
+        program=program,
+        registered=registered,
+        intervention=intervention,
+        pki=pki,
+        owner_id="signed-supervisor-two",
+        suffix="adopted",
+        previous_owner_id="signed-supervisor-one",
+        expired_generation=int(lease["generation"]),
+    )
+    recovered = _run_bridge(
+        _supervisor_arguments(
+            database=database,
+            provider_database=provider_database,
+            provider_key_file=provider_key_file,
+            program_id=registered["id"],
+            intervention_file=intervention_file,
+            recovery_authority_file=second["recovery_authority_file"],
+            owner_id="signed-supervisor-two",
+            ttl_ms=5000,
+            authority_trust_file=pki["trust_file"],
+            authority_grant_file=second["grant_file"],
+            supervisor_signing_key_file=second["supervisor_private"],
+        )
+    )
+    assert recovered["lease"]["adopted_orphan"] is True
+    attestation = recovered["supervisor_attestation"]
+    assert attestation["status"] == "complete"
+    assert attestation["event_count"] > attestation["session_event_count"]
+    assert attestation["lifecycle_complete"] is True
+    provider_status = DurableProcessProviderStore(
+        provider_database,
+        authentication_key_file=provider_key_file,
+        recovery_authority_trust_anchor=pki["trust"],
+        read_only=True,
+    ).status()
+    assert provider_status["total_execution_count"] == 32
+    assert provider_status["total_infer_request_count"] == 32
+    assert provider_status["orphan_adoption_count"] == 1
     assert repository.verify_provenance()["valid"] is True

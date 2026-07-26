@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import os
+from copy import deepcopy
 from pathlib import Path
 import secrets
 import sqlite3
@@ -22,6 +23,13 @@ from spst_runtime.provider_transport import (
     validate_provider_transport_request,
     verify_provider_transport_receipt,
 )
+from spst_runtime.recovery_authority import (
+    RECOVERY_AUTHORITY_GRANT_SCHEMA,
+    RECOVERY_AUTHORITY_TRUST_SCHEMA,
+    SUPERVISOR_ATTESTATION_SCHEMA,
+    validate_recovery_authority_trust_anchor,
+    verify_recovery_authority_grant,
+)
 
 
 PROCESS_PROVIDER_REQUEST_SCHEMA = "spst-process-provider-request-v1"
@@ -38,6 +46,7 @@ PROCESS_PROVIDER_NAME = "spst-local-process-provider"
 PROCESS_PROVIDER_MODEL_VERSION = "process-transport-v2"
 PROCESS_PROVIDER_OBSERVATION_SOURCE = "local_process_provider_echo"
 PROCESS_TRANSPORT_PROTOCOL = "subprocess-stdio-sqlite-hmac-lease-v2"
+SIGNED_PROCESS_TRANSPORT_PROTOCOL = "subprocess-stdio-sqlite-hmac-lease-pki-v3"
 MINIMUM_RECOVERY_LEASE_TTL_MS = 100
 MAXIMUM_RECOVERY_LEASE_TTL_MS = 600_000
 
@@ -54,6 +63,7 @@ class DurableProcessProviderStore:
         path: str | Path,
         *,
         authentication_key_file: str | Path | None = None,
+        recovery_authority_trust_anchor: dict[str, Any] | None = None,
         read_only: bool = False,
     ):
         self.path = Path(path).expanduser().resolve()
@@ -63,6 +73,25 @@ class DurableProcessProviderStore:
             else Path(f"{self.path}.provider_key")
         )
         self.read_only = read_only
+        trust_reason = (
+            validate_recovery_authority_trust_anchor(
+                recovery_authority_trust_anchor
+            )
+            if recovery_authority_trust_anchor is not None
+            else None
+        )
+        if trust_reason:
+            raise ProcessTransportError(trust_reason)
+        self.recovery_authority_trust_anchor = (
+            deepcopy(recovery_authority_trust_anchor)
+            if recovery_authority_trust_anchor is not None
+            else None
+        )
+        self.recovery_authority_trust_anchor_sha256 = (
+            str(recovery_authority_trust_anchor["trust_anchor_sha256"])
+            if recovery_authority_trust_anchor is not None
+            else None
+        )
         self._authentication_secret, self.authentication_key_source = (
             self._load_authentication_secret()
         )
@@ -73,6 +102,8 @@ class DurableProcessProviderStore:
         )
         if not read_only:
             self._initialize()
+        elif self.path.is_file():
+            self._verify_database_trust_configuration()
 
     def identity(self) -> str:
         value, reason = self._identity_status()
@@ -92,7 +123,8 @@ class DurableProcessProviderStore:
                         'provider_instance_sha256',
                         'authentication_key_id',
                         'authentication_key_generation',
-                        'provider_instance_authentication_tag'
+                        'provider_instance_authentication_tag',
+                        'recovery_authority_trust_anchor_sha256'
                     )
                     """
                 ).fetchall()
@@ -104,17 +136,30 @@ class DurableProcessProviderStore:
         except (TypeError, ValueError):
             generation = 0
         tag = str(rows.get("provider_instance_authentication_tag") or "")
+        stored_trust_anchor_sha256 = rows.get(
+            "recovery_authority_trust_anchor_sha256"
+        )
+        stored_trust_anchor_sha256 = (
+            str(stored_trust_anchor_sha256)
+            if stored_trust_anchor_sha256 is not None
+            else None
+        )
         if not self._authentication_secret:
             return None, "process_provider_authentication_key_unavailable"
         if (
             not _is_sha256(value)
             or key_id != self.authentication_key_id
             or generation < 1
+            or stored_trust_anchor_sha256
+            != self.recovery_authority_trust_anchor_sha256
             or not self._verify_authentication_tag(
                 self._instance_authentication_payload(
                     value,
                     key_id=key_id,
                     generation=generation,
+                    recovery_authority_trust_anchor_sha256=(
+                        stored_trust_anchor_sha256
+                    ),
                 ),
                 tag,
             )
@@ -448,6 +493,18 @@ class DurableProcessProviderStore:
                 else None
             ),
             "authentication_key_source": self.authentication_key_source,
+            "recovery_authority_trust_schema": (
+                RECOVERY_AUTHORITY_TRUST_SCHEMA
+                if self.recovery_authority_trust_anchor is not None
+                else None
+            ),
+            "recovery_authority_trust_anchor_sha256": (
+                self.recovery_authority_trust_anchor_sha256
+            ),
+            "recovery_authority_trust_verified": (
+                self.recovery_authority_trust_anchor is not None
+                and identity_reason is None
+            ),
             "provider_identity_authenticated": False,
             "exactly_once_execution_proven": False,
         }
@@ -552,6 +609,7 @@ class DurableProcessProviderStore:
             adoption_count = 0
             generation = 1
             adopted = False
+            expired_generation: int | None = None
             if row is not None:
                 lease, reason = self._validate_lease_row(row)
                 if reason or lease is None:
@@ -566,23 +624,49 @@ class DurableProcessProviderStore:
                     if now_ms < int(lease["expires_at_ms"]):
                         connection.rollback()
                         raise ProcessTransportError("process_recovery_lease_active")
-                    authority_valid, authority_reason = (
-                        verify_recovery_supervisor_authority(
-                            adoption_authority,
-                            resource_id=resource_id,
-                            provider_instance_sha256=self.identity(),
-                            previous_owner_id=previous_owner_id,
-                            expired_generation=int(lease["generation"]),
-                        )
-                    )
-                    if not authority_valid:
-                        connection.rollback()
-                        raise ProcessTransportError(
-                            authority_reason
-                            or "process_recovery_orphan_adoption_authority_required"
-                        )
+                    expired_generation = int(lease["generation"])
                     adoption_count += 1
                     adopted = True
+            if self.recovery_authority_trust_anchor_sha256 is not None:
+                if self.recovery_authority_trust_anchor is None:
+                    connection.rollback()
+                    raise ProcessTransportError(
+                        "process_recovery_authority_trust_unavailable"
+                    )
+                _, authority_reason = verify_recovery_authority_grant(
+                    adoption_authority,
+                    self.recovery_authority_trust_anchor,
+                    expected={
+                        "provider_instance_sha256": self.identity(),
+                        "lease_resource_id": resource_id,
+                        "lease_owner_id": owner_id,
+                        "previous_owner_id": (
+                            previous_owner_id if adopted else None
+                        ),
+                        "expired_generation": (
+                            expired_generation if adopted else None
+                        ),
+                    },
+                )
+                if authority_reason:
+                    connection.rollback()
+                    raise ProcessTransportError(authority_reason)
+            elif adopted:
+                authority_valid, authority_reason = (
+                    verify_recovery_supervisor_authority(
+                        adoption_authority,
+                        resource_id=resource_id,
+                        provider_instance_sha256=self.identity(),
+                        previous_owner_id=str(previous_owner_id),
+                        expired_generation=int(expired_generation or 0),
+                    )
+                )
+                if not authority_valid:
+                    connection.rollback()
+                    raise ProcessTransportError(
+                        authority_reason
+                        or "process_recovery_orphan_adoption_authority_required"
+                    )
             lease_token = secrets.token_hex(32)
             lease_token_sha256 = _sha256_text(lease_token)
             expires_at_ms = now_ms + ttl_ms
@@ -927,6 +1011,34 @@ class DurableProcessProviderStore:
                 )
                 """
             )
+            existing_trust_row = connection.execute(
+                """
+                SELECT value FROM provider_meta
+                WHERE key = 'recovery_authority_trust_anchor_sha256'
+                """
+            ).fetchone()
+            existing_trust_sha256 = (
+                str(existing_trust_row[0])
+                if existing_trust_row is not None
+                else None
+            )
+            if existing_trust_sha256 is not None:
+                if self.recovery_authority_trust_anchor_sha256 is None:
+                    self.recovery_authority_trust_anchor_sha256 = (
+                        existing_trust_sha256
+                    )
+                elif self.recovery_authority_trust_anchor_sha256 != existing_trust_sha256:
+                    raise ProcessTransportError(
+                        "process_recovery_authority_trust_mismatch"
+                    )
+            elif self.recovery_authority_trust_anchor_sha256 is not None:
+                connection.execute(
+                    """
+                    INSERT INTO provider_meta(key, value)
+                    VALUES('recovery_authority_trust_anchor_sha256', ?)
+                    """,
+                    (self.recovery_authority_trust_anchor_sha256,),
+                )
             self._ensure_column(
                 connection,
                 "provider_results",
@@ -994,6 +1106,9 @@ class DurableProcessProviderStore:
                         instance,
                         key_id=self.authentication_key_id,
                         generation=generation,
+                        recovery_authority_trust_anchor_sha256=(
+                            self.recovery_authority_trust_anchor_sha256
+                        ),
                     )
                 ),
             }
@@ -1150,6 +1265,9 @@ class DurableProcessProviderStore:
                         instance,
                         key_id=new_key_id,
                         generation=generation,
+                        recovery_authority_trust_anchor_sha256=(
+                            self.recovery_authority_trust_anchor_sha256
+                        ),
                     ),
                     secret=new_secret,
                 ),
@@ -1228,6 +1346,29 @@ class DurableProcessProviderStore:
         value = str(row[0]) if row is not None else ""
         return value if _is_sha256(value) else None
 
+    def _verify_database_trust_configuration(self) -> None:
+        try:
+            with sqlite3.connect(
+                f"{self.path.as_uri()}?mode=ro",
+                timeout=30,
+                uri=True,
+            ) as connection:
+                row = connection.execute(
+                    """
+                    SELECT value FROM provider_meta
+                    WHERE key = 'recovery_authority_trust_anchor_sha256'
+                    """
+                ).fetchone()
+        except sqlite3.DatabaseError:
+            return
+        stored = str(row[0]) if row is not None else None
+        if stored is not None and self.recovery_authority_trust_anchor_sha256 is None:
+            self.recovery_authority_trust_anchor_sha256 = stored
+        elif stored != self.recovery_authority_trust_anchor_sha256:
+            raise ProcessTransportError(
+                "process_recovery_authority_trust_mismatch"
+            )
+
     @staticmethod
     def _write_authentication_key(path: Path, secret: bytes) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1245,14 +1386,20 @@ class DurableProcessProviderStore:
         *,
         key_id: str,
         generation: int,
+        recovery_authority_trust_anchor_sha256: str | None = None,
     ) -> dict[str, Any]:
-        return {
+        payload = {
             "schema": PROCESS_PROVIDER_AUTHENTICATION_SCHEMA,
             "kind": "provider_instance",
             "provider_instance_sha256": provider_instance_sha256,
             "authentication_key_id": key_id,
             "authentication_key_generation": generation,
         }
+        if recovery_authority_trust_anchor_sha256 is not None:
+            payload["recovery_authority_trust_anchor_sha256"] = (
+                recovery_authority_trust_anchor_sha256
+            )
+        return payload
 
     @staticmethod
     def _result_authentication_payload(
@@ -1381,6 +1528,7 @@ class ProcessIsolatedTransportAdapter(ModelAdapter):
         provider_database: str | Path,
         *,
         provider_authentication_key_file: str | Path | None = None,
+        recovery_authority_trust_anchor: dict[str, Any] | None = None,
         first_response_delay_ms: int = 0,
         first_commit_marker: str | Path | None = None,
         first_failure_mode: str | None = None,
@@ -1396,6 +1544,11 @@ class ProcessIsolatedTransportAdapter(ModelAdapter):
             if provider_authentication_key_file is not None
             else Path(f"{self.provider_database}.provider_key")
         )
+        self.recovery_authority_trust_anchor = (
+            deepcopy(recovery_authority_trust_anchor)
+            if recovery_authority_trust_anchor is not None
+            else None
+        )
         self.first_response_delay_ms = first_response_delay_ms
         self.first_commit_marker = (
             Path(first_commit_marker).expanduser().resolve()
@@ -1408,6 +1561,9 @@ class ProcessIsolatedTransportAdapter(ModelAdapter):
         store = DurableProcessProviderStore(
             self.provider_database,
             authentication_key_file=self.provider_authentication_key_file,
+            recovery_authority_trust_anchor=(
+                self.recovery_authority_trust_anchor
+            ),
         )
         self.provider_instance_sha256 = store.identity()
         self.provider_authentication_key_id = store.authentication_key_id
@@ -1469,6 +1625,9 @@ class ProcessIsolatedTransportAdapter(ModelAdapter):
         status = DurableProcessProviderStore(
             self.provider_database,
             authentication_key_file=self.provider_authentication_key_file,
+            recovery_authority_trust_anchor=(
+                self.recovery_authority_trust_anchor
+            ),
             read_only=True,
         ).status()
         return {
@@ -1486,11 +1645,19 @@ class ProcessIsolatedTransportAdapter(ModelAdapter):
                 "provider_store_authenticity_verified"
             )
             is True,
+            "recovery_authority_trust_anchor_sha256": status.get(
+                "recovery_authority_trust_anchor_sha256"
+            ),
+            "recovery_authority_trust_verified": status.get(
+                "recovery_authority_trust_verified"
+            )
+            is True,
             "requires_api_key": False,
             "network_used": False,
         }
 
     def get_capabilities(self) -> dict[str, Any]:
+        signed_authority = self.recovery_authority_trust_anchor is not None
         return {
             "interface": "ModelAdapter",
             "supports_structured_evaluation": True,
@@ -1513,7 +1680,31 @@ class ProcessIsolatedTransportAdapter(ModelAdapter):
             "recovery_supervisor_authority_schema": (
                 PROCESS_RECOVERY_SUPERVISOR_AUTHORITY_SCHEMA
             ),
-            "process_transport_protocol": PROCESS_TRANSPORT_PROTOCOL,
+            "supports_signed_recovery_authority": signed_authority,
+            "recovery_authority_grant_schema": (
+                RECOVERY_AUTHORITY_GRANT_SCHEMA if signed_authority else None
+            ),
+            "recovery_authority_trust_schema": (
+                RECOVERY_AUTHORITY_TRUST_SCHEMA if signed_authority else None
+            ),
+            "recovery_authority_trust_anchor": (
+                deepcopy(self.recovery_authority_trust_anchor)
+                if signed_authority
+                else None
+            ),
+            "recovery_authority_trust_anchor_sha256": (
+                self.recovery_authority_trust_anchor.get("trust_anchor_sha256")
+                if self.recovery_authority_trust_anchor is not None
+                else None
+            ),
+            "supervisor_attestation_schema": (
+                SUPERVISOR_ATTESTATION_SCHEMA if signed_authority else None
+            ),
+            "process_transport_protocol": (
+                SIGNED_PROCESS_TRANSPORT_PROTOCOL
+                if signed_authority
+                else PROCESS_TRANSPORT_PROTOCOL
+            ),
             "transport_instance_sha256": self.provider_instance_sha256,
         }
 

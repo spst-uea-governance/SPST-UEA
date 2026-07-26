@@ -152,6 +152,15 @@ authority binding; stale tokens and unkeyed database rewrites are rejected. It
 still does not authenticate an external provider or prove remote exactly-once
 execution. See `docs/authenticated-provider-store-supervisor.md`.
 
+ARCH-11 adds a Program-bound Ed25519 recovery authority chain: a local root
+signs an operator certificate, the operator signs one exact recovery grant,
+and that grant authorizes a per-run supervisor attestation key. The supervisor
+appends signed authority, lease, heartbeat, recovery-return, and release events
+to the parent Program. Private keys remain outside both SQLite stores. This
+authenticates local key authority and event integrity, not a real human identity
+or remote provider. See
+`docs/recovery-authority-pki-supervisor-attestation.md`.
+
 ## Current Runtime Status
 
 The runtime can be executed locally from `runtime/`:

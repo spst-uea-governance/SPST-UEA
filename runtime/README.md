@@ -278,3 +278,15 @@ kill, a fresh supervisor needs both expiry and an exact orphan-adoption
 authority. Key rotation re-authenticates existing rows and invalidates the old
 key. This remains local mechanism validation. See
 `../docs/authenticated-provider-store-supervisor.md`.
+
+## ARCH-11 recovery authority PKI and supervisor attestation
+
+The optional v3 local-process profile binds an Ed25519 root trust anchor into
+the Program and provider-store identity. A root-signed operator certificate
+signs an exact Program/Attempt/provider/lease recovery grant, which in turn
+authorizes a separate supervisor event-signing key. Recovery appends a signed,
+hash-linked authority/lease/heartbeat/result/release lifecycle to the Program
+repository. `process_recovery_supervisor status` can project that lifecycle
+through a read-only Program and provider path. Local certificate verification
+does not establish real-world operator identity or hardware-backed key custody.
+See `../docs/recovery-authority-pki-supervisor-attestation.md`.
