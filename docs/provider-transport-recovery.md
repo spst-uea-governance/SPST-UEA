@@ -74,3 +74,9 @@ a separate provider process commits its result, then reconciles from a fresh
 client process. See `docs/process-isolated-transport-recovery.md`. It reduces
 the in-process simulation gap but does not change the external-provider claim
 boundary above.
+
+ARCH-10 additionally HMAC-authenticates the local provider store and serializes
+recovery ownership with heartbeat-renewed fencing leases. See
+`docs/authenticated-provider-store-supervisor.md`. This protects against a
+database-only rewrite and live recovery races, but not compromise of both the
+database and its external key file.

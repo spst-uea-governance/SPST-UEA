@@ -59,6 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("command", choices=("infer", "reconcile", "status"))
     parser.add_argument("--provider-db", required=True)
+    parser.add_argument("--provider-key-file", required=True)
     parser.add_argument("--expected-instance-sha256", required=True)
     parser.add_argument("--response-delay-ms", type=int, default=0)
     parser.add_argument("--commit-marker")
@@ -66,7 +67,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        store = DurableProcessProviderStore(args.provider_db)
+        store = DurableProcessProviderStore(
+            args.provider_db,
+            authentication_key_file=args.provider_key_file,
+        )
         instance = store.identity()
         if instance != args.expected_instance_sha256:
             raise ProcessTransportError("process_provider_instance_mismatch")

@@ -192,3 +192,13 @@ and completes recovery from a second client process without a duplicate first
 inference. This remains `mechanism_validation`; local process separation does
 not establish external provider identity, exactly-once execution, or quality
 uplift. See `docs/process-isolated-transport-recovery.md`.
+
+## ARCH-10 authenticated store and leased supervisor
+
+For the local process profile, ARCH-10 pre-registers the provider-store HMAC key
+ID, authentication schema, protocol v2, recovery-lease schema, and supervisor
+authority schema. Recovery ownership is fenced by owner, generation, and token,
+with a heartbeat while the supervisor remains alive. Expired orphan adoption
+requires a separate exact authority. These fields authenticate local store rows
+against the supplied key file; provider, operator, and remote-service identity
+remain unverified. See `docs/authenticated-provider-store-supervisor.md`.

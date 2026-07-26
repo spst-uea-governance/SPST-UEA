@@ -145,6 +145,13 @@ a fresh client reconciles and resumes without a duplicate logical inference.
 The provider instance is Program-bound, but it remains locally simulated and
 unauthenticated. See `docs/process-isolated-transport-recovery.md`.
 
+ARCH-10 HMAC-authenticates the local provider-store rows with key material held
+outside SQLite and fences recovery through a durable, heartbeat-renewed lease.
+A killed supervisor may be adopted only after lease expiry and an exact
+authority binding; stale tokens and unkeyed database rewrites are rejected. It
+still does not authenticate an external provider or prove remote exactly-once
+execution. See `docs/authenticated-provider-store-supervisor.md`.
+
 ## Current Runtime Status
 
 The runtime can be executed locally from `runtime/`:

@@ -195,6 +195,13 @@ Run commands from `runtime/` unless noted otherwise:
   client process with explicit authority, and require one logical provider
   execution per scheduled idempotency key. A local subprocess remains
   mechanism evidence, not an authenticated external provider.
+- For ARCH-10, keep provider-store HMAC key material outside SQLite and bind the
+  key ID, generation, authentication schema, lease schema, and protocol into the
+  Program. Authenticate result, reconciliation, instance, and lease rows. A
+  live lease must be heartbeat-renewed and fenced by owner, generation, and
+  token. Permit expired orphan adoption only with an exact digest-bound
+  authority; never infer authority from timeout alone. Key-file custody and
+  external provider/operator identity remain unverified.
 
 ## Sovereign Governance Rules
 

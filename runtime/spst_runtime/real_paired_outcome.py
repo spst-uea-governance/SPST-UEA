@@ -235,6 +235,22 @@ class RealPairedOutcomeProgram:
                 "transport_instance_sha256": provider.get(
                     "transport_instance_sha256"
                 ),
+                "provider_store_authenticated": provider.get(
+                    "provider_store_authenticated", False
+                ),
+                "provider_store_authentication_schema": provider.get(
+                    "provider_store_authentication_schema"
+                ),
+                "provider_store_authentication_key_id": provider.get(
+                    "provider_store_authentication_key_id"
+                ),
+                "leased_recovery_supervisor_supported": provider.get(
+                    "leased_recovery_supervisor_supported", False
+                ),
+                "recovery_lease_schema": provider.get("recovery_lease_schema"),
+                "recovery_supervisor_authority_schema": provider.get(
+                    "recovery_supervisor_authority_schema"
+                ),
             },
             "evaluation_contract": evaluation_contract,
             "claims": self._claim_boundary(),
@@ -1114,6 +1130,30 @@ class RealPairedOutcomeProgram:
                 "process_isolated_recovery_observed": (
                     process_isolated_recovery_observed
                 ),
+                "provider_store_authentication": {
+                    "supported": registration["provider"].get(
+                        "provider_store_authenticated", False
+                    ),
+                    "schema": registration["provider"].get(
+                        "provider_store_authentication_schema"
+                    ),
+                    "key_id": registration["provider"].get(
+                        "provider_store_authentication_key_id"
+                    ),
+                    "external_provider_identity_authenticated": False,
+                },
+                "recovery_supervisor": {
+                    "leased": registration["provider"].get(
+                        "leased_recovery_supervisor_supported", False
+                    ),
+                    "lease_schema": registration["provider"].get(
+                        "recovery_lease_schema"
+                    ),
+                    "authority_schema": registration["provider"].get(
+                        "recovery_supervisor_authority_schema"
+                    ),
+                    "operator_identity_verified": False,
+                },
             },
             "preregistration": {
                 "registered_before_adapter_invocations": (
@@ -1287,25 +1327,69 @@ class RealPairedOutcomeProgram:
                 "process_isolated_recovery_supported",
                 "process_transport_protocol",
                 "transport_instance_sha256",
+                "provider_store_authenticated",
+                "provider_store_authentication_schema",
+                "provider_store_authentication_key_id",
+                "leased_recovery_supervisor_supported",
+                "recovery_lease_schema",
+                "recovery_supervisor_authority_schema",
             )
         )
         if process_fields_present:
             local_process = provider.get("execution_environment") == "local_process"
+            authentication_fields = (
+                "provider_store_authenticated",
+                "provider_store_authentication_schema",
+                "provider_store_authentication_key_id",
+                "leased_recovery_supervisor_supported",
+                "recovery_lease_schema",
+                "recovery_supervisor_authority_schema",
+            )
+            authenticated_process = any(
+                field in provider for field in authentication_fields
+            )
             if local_process:
                 if (
                     provider.get("process_isolated_recovery_supported") is not True
-                    or provider.get("process_transport_protocol")
-                    != "subprocess-stdio-sqlite-v1"
                     or not self._valid_sha256(
                         provider.get("transport_instance_sha256")
                     )
                     or provider.get("transport_idempotency_supported") is not True
                 ):
                     return "process_transport_capability_binding_invalid"
+                if authenticated_process:
+                    if (
+                        provider.get("process_transport_protocol")
+                        != "subprocess-stdio-sqlite-hmac-lease-v2"
+                        or provider.get("provider_store_authenticated") is not True
+                        or provider.get("provider_store_authentication_schema")
+                        != "spst-process-provider-store-authentication-v1"
+                        or not self._valid_sha256(
+                            provider.get("provider_store_authentication_key_id")
+                        )
+                        or provider.get("leased_recovery_supervisor_supported")
+                        is not True
+                        or provider.get("recovery_lease_schema")
+                        != "spst-process-recovery-lease-v1"
+                        or provider.get("recovery_supervisor_authority_schema")
+                        != "spst-process-recovery-supervisor-authority-v1"
+                    ):
+                        return "process_transport_capability_binding_invalid"
+                elif (
+                    provider.get("process_transport_protocol")
+                    != "subprocess-stdio-sqlite-v1"
+                ):
+                    return "process_transport_capability_binding_invalid"
             elif (
                 provider.get("process_isolated_recovery_supported") is not False
                 or provider.get("process_transport_protocol") is not None
                 or provider.get("transport_instance_sha256") is not None
+                or provider.get("provider_store_authenticated") is not False
+                or provider.get("provider_store_authentication_schema") is not None
+                or provider.get("provider_store_authentication_key_id") is not None
+                or provider.get("leased_recovery_supervisor_supported") is not False
+                or provider.get("recovery_lease_schema") is not None
+                or provider.get("recovery_supervisor_authority_schema") is not None
             ):
                 return "process_transport_capability_scope_invalid"
             if (
@@ -1315,6 +1399,11 @@ class RealPairedOutcomeProgram:
                 != provider.get("process_transport_protocol")
                 or hardening.get("transport_instance_sha256")
                 != provider.get("transport_instance_sha256")
+            ):
+                return "process_transport_program_binding_mismatch"
+            if authenticated_process and any(
+                hardening.get(field) != provider.get(field)
+                for field in authentication_fields
             ):
                 return "process_transport_program_binding_mismatch"
         return None
@@ -1550,7 +1639,26 @@ class RealPairedOutcomeProgram:
         )
         process_transport_protocol = capabilities.get("process_transport_protocol")
         transport_instance_sha256 = capabilities.get("transport_instance_sha256")
+        authenticated_provider_store = (
+            capabilities.get("supports_authenticated_provider_store") is True
+        )
+        provider_store_authentication_schema = capabilities.get(
+            "provider_store_authentication_schema"
+        )
+        provider_store_authentication_key_id = capabilities.get(
+            "provider_store_authentication_key_id"
+        )
+        leased_recovery_supervisor = (
+            capabilities.get("supports_leased_recovery_supervisor") is True
+        )
+        recovery_lease_schema = capabilities.get("recovery_lease_schema")
+        recovery_supervisor_authority_schema = capabilities.get(
+            "recovery_supervisor_authority_schema"
+        )
         health_transport_instance = health.get("provider_instance_sha256")
+        health_authentication_key_id = health.get(
+            "provider_store_authentication_key_id"
+        )
         provider_name = health.get("provider") or health.get("active_provider")
         model_version = health.get("model_version") or health.get("model")
         if observation_source not in PROVIDER_OBSERVATION_SOURCES:
@@ -1569,17 +1677,38 @@ class RealPairedOutcomeProgram:
             if (
                 not transport_idempotency
                 or not process_isolated_recovery
-                or process_transport_protocol != "subprocess-stdio-sqlite-v1"
+                or process_transport_protocol
+                != "subprocess-stdio-sqlite-hmac-lease-v2"
                 or not self._valid_sha256(transport_instance_sha256)
                 or health_transport_instance != transport_instance_sha256
+                or not authenticated_provider_store
+                or provider_store_authentication_schema
+                != "spst-process-provider-store-authentication-v1"
+                or not self._valid_sha256(provider_store_authentication_key_id)
+                or health_authentication_key_id
+                != provider_store_authentication_key_id
+                or not leased_recovery_supervisor
+                or recovery_lease_schema != "spst-process-recovery-lease-v1"
+                or recovery_supervisor_authority_schema
+                != "spst-process-recovery-supervisor-authority-v1"
             ):
                 return None, "process_transport_capability_binding_invalid"
-        elif process_isolated_recovery or any(
+        elif (
+            process_isolated_recovery
+            or authenticated_provider_store
+            or leased_recovery_supervisor
+            or any(
             value is not None
             for value in (
                 process_transport_protocol,
                 transport_instance_sha256,
                 health_transport_instance,
+                provider_store_authentication_schema,
+                provider_store_authentication_key_id,
+                health_authentication_key_id,
+                recovery_lease_schema,
+                recovery_supervisor_authority_schema,
+            )
             )
         ):
             return None, "process_transport_capability_scope_invalid"
@@ -1608,6 +1737,30 @@ class RealPairedOutcomeProgram:
                 "transport_instance_sha256": (
                     str(transport_instance_sha256)
                     if transport_instance_sha256 is not None
+                    else None
+                ),
+                "provider_store_authenticated": authenticated_provider_store,
+                "provider_store_authentication_schema": (
+                    str(provider_store_authentication_schema)
+                    if provider_store_authentication_schema is not None
+                    else None
+                ),
+                "provider_store_authentication_key_id": (
+                    str(provider_store_authentication_key_id)
+                    if provider_store_authentication_key_id is not None
+                    else None
+                ),
+                "leased_recovery_supervisor_supported": (
+                    leased_recovery_supervisor
+                ),
+                "recovery_lease_schema": (
+                    str(recovery_lease_schema)
+                    if recovery_lease_schema is not None
+                    else None
+                ),
+                "recovery_supervisor_authority_schema": (
+                    str(recovery_supervisor_authority_schema)
+                    if recovery_supervisor_authority_schema is not None
                     else None
                 ),
             },

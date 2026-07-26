@@ -71,3 +71,8 @@ authenticate the simulated provider, prove that an external provider enforces
 exactly-once execution, or establish GPT quality improvement. The provider
 database uses local digests and a bound instance identifier, not an external
 trust anchor. This remains `mechanism_validation`, not real outcome evidence.
+
+ARCH-10 supersedes the unkeyed local-store boundary for new runs by adding an
+external HMAC key file and a heartbeat-renewed recovery lease. Existing untagged
+rows are not silently promoted. See
+`docs/authenticated-provider-store-supervisor.md`.

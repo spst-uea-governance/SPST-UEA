@@ -267,3 +267,14 @@ reconciliation, and no 33rd inference request. This validates local crash
 recovery mechanics only; it does not authenticate an external provider or
 prove exactly-once semantics. See
 `../docs/process-isolated-transport-recovery.md`.
+
+## ARCH-10 authenticated provider store and recovery supervisor
+
+The local process provider now HMAC-authenticates its instance, result,
+reconciliation, and recovery-lease rows with a key file outside SQLite. The
+Program binds the key ID and protocol schemas before execution. Recovery runs
+under a fenced lease whose heartbeat prevents live-owner takeover; after a hard
+kill, a fresh supervisor needs both expiry and an exact orphan-adoption
+authority. Key rotation re-authenticates existing rows and invalidates the old
+key. This remains local mechanism validation. See
+`../docs/authenticated-provider-store-supervisor.md`.

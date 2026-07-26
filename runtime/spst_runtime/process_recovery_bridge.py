@@ -27,6 +27,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("command", choices=("execute", "recover", "status"))
     parser.add_argument("--database", required=True)
     parser.add_argument("--provider-db", required=True)
+    parser.add_argument("--provider-key-file")
     parser.add_argument("--program-id", required=True)
     parser.add_argument("--intervention-file", required=True)
     parser.add_argument("--authority-file")
@@ -40,6 +41,7 @@ def main(argv: list[str] | None = None) -> int:
         corpus = OperationalEvaluationCorpus(repository)
         adapter = ProcessIsolatedTransportAdapter(
             args.provider_db,
+            provider_authentication_key_file=args.provider_key_file,
             first_response_delay_ms=args.response_delay_ms,
             first_commit_marker=args.commit_marker,
             first_failure_mode=args.failure_mode,

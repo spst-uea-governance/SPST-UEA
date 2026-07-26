@@ -9,6 +9,8 @@ import sys
 import time
 from typing import Any
 
+import pytest
+
 from spst_runtime.context_review import (
     CONTEXT_AUTHORITY,
     CONTEXT_INSTRUCTION_BOUNDARY,
@@ -23,6 +25,8 @@ from spst_runtime.process_transport import (
     PROCESS_PROVIDER_OBSERVATION_SOURCE,
     DurableProcessProviderStore,
     ProcessIsolatedTransportAdapter,
+    ProcessTransportError,
+    build_recovery_supervisor_authority,
 )
 from spst_runtime.provider_observation import build_provider_request_binding
 from spst_runtime.provider_transport import (
@@ -31,6 +35,7 @@ from spst_runtime.provider_transport import (
     build_recovery_authority,
 )
 from spst_runtime.real_paired_outcome import (
+    PROGRAM_RECORD_PREFIX,
     PROVIDER_EXECUTION_AUTHORITY_SCHEMA,
     RealPairedOutcomeProgram,
 )
@@ -539,4 +544,462 @@ def test_tampered_durable_provider_result_fails_closed_without_new_inference(
     assert provider_status["integrity_verified"] is False
     queries = asyncio.run(repository.load_prefix(TRANSPORT_QUERY_PREFIX))
     assert queries == {}
+    assert repository.verify_provenance()["valid"] is True
+
+
+def _authenticated_provider_call(
+    provider_database: Path,
+    *,
+    provider_key_file: Path | None = None,
+) -> tuple[ProcessIsolatedTransportAdapter, dict[str, Any]]:
+    adapter = ProcessIsolatedTransportAdapter(
+        provider_database,
+        provider_authentication_key_file=provider_key_file,
+    )
+    prompt = "Return exact authenticated JSON."
+    base_context = {
+        "instructions": "Bound authenticated provider-store fixture.",
+        "evaluation": {"mode": "authenticated_store", "case_id": "auth-01"},
+    }
+    logical = build_provider_request_binding(prompt, base_context)
+    request = build_provider_transport_request(
+        {
+            "id": "RPOP-authenticated-store",
+            "program_sha256": "6" * 64,
+            "execution_plan": {"manifest_sha256": "7" * 64},
+        },
+        {
+            "attempt_id": "RATT-authenticated-store",
+            "attempt_sha256": "8" * 64,
+            "state": "running",
+        },
+        call_ordinal=1,
+        logical_request_binding=logical,
+    )
+    result = asyncio.run(
+        adapter.infer(prompt, {**base_context, "provider_transport": request})
+    )
+    return adapter, result
+
+
+def test_authenticated_store_rejects_metadata_rewrite_without_key(
+    tmp_path: Path,
+):
+    provider_database = tmp_path / "authenticated-provider.db"
+    adapter, _ = _authenticated_provider_call(provider_database)
+    before = DurableProcessProviderStore(
+        provider_database,
+        authentication_key_file=adapter.provider_authentication_key_file,
+        read_only=True,
+    ).status()
+    assert before["provider_store_authenticity_verified"] is True
+    assert before["provider_identity_authenticated"] is False
+    missing_key = tmp_path / "missing-provider.key"
+    with pytest.raises(ProcessTransportError, match="key_unavailable"):
+        DurableProcessProviderStore(
+            provider_database,
+            authentication_key_file=missing_key,
+        )
+    assert missing_key.exists() is False
+    with sqlite3.connect(provider_database) as connection:
+        connection.execute("UPDATE provider_results SET request_count = 99")
+        connection.commit()
+    after = DurableProcessProviderStore(
+        provider_database,
+        authentication_key_file=adapter.provider_authentication_key_file,
+        read_only=True,
+    ).status()
+    assert after["integrity_verified"] is False
+    assert after["reason"] == "process_provider_result_authentication_failed"
+
+
+def test_provider_key_rotation_reauthenticates_rows_and_rejects_old_key(
+    tmp_path: Path,
+):
+    provider_database = tmp_path / "rotation-provider.db"
+    adapter, _ = _authenticated_provider_call(provider_database)
+    old_key_file = adapter.provider_authentication_key_file
+    store = DurableProcessProviderStore(
+        provider_database,
+        authentication_key_file=old_key_file,
+    )
+    previous_key_id = store.authentication_key_id
+    new_key_file = tmp_path / "rotated-provider.key"
+    rotation = store.rotate_authentication_key(new_key_file)
+    assert rotation["status"] == "rotated"
+    assert rotation["previous_key_id"] == previous_key_id
+    assert rotation["authentication_key_id"] != previous_key_id
+    assert rotation["provider_store_authenticity_verified"] is True
+    old_status = DurableProcessProviderStore(
+        provider_database,
+        authentication_key_file=old_key_file,
+        read_only=True,
+    ).status()
+    assert old_status["integrity_verified"] is False
+    assert old_status["reason"] == "process_provider_result_authentication_failed"
+    new_status = DurableProcessProviderStore(
+        provider_database,
+        authentication_key_file=new_key_file,
+        read_only=True,
+    ).status()
+    assert new_status["integrity_verified"] is True
+    assert new_status["authentication_key_id"] == rotation["authentication_key_id"]
+    with pytest.raises(ProcessTransportError, match="instance_authentication_invalid"):
+        ProcessIsolatedTransportAdapter(
+            provider_database,
+            provider_authentication_key_file=old_key_file,
+        )
+
+
+def test_recovery_lease_requires_expiry_authority_and_fences_stale_owner(
+    tmp_path: Path,
+):
+    provider_database = tmp_path / "lease-provider.db"
+    store = DurableProcessProviderStore(provider_database)
+    resource_id = hashlib.sha256(b"lease-resource").hexdigest()
+    first = store.acquire_recovery_lease(
+        resource_id,
+        "supervisor-one",
+        ttl_ms=150,
+    )
+    with pytest.raises(ProcessTransportError, match="lease_active"):
+        store.acquire_recovery_lease(
+            resource_id,
+            "supervisor-two",
+            ttl_ms=500,
+        )
+    time.sleep(0.2)
+    with pytest.raises(ProcessTransportError, match="authority_required"):
+        store.acquire_recovery_lease(
+            resource_id,
+            "supervisor-two",
+            ttl_ms=500,
+        )
+    authority = build_recovery_supervisor_authority(
+        resource_id=resource_id,
+        provider_instance_sha256=store.identity(),
+        previous_owner_id="supervisor-one",
+        expired_generation=int(first["generation"]),
+        operator_id="human-recovery-operator",
+    )
+    second = store.acquire_recovery_lease(
+        resource_id,
+        "supervisor-two",
+        ttl_ms=500,
+        adoption_authority=authority,
+    )
+    assert second["adopted_orphan"] is True
+    assert second["generation"] == 2
+    with pytest.raises(ProcessTransportError, match="lease_fencing_failed"):
+        store.release_recovery_lease(
+            resource_id,
+            "supervisor-one",
+            generation=int(first["generation"]),
+            lease_token=str(first["lease_token"]),
+        )
+    released = store.release_recovery_lease(
+        resource_id,
+        "supervisor-two",
+        generation=int(second["generation"]),
+        lease_token=str(second["lease_token"]),
+    )
+    assert released["status"] == "released"
+    assert store.status()["orphan_adoption_count"] == 1
+
+
+def test_recovery_lease_rewrite_is_not_adoptable(tmp_path: Path):
+    provider_database = tmp_path / "tampered-lease-provider.db"
+    store = DurableProcessProviderStore(provider_database)
+    resource_id = hashlib.sha256(b"tampered-lease").hexdigest()
+    first = store.acquire_recovery_lease(
+        resource_id,
+        "supervisor-one",
+        ttl_ms=10_000,
+    )
+    with sqlite3.connect(provider_database) as connection:
+        connection.execute(
+            "UPDATE provider_recovery_leases SET expires_at_ms = 0"
+        )
+        connection.commit()
+    authority = build_recovery_supervisor_authority(
+        resource_id=resource_id,
+        provider_instance_sha256=store.identity(),
+        previous_owner_id="supervisor-one",
+        expired_generation=int(first["generation"]),
+        operator_id="human-recovery-operator",
+    )
+    with pytest.raises(ProcessTransportError, match="lease_authentication_failed"):
+        store.acquire_recovery_lease(
+            resource_id,
+            "supervisor-two",
+            ttl_ms=500,
+            adoption_authority=authority,
+        )
+    assert store.status()["integrity_verified"] is False
+
+
+def test_supervisor_status_is_read_only_and_missing_paths_remain_absent(
+    tmp_path: Path,
+):
+    provider_database = tmp_path / "status-provider.db"
+    store = DurableProcessProviderStore(provider_database)
+    resource_id = hashlib.sha256(b"status-lease").hexdigest()
+    store.acquire_recovery_lease(resource_id, "status-owner", ttl_ms=5000)
+    key_file = store.authentication_key_file
+    before_database = hashlib.sha256(provider_database.read_bytes()).hexdigest()
+    before_key = hashlib.sha256(key_file.read_bytes()).hexdigest()
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "spst_runtime.process_recovery_supervisor",
+            "status",
+            "--provider-db",
+            str(provider_database),
+            "--provider-key-file",
+            str(key_file),
+            "--resource-id",
+            resource_id,
+        ],
+        cwd=RUNTIME_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    status = json.loads(completed.stdout)
+    assert status["command"] == "status"
+    assert status["lease"]["owner_id"] == "status-owner"
+    assert hashlib.sha256(provider_database.read_bytes()).hexdigest() == (
+        before_database
+    )
+    assert hashlib.sha256(key_file.read_bytes()).hexdigest() == before_key
+
+    missing_database = tmp_path / "missing-status-provider.db"
+    missing_key = tmp_path / "missing-status-provider.key"
+    rejected = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "spst_runtime.process_recovery_supervisor",
+            "status",
+            "--provider-db",
+            str(missing_database),
+            "--provider-key-file",
+            str(missing_key),
+            "--resource-id",
+            resource_id,
+        ],
+        cwd=RUNTIME_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+        timeout=30,
+    )
+    assert rejected.returncode == 2
+    assert missing_database.exists() is False
+    assert missing_key.exists() is False
+
+
+def test_arch09_program_remains_readable_as_legacy_unauthenticated_record(
+    tmp_path: Path,
+):
+    repository, program, _, registered, _, _ = _fixture(tmp_path)
+    stored = asyncio.run(
+        repository.load(f"{PROGRAM_RECORD_PREFIX}{registered['id']}")
+    )
+    assert isinstance(stored, dict)
+    legacy = json.loads(json.dumps(stored))
+    authentication_fields = (
+        "provider_store_authenticated",
+        "provider_store_authentication_schema",
+        "provider_store_authentication_key_id",
+        "leased_recovery_supervisor_supported",
+        "recovery_lease_schema",
+        "recovery_supervisor_authority_schema",
+    )
+    for field in authentication_fields:
+        legacy["provider"].pop(field, None)
+        legacy["operational_hardening"].pop(field, None)
+    legacy["provider"]["process_transport_protocol"] = (
+        "subprocess-stdio-sqlite-v1"
+    )
+    legacy["operational_hardening"]["process_transport_protocol"] = (
+        "subprocess-stdio-sqlite-v1"
+    )
+    unsigned = {
+        key: value
+        for key, value in legacy.items()
+        if key not in {"id", "program_sha256"}
+    }
+    legacy_digest = hashlib.sha256(
+        json.dumps(
+            unsigned,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    legacy["program_sha256"] = legacy_digest
+    legacy["id"] = f"RPOP-{legacy_digest[:16]}"
+    assert program._registration_reason(legacy, legacy["id"]) is None
+
+
+def _supervisor_arguments(
+    *,
+    database: Path,
+    provider_database: Path,
+    provider_key_file: Path,
+    program_id: str,
+    intervention_file: Path,
+    recovery_authority_file: Path,
+    owner_id: str,
+    ttl_ms: int,
+    lease_marker: Path | None = None,
+    post_lease_delay_ms: int = 0,
+    adoption_authority_file: Path | None = None,
+) -> list[str]:
+    arguments = [
+        sys.executable,
+        "-m",
+        "spst_runtime.process_recovery_supervisor",
+        "recover",
+        "--database",
+        str(database),
+        "--provider-db",
+        str(provider_database),
+        "--provider-key-file",
+        str(provider_key_file),
+        "--program-id",
+        program_id,
+        "--intervention-file",
+        str(intervention_file),
+        "--recovery-authority-file",
+        str(recovery_authority_file),
+        "--lease-owner",
+        owner_id,
+        "--lease-ttl-ms",
+        str(ttl_ms),
+    ]
+    if lease_marker is not None:
+        arguments.extend(["--lease-marker", str(lease_marker)])
+    if post_lease_delay_ms:
+        arguments.extend(["--post-lease-delay-ms", str(post_lease_delay_ms)])
+    if adoption_authority_file is not None:
+        arguments.extend(
+            ["--adoption-authority-file", str(adoption_authority_file)]
+        )
+    return arguments
+
+
+def test_killed_supervisor_requires_expired_lease_adoption_without_duplicate_call(
+    tmp_path: Path,
+):
+    repository, program, intervention, registered, database, provider_database = (
+        _fixture(tmp_path)
+    )
+    provider_key_file = Path(f"{provider_database}.provider_key")
+    intervention_file = tmp_path / "intervention.json"
+    _write_json(intervention_file, intervention)
+    _crash_after_provider_commit(
+        database=database,
+        provider_database=provider_database,
+        program_id=registered["id"],
+        intervention_file=intervention_file,
+        marker=tmp_path / "provider-committed.json",
+    )
+    recovery_authority_file = _authority_file(
+        tmp_path,
+        program,
+        registered["id"],
+    )
+    lease_marker = tmp_path / "supervisor-lease.json"
+    first_supervisor = subprocess.Popen(
+        _supervisor_arguments(
+            database=database,
+            provider_database=provider_database,
+            provider_key_file=provider_key_file,
+            program_id=registered["id"],
+            intervention_file=intervention_file,
+            recovery_authority_file=recovery_authority_file,
+            owner_id="supervisor-one",
+            ttl_ms=800,
+            lease_marker=lease_marker,
+            post_lease_delay_ms=5000,
+        ),
+        cwd=RUNTIME_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    marker = _wait_for_marker(first_supervisor, lease_marker)
+    time.sleep(0.9)
+    blocked = subprocess.run(
+        _supervisor_arguments(
+            database=database,
+            provider_database=provider_database,
+            provider_key_file=provider_key_file,
+            program_id=registered["id"],
+            intervention_file=intervention_file,
+            recovery_authority_file=recovery_authority_file,
+            owner_id="supervisor-two",
+            ttl_ms=1000,
+        ),
+        cwd=RUNTIME_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+        timeout=30,
+    )
+    assert blocked.returncode == 2
+    assert json.loads(blocked.stdout)["reason"] == "process_recovery_lease_active"
+
+    first_supervisor.kill()
+    first_supervisor.communicate(timeout=10)
+    assert first_supervisor.returncode != 0
+
+    lease = marker["lease"]
+    time.sleep(0.9)
+    adoption_authority = build_recovery_supervisor_authority(
+        resource_id=str(lease["resource_id"]),
+        provider_instance_sha256=str(
+            registered["provider"]["transport_instance_sha256"]
+        ),
+        previous_owner_id="supervisor-one",
+        expired_generation=int(lease["generation"]),
+        operator_id="human-recovery-operator",
+    )
+    adoption_authority_file = tmp_path / "adoption-authority.json"
+    _write_json(adoption_authority_file, adoption_authority)
+    recovered = _run_bridge(
+        _supervisor_arguments(
+            database=database,
+            provider_database=provider_database,
+            provider_key_file=provider_key_file,
+            program_id=registered["id"],
+            intervention_file=intervention_file,
+            recovery_authority_file=recovery_authority_file,
+            owner_id="supervisor-two",
+            ttl_ms=5000,
+            adoption_authority_file=adoption_authority_file,
+        )
+    )
+    assert recovered["lease"]["adopted_orphan"] is True
+    assert recovered["lease_release"]["status"] == "released"
+    assert recovered["result"]["status"] == "pending_human_review"
+    provider_status = DurableProcessProviderStore(
+        provider_database,
+        authentication_key_file=provider_key_file,
+        read_only=True,
+    ).status()
+    assert provider_status["record_count"] == 32
+    assert provider_status["total_execution_count"] == 32
+    assert provider_status["total_infer_request_count"] == 32
+    assert provider_status["orphan_adoption_count"] == 1
+    assert provider_status["provider_store_authenticity_verified"] is True
     assert repository.verify_provenance()["valid"] is True
