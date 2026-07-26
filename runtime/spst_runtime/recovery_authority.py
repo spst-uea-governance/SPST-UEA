@@ -18,6 +18,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 from spst_runtime.persistence.sqlite_repository import SQLiteRepository
+from spst_runtime.recovery_authority_state import (
+    RECOVERY_AUTHORITY_ROLLBACK_ANCHOR_SCHEMA,
+    RECOVERY_AUTHORITY_STATE_SCHEMA,
+    default_recovery_key_custody_policy,
+    validate_recovery_key_custody_policy,
+    verify_recovery_authority_state,
+)
 
 
 RECOVERY_AUTHORITY_TRUST_SCHEMA = "spst-recovery-authority-trust-v1"
@@ -52,6 +59,9 @@ def generate_recovery_authority_pki(
     operator_id: str,
     valid_from_ms: int | None = None,
     valid_until_ms: int | None = None,
+    authority_state_required: bool = False,
+    minimum_authority_state_generation: int = 1,
+    key_custody_policy: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     if not _safe_identifier(operator_id):
         raise RecoveryAuthorityError("recovery_operator_identity_invalid")
@@ -63,13 +73,37 @@ def generate_recovery_authority_pki(
     operator_key = _create_private_key(operator_private_key_file)
     root_public = _public_bytes(root_key.public_key())
     operator_public = _public_bytes(operator_key.public_key())
-    trust_unsigned = {
+    trust_unsigned: dict[str, Any] = {
         "schema": RECOVERY_AUTHORITY_TRUST_SCHEMA,
         "algorithm": RECOVERY_AUTHORITY_ALGORITHM,
         "root_key_id": _sha256_bytes(root_public),
         "root_public_key": _encode(root_public),
         "external_identity_verified": False,
     }
+    if authority_state_required:
+        policy = key_custody_policy or default_recovery_key_custody_policy()
+        policy_reason = validate_recovery_key_custody_policy(policy)
+        if policy_reason:
+            raise RecoveryAuthorityError(policy_reason)
+        if (
+            not isinstance(minimum_authority_state_generation, int)
+            or isinstance(minimum_authority_state_generation, bool)
+            or minimum_authority_state_generation < 1
+        ):
+            raise RecoveryAuthorityError(
+                "recovery_authority_minimum_state_generation_invalid"
+            )
+        trust_unsigned.update(
+            {
+                "authority_state_required": True,
+                "authority_state_schema": RECOVERY_AUTHORITY_STATE_SCHEMA,
+                "rollback_anchor_schema": RECOVERY_AUTHORITY_ROLLBACK_ANCHOR_SCHEMA,
+                "minimum_authority_state_generation": (
+                    minimum_authority_state_generation
+                ),
+                "key_custody_policy": deepcopy(policy),
+            }
+        )
     trust = {
         **trust_unsigned,
         "trust_anchor_sha256": _canonical_hash(trust_unsigned),
@@ -110,7 +144,7 @@ def generate_supervisor_attestation_key(
 ) -> dict[str, Any]:
     private_key = _create_private_key(private_key_file)
     public = _public_bytes(private_key.public_key())
-    unsigned = {
+    unsigned: dict[str, Any] = {
         "schema": "spst-recovery-supervisor-public-key-v1",
         "algorithm": RECOVERY_AUTHORITY_ALGORITHM,
         "key_id": _sha256_bytes(public),
@@ -138,6 +172,8 @@ def issue_recovery_authority_grant(
     issued_at_ms: int | None = None,
     expires_at_ms: int | None = None,
     nonce: str | None = None,
+    authority_state: dict[str, Any] | None = None,
+    rollback_anchor: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     issued = _now_ms() if issued_at_ms is None else issued_at_ms
     expires = issued + 300_000 if expires_at_ms is None else expires_at_ms
@@ -148,6 +184,22 @@ def issue_recovery_authority_grant(
     )
     if certificate_reason:
         raise RecoveryAuthorityError(certificate_reason)
+    state_required = trust_anchor.get("authority_state_required") is True
+    state_projection: dict[str, Any] | None = None
+    if state_required or authority_state is not None or rollback_anchor is not None:
+        state_projection, state_reason = verify_recovery_authority_state(
+            authority_state,
+            trust_anchor,
+            rollback_anchor=rollback_anchor,
+            verification_time_ms=issued,
+            revoked_operator_certificate_sha256=operator_certificate.get(
+                "certificate_sha256"
+            ),
+        )
+        if state_reason or state_projection is None:
+            raise RecoveryAuthorityError(
+                state_reason or "recovery_authority_state_invalid"
+            )
     operator_key = _load_private_key(operator_private_key_file)
     if _sha256_bytes(_public_bytes(operator_key.public_key())) != operator_certificate.get(
         "operator_key_id"
@@ -185,17 +237,39 @@ def issue_recovery_authority_grant(
         "nonce": nonce or secrets.token_hex(16),
         "automatic_retry_authorized": False,
     }
+    if state_projection is not None:
+        anchor_projection = _mapping(state_projection.get("rollback_anchor"))
+        claims.update(
+            {
+                "authority_state_sha256": state_projection["state_sha256"],
+                "authority_state_generation": state_projection["generation"],
+                "authority_time_floor_ms": state_projection[
+                    "minimum_accepted_time_ms"
+                ],
+                "recovery_key_custody_evidence_sha256": state_projection[
+                    "key_custody_evidence_sha256"
+                ],
+                "rollback_anchor_sha256": anchor_projection.get("anchor_sha256"),
+            }
+        )
     reason = _recovery_claims_reason(claims)
     if reason:
         raise RecoveryAuthorityError(reason)
     claims_sha256 = _canonical_hash(claims)
-    unsigned = {
+    unsigned: dict[str, Any] = {
         "schema": RECOVERY_AUTHORITY_GRANT_SCHEMA,
         "claims": claims,
         "claims_sha256": claims_sha256,
         "operator_certificate": deepcopy(operator_certificate),
         "operator_signature": _encode(operator_key.sign(_canonical_bytes(claims))),
     }
+    if state_projection is not None:
+        unsigned.update(
+            {
+                "authority_state": deepcopy(authority_state),
+                "rollback_anchor": deepcopy(rollback_anchor),
+            }
+        )
     return {**unsigned, "grant_sha256": _canonical_hash(unsigned)}
 
 
@@ -209,6 +283,17 @@ def validate_recovery_authority_trust_anchor(value: Any) -> str | None:
         public = _decode_public_key(value.get("root_public_key"))
     except RecoveryAuthorityError as error:
         return str(error)
+    state_required = value.get("authority_state_required") is True
+    state_contract_invalid = state_required and (
+        value.get("authority_state_schema") != RECOVERY_AUTHORITY_STATE_SCHEMA
+        or value.get("rollback_anchor_schema")
+        != RECOVERY_AUTHORITY_ROLLBACK_ANCHOR_SCHEMA
+        or not isinstance(value.get("minimum_authority_state_generation"), int)
+        or isinstance(value.get("minimum_authority_state_generation"), bool)
+        or int(value["minimum_authority_state_generation"]) < 1
+        or validate_recovery_key_custody_policy(value.get("key_custody_policy"))
+        is not None
+    )
     if (
         value.get("schema") != RECOVERY_AUTHORITY_TRUST_SCHEMA
         or value.get("algorithm") != RECOVERY_AUTHORITY_ALGORITHM
@@ -216,6 +301,7 @@ def validate_recovery_authority_trust_anchor(value: Any) -> str | None:
         or value.get("root_key_id") != _sha256_bytes(public)
         or not _is_sha256(value.get("trust_anchor_sha256"))
         or _canonical_hash(unsigned) != value.get("trust_anchor_sha256")
+        or state_contract_invalid
     ):
         return "recovery_authority_trust_anchor_invalid"
     return None
@@ -273,6 +359,9 @@ def verify_recovery_authority_grant(
     *,
     expected: dict[str, Any] | None = None,
     verification_time_ms: int | None = None,
+    authority_state: dict[str, Any] | None = None,
+    rollback_anchor: dict[str, Any] | None = None,
+    allow_embedded_authority_state: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     if not isinstance(value, dict):
         return None, "signed_recovery_authority_required"
@@ -318,6 +407,62 @@ def verify_recovery_authority_grant(
     for key, expected_value in (expected or {}).items():
         if claims.get(key) != expected_value:
             return None, f"signed_recovery_authority_{key}_mismatch"
+    state_required = trust_anchor.get("authority_state_required") is True
+    embedded_state = value.get("authority_state")
+    embedded_anchor = value.get("rollback_anchor")
+    state_bindings_present = any(
+        claims.get(field) is not None
+        for field in (
+            "authority_state_sha256",
+            "authority_state_generation",
+            "authority_time_floor_ms",
+            "recovery_key_custody_evidence_sha256",
+            "rollback_anchor_sha256",
+        )
+    )
+    state_projection: dict[str, Any] | None = None
+    if state_required or state_bindings_present:
+        embedded_projection, embedded_reason = verify_recovery_authority_state(
+            embedded_state,
+            trust_anchor,
+            rollback_anchor=_mapping_or_none(embedded_anchor),
+            verification_time_ms=current,
+            expected_state_sha256=claims.get("authority_state_sha256"),
+            expected_anchor_sha256=claims.get("rollback_anchor_sha256"),
+            revoked_operator_certificate_sha256=certificate.get(
+                "certificate_sha256"
+            ),
+            revoked_grant_sha256=value.get("grant_sha256"),
+        )
+        if embedded_reason or embedded_projection is None:
+            return None, embedded_reason or "recovery_authority_state_invalid"
+        if (
+            embedded_projection.get("generation")
+            != claims.get("authority_state_generation")
+            or embedded_projection.get("minimum_accepted_time_ms")
+            != claims.get("authority_time_floor_ms")
+            or embedded_projection.get("key_custody_evidence_sha256")
+            != claims.get("recovery_key_custody_evidence_sha256")
+        ):
+            return None, "recovery_authority_state_binding_mismatch"
+        if authority_state is None or rollback_anchor is None:
+            if state_required and not allow_embedded_authority_state:
+                return None, "recovery_authority_current_state_required"
+            state_projection = embedded_projection
+        else:
+            state_projection, state_reason = verify_recovery_authority_state(
+                authority_state,
+                trust_anchor,
+                rollback_anchor=rollback_anchor,
+                verification_time_ms=current,
+                minimum_generation=int(embedded_projection["generation"]),
+                revoked_operator_certificate_sha256=certificate.get(
+                    "certificate_sha256"
+                ),
+                revoked_grant_sha256=value.get("grant_sha256"),
+            )
+            if state_reason or state_projection is None:
+                return None, state_reason or "recovery_authority_state_invalid"
     return (
         {
             "schema": RECOVERY_AUTHORITY_GRANT_SCHEMA,
@@ -326,6 +471,10 @@ def verify_recovery_authority_grant(
             "operator_certificate_verified": True,
             "operator_identity_external_verified": False,
             "supervisor_attestation_key_verified": False,
+            "authority_state": deepcopy(state_projection),
+            "revocation_checked": state_projection is not None,
+            "trusted_time_source_verified": False,
+            "full_rollback_resistance_verified": False,
             "verified": True,
         },
         None,
@@ -337,6 +486,9 @@ class SupervisorAttestationLedger:
         self,
         repository: SQLiteRepository,
         registration: dict[str, Any],
+        *,
+        authority_state: dict[str, Any] | None = None,
+        rollback_anchor: dict[str, Any] | None = None,
     ):
         self.repository = repository
         self.registration = registration
@@ -344,6 +496,8 @@ class SupervisorAttestationLedger:
         self.trust_anchor = _mapping(registration.get("provider")).get(
             "recovery_authority_trust_anchor"
         )
+        self.authority_state = deepcopy(authority_state)
+        self.rollback_anchor = deepcopy(rollback_anchor)
 
     def append(
         self,
@@ -364,6 +518,8 @@ class SupervisorAttestationLedger:
             _mapping(self.trust_anchor),
             expected=self._grant_expectations(),
             verification_time_ms=now_ms,
+            authority_state=self.authority_state,
+            rollback_anchor=self.rollback_anchor,
         )
         if grant_reason or grant_projection is None:
             raise RecoveryAuthorityError(
@@ -386,6 +542,23 @@ class SupervisorAttestationLedger:
                 if record.get("authority_grant_sha256") == grant_sha256
             ]
             if event == "authority_accepted":
+                previous_state_generations = [
+                    int(
+                        _mapping(
+                            _mapping(record.get("authority_grant")).get("claims")
+                        ).get("authority_state_generation")
+                        or 0
+                    )
+                    for record in records
+                    if record.get("event") == "authority_accepted"
+                ]
+                if int(claims.get("authority_state_generation") or 0) < max(
+                    previous_state_generations,
+                    default=0,
+                ):
+                    raise RecoveryAuthorityError(
+                        "supervisor_authority_state_generation_rollback"
+                    )
                 if grant_records:
                     raise RecoveryAuthorityError(
                         "supervisor_authority_grant_replay"
@@ -505,6 +678,15 @@ class SupervisorAttestationLedger:
             "operator_certificate_verified": True,
             "operator_identity_external_verified": False,
             "supervisor_attestation_key_verified": True,
+            "authority_state_sha256": claims.get("authority_state_sha256"),
+            "authority_state_generation": claims.get(
+                "authority_state_generation"
+            ),
+            "rollback_anchor_sha256": claims.get("rollback_anchor_sha256"),
+            "revocation_checked": claims.get("authority_state_sha256") is not None,
+            "trusted_time_source_verified": False,
+            "hardware_key_custody_verified": False,
+            "full_rollback_resistance_verified": False,
             "process_identity_verified": False,
             "program_bound": True,
             "integrity_verified": True,
@@ -525,6 +707,7 @@ class SupervisorAttestationLedger:
         seen_grants: set[str] = set()
         active_grant: str | None = None
         active_event: str | None = None
+        highest_state_generation = 0
         entries = self.repository.provenance_entries()
         for index, record in enumerate(records, start=1):
             unsigned = {
@@ -540,6 +723,7 @@ class SupervisorAttestationLedger:
                 _mapping(self.trust_anchor),
                 expected=self._grant_expectations(),
                 verification_time_ms=int(record.get("observed_at_ms") or 0),
+                allow_embedded_authority_state=True,
             )
             try:
                 public = Ed25519PublicKey.from_public_bytes(
@@ -582,6 +766,15 @@ class SupervisorAttestationLedger:
             if event == "authority_accepted":
                 if grant_sha256 in seen_grants:
                     return "supervisor_authority_grant_replay"
+                state_generation = int(
+                    claims.get("authority_state_generation") or 0
+                )
+                if state_generation < highest_state_generation:
+                    return "supervisor_authority_state_generation_rollback"
+                highest_state_generation = max(
+                    highest_state_generation,
+                    state_generation,
+                )
                 seen_grants.add(grant_sha256)
                 active_grant = grant_sha256
                 active_event = event
@@ -639,6 +832,31 @@ def _recovery_claims_reason(value: Any) -> str | None:
         and not isinstance(adoption_pair[1], bool)
         and int(adoption_pair[1]) >= 1
     )
+    state_fields = (
+        "authority_state_sha256",
+        "authority_state_generation",
+        "authority_time_floor_ms",
+        "recovery_key_custody_evidence_sha256",
+        "rollback_anchor_sha256",
+    )
+    state_presence = [value.get(field) is not None for field in state_fields]
+    state_binding_valid = not any(state_presence) or (
+        all(state_presence)
+        and all(
+            _is_sha256(value.get(field))
+            for field in (
+                "authority_state_sha256",
+                "recovery_key_custody_evidence_sha256",
+                "rollback_anchor_sha256",
+            )
+        )
+        and isinstance(value.get("authority_state_generation"), int)
+        and not isinstance(value.get("authority_state_generation"), bool)
+        and int(value["authority_state_generation"]) >= 1
+        and isinstance(value.get("authority_time_floor_ms"), int)
+        and not isinstance(value.get("authority_time_floor_ms"), bool)
+        and int(value["authority_time_floor_ms"]) >= 0
+    )
     if (
         value.get("schema") != RECOVERY_AUTHORITY_CLAIMS_SCHEMA
         or value.get("action") != RECOVERY_AUTHORITY_ACTION
@@ -663,6 +881,7 @@ def _recovery_claims_reason(value: Any) -> str | None:
         or value.get("automatic_retry_authorized") is not False
         or not _valid_time_window(value.get("issued_at_ms"), value.get("expires_at_ms"))
         or not adoption_valid
+        or not state_binding_valid
     ):
         return "recovery_authority_claims_invalid"
     try:
@@ -676,6 +895,10 @@ def _recovery_claims_reason(value: Any) -> str | None:
     ):
         return "recovery_authority_supervisor_key_invalid"
     return None
+
+
+def _mapping_or_none(value: Any) -> dict[str, Any] | None:
+    return value if isinstance(value, dict) else None
 
 
 def _supervisor_public_key_reason(value: Any) -> str | None:

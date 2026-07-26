@@ -211,6 +211,14 @@ Run commands from `runtime/` unless noted otherwise:
   reject grant replay and any broken event chain. Keep all private keys outside
   SQLite and Evidence artifacts. A valid local certificate does not verify a
   real human, OS process, remote provider, trusted clock, or hardware custody.
+- For ARCH-12, a state-required trust anchor must use the v4 process protocol
+  and every live grant validation must supply the current root-signed authority
+  state plus matching rollback anchor. Reject revocation, a clock below the
+  authenticated floor, an expired or downgraded generation, altered bindings,
+  and custody evidence below policy. Embedded grant state is historical audit
+  evidence only. Keep trusted time, hardware custody, and full rollback
+  resistance false unless separately authenticated; local dual-copy anchoring
+  cannot detect coordinated rollback of every local copy and Program record.
 
 ## Sovereign Governance Rules
 

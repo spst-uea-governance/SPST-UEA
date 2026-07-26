@@ -48,6 +48,9 @@ PROCESS_PROVIDER_MODEL_VERSION = "process-transport-v2"
 PROCESS_PROVIDER_OBSERVATION_SOURCE = "local_process_provider_echo"
 PROCESS_TRANSPORT_PROTOCOL = "subprocess-stdio-sqlite-hmac-lease-v2"
 SIGNED_PROCESS_TRANSPORT_PROTOCOL = "subprocess-stdio-sqlite-hmac-lease-pki-v3"
+STATEFUL_SIGNED_PROCESS_TRANSPORT_PROTOCOL = (
+    "subprocess-stdio-sqlite-hmac-lease-pki-state-v4"
+)
 MINIMUM_RECOVERY_LEASE_TTL_MS = 100
 MAXIMUM_RECOVERY_LEASE_TTL_MS = 600_000
 
@@ -65,6 +68,8 @@ class DurableProcessProviderStore:
         *,
         authentication_key_file: str | Path | None = None,
         recovery_authority_trust_anchor: dict[str, Any] | None = None,
+        recovery_authority_state: dict[str, Any] | None = None,
+        recovery_authority_rollback_anchor: dict[str, Any] | None = None,
         read_only: bool = False,
     ):
         self.path = Path(path).expanduser().resolve()
@@ -91,6 +96,16 @@ class DurableProcessProviderStore:
         self.recovery_authority_trust_anchor_sha256 = (
             str(recovery_authority_trust_anchor["trust_anchor_sha256"])
             if recovery_authority_trust_anchor is not None
+            else None
+        )
+        self.recovery_authority_state = (
+            deepcopy(recovery_authority_state)
+            if recovery_authority_state is not None
+            else None
+        )
+        self.recovery_authority_rollback_anchor = (
+            deepcopy(recovery_authority_rollback_anchor)
+            if recovery_authority_rollback_anchor is not None
             else None
         )
         self._authentication_secret, self.authentication_key_source = (
@@ -506,6 +521,22 @@ class DurableProcessProviderStore:
                 self.recovery_authority_trust_anchor is not None
                 and identity_reason is None
             ),
+            "recovery_authority_state_configured": (
+                self.recovery_authority_state is not None
+            ),
+            "recovery_authority_state_sha256": (
+                self.recovery_authority_state.get("state_sha256")
+                if self.recovery_authority_state is not None
+                else None
+            ),
+            "recovery_authority_rollback_anchor_sha256": (
+                self.recovery_authority_rollback_anchor.get("anchor_sha256")
+                if self.recovery_authority_rollback_anchor is not None
+                else None
+            ),
+            "trusted_time_source_verified": False,
+            "hardware_key_custody_verified": False,
+            "full_rollback_resistance_verified": False,
             "provider_identity_authenticated": False,
             "exactly_once_execution_proven": False,
         }
@@ -648,6 +679,8 @@ class DurableProcessProviderStore:
                             expired_generation if adopted else None
                         ),
                     },
+                    authority_state=self.recovery_authority_state,
+                    rollback_anchor=self.recovery_authority_rollback_anchor,
                 )
                 if authority_reason:
                     connection.rollback()
@@ -1662,7 +1695,12 @@ class ProcessIsolatedTransportAdapter(ModelAdapter):
         }
 
     def get_capabilities(self) -> dict[str, Any]:
-        signed_authority = self.recovery_authority_trust_anchor is not None
+        trust_anchor = self.recovery_authority_trust_anchor
+        signed_authority = trust_anchor is not None
+        stateful_authority = bool(
+            trust_anchor is not None
+            and trust_anchor.get("authority_state_required") is True
+        )
         return {
             "interface": "ModelAdapter",
             "supports_structured_evaluation": True,
@@ -1706,9 +1744,13 @@ class ProcessIsolatedTransportAdapter(ModelAdapter):
                 SUPERVISOR_ATTESTATION_SCHEMA if signed_authority else None
             ),
             "process_transport_protocol": (
-                SIGNED_PROCESS_TRANSPORT_PROTOCOL
-                if signed_authority
-                else PROCESS_TRANSPORT_PROTOCOL
+                STATEFUL_SIGNED_PROCESS_TRANSPORT_PROTOCOL
+                if stateful_authority
+                else (
+                    SIGNED_PROCESS_TRANSPORT_PROTOCOL
+                    if signed_authority
+                    else PROCESS_TRANSPORT_PROTOCOL
+                )
             ),
             "transport_instance_sha256": self.provider_instance_sha256,
         }
