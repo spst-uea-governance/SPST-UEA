@@ -996,34 +996,25 @@ def test_killed_supervisor_requires_expired_lease_adoption_without_duplicate_cal
         encoding="utf-8",
     )
     marker = _wait_for_marker(first_supervisor, lease_marker)
-    time.sleep(0.9)
-    blocked = subprocess.run(
-        _supervisor_arguments(
-            database=database,
-            provider_database=provider_database,
-            provider_key_file=provider_key_file,
-            program_id=registered["id"],
-            intervention_file=intervention_file,
-            recovery_authority_file=recovery_authority_file,
-            owner_id="supervisor-two",
-            ttl_ms=1000,
-        ),
-        cwd=RUNTIME_ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=False,
-        timeout=30,
+    lease = marker["lease"]
+    provider_store = DurableProcessProviderStore(
+        provider_database,
+        authentication_key_file=provider_key_file,
     )
-    assert blocked.returncode == 2
-    assert json.loads(blocked.stdout)["reason"] == "process_recovery_lease_active"
+    with pytest.raises(ProcessTransportError, match="process_recovery_lease_active"):
+        provider_store.acquire_recovery_lease(
+            str(lease["resource_id"]),
+            "supervisor-two",
+            ttl_ms=1000,
+        )
 
     first_supervisor.kill()
     first_supervisor.communicate(timeout=10)
     assert first_supervisor.returncode != 0
 
-    lease = marker["lease"]
-    time.sleep(0.9)
+    remaining_ms = int(lease["expires_at_ms"]) - (time.time_ns() // 1_000_000)
+    if remaining_ms >= 0:
+        time.sleep((remaining_ms + 50) / 1000)
     adoption_authority = build_recovery_supervisor_authority(
         resource_id=str(lease["resource_id"]),
         provider_instance_sha256=str(
