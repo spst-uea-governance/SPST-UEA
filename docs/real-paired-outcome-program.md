@@ -78,12 +78,23 @@ and checks `codex login status` immediately before every inference. Any login
 mode other than the exact ChatGPT status fails before the model call.
 
 The model output must echo the exact SPST provider-request binding inside the
-schema-constrained response. The adapter records the returned CLI thread ID,
-turn-completion event, token usage, answer digest, and acknowledgement as
-`codex_cli_jsonl_model_echo`. Missing, malformed, failed, mismatched, or replayed
-events are rejected. This proves a fresh observable CLI request/response round
-trip; it does not cryptographically authenticate OpenAI, the account, model
-weights, or provider identity.
+schema-constrained response. The acknowledgement envelope and bounded task
+artifact are distinct fields. When the registered task supplies a flat,
+primitive-valued JSON quality contract, the adapter derives a closed, typed
+artifact schema from that contract, requires the complete object, and
+canonicalizes it back to task text. It rejects a bare extracted value, a wrong
+root type, an additional field, or a mismatched property type rather than
+letting acknowledgement framing change the artifact being scored. The adapter
+records the returned CLI thread ID, turn-completion event, token usage, artifact
+digest, and acknowledgement as `codex_cli_jsonl_model_echo`. Missing, malformed,
+failed, mismatched, or replayed events are rejected. This proves a fresh
+observable CLI request/response round trip; it does not cryptographically
+authenticate OpenAI, the account, model weights, or provider identity.
+
+This transport contract prevents an outer `answer` field from ambiguously
+collapsing an inner task object such as `{"answer":"unknown"}` to the bare
+string `unknown`. It does not repair historical responses or prove that the
+model selected a semantically correct value.
 
 ChatGPT login avoids Platform API-key billing. Before every inference, the adapter
 also queries the local Codex app-server `account/read` and

@@ -26,6 +26,7 @@ from spst_runtime.evaluation.quality_evidence import (
 )
 from spst_runtime.interfaces.model_adapter import ModelAdapter
 from spst_runtime.live_pairing import validate_live_pair_execution
+from spst_runtime.model_artifact_contract import build_model_artifact_contract
 from spst_runtime.provider_observation import (
     ProviderObservationError,
     build_provider_request_binding,
@@ -282,6 +283,9 @@ class OperationalShadowRunner:
                 "arm": mode,
             },
         }
+        artifact_contract = self._model_artifact_contract(task)
+        if artifact_contract is not None:
+            context["artifact_contract"] = artifact_contract
         if live_pair_execution is not None:
             context["evaluation"]["live_pair_execution"] = deepcopy(
                 live_pair_execution
@@ -622,6 +626,40 @@ class OperationalShadowRunner:
     @staticmethod
     def _provider_name(health: dict[str, Any]) -> str:
         return str(health.get("provider") or health.get("active_provider") or "unknown")
+
+    @staticmethod
+    def _model_artifact_contract(task: dict[str, Any]) -> dict[str, Any] | None:
+        expected_keys = task.get("expected_json_keys", [])
+        if not isinstance(expected_keys, list) or not expected_keys:
+            return build_model_artifact_contract([])
+        rubric = task.get("quality_rubric")
+        criteria = rubric.get("criteria") if isinstance(rubric, dict) else None
+        if not isinstance(criteria, list):
+            return None
+        property_types: dict[str, str] = {}
+        for key in expected_keys:
+            matches = [
+                criterion.get("expected")
+                for criterion in criteria
+                if isinstance(criterion, dict)
+                and criterion.get("json_pointer") == f"/{key}"
+            ]
+            if len(matches) != 1:
+                return None
+            expected = matches[0]
+            if expected is None:
+                property_types[key] = "null"
+            elif isinstance(expected, bool):
+                property_types[key] = "boolean"
+            elif isinstance(expected, int):
+                property_types[key] = "integer"
+            elif isinstance(expected, float):
+                property_types[key] = "number"
+            elif isinstance(expected, str):
+                property_types[key] = "string"
+            else:
+                return None
+        return build_model_artifact_contract(expected_keys, property_types)
 
     @classmethod
     def _execution_orders(
