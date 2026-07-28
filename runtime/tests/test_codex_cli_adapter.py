@@ -5,6 +5,7 @@ import subprocess
 
 import pytest
 
+from spst_runtime.model_artifact_contract import build_model_artifact_contract
 from spst_runtime.provider_observation import (
     CODEX_CLI_OBSERVATION_SOURCE,
     build_provider_request_binding,
@@ -37,6 +38,7 @@ class StructuredRunner:
         self.calls: list[tuple[list[str], dict[str, object]]] = []
         self.probe_calls: list[tuple[str, str, dict[str, str], int]] = []
         self.actions: list[str] = []
+        self.schemas: list[dict[str, object]] = []
 
     def __call__(self, command: list[str], **kwargs: object):
         self.calls.append((command, kwargs))
@@ -51,10 +53,11 @@ class StructuredRunner:
         self.actions.append("exec")
         schema_path = Path(command[command.index("--output-schema") + 1])
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        self.schemas.append(schema)
         digest = schema["properties"]["request_binding_sha256"]["const"]
         response = self.response_override or {
             "request_binding_sha256": digest,
-            "answer": '{"answer":1}',
+            "artifact": '{"answer":1}',
         }
         events = self.event_override or [
             {"type": "thread.started", "thread_id": self.thread_id},
@@ -195,6 +198,119 @@ def test_codex_cli_adapter_emits_verified_observation_and_scrubs_api_keys(
     assert "CODEX_API_KEY" not in environment
 
 
+def test_codex_cli_adapter_preserves_structured_task_artifact_as_canonical_json(
+    tmp_path: Path,
+):
+    runner = StructuredRunner(
+        response_override={
+            "request_binding_sha256": "replaced-by-runner",
+            "artifact": {"answer": "unknown"},
+        }
+    )
+
+    def structured_runner(command: list[str], **kwargs: object):
+        if command[1:] == ["login", "status"]:
+            return runner(command, **kwargs)
+        schema_path = Path(command[command.index("--output-schema") + 1])
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        runner.response_override = {
+            "request_binding_sha256": schema["properties"][
+                "request_binding_sha256"
+            ]["const"],
+            "artifact": {"answer": "unknown"},
+        }
+        return runner(command, **kwargs)
+
+    adapter = CodexCliAdapter(
+        executable=str(_executable(tmp_path)),
+        runner=structured_runner,
+        spend_guard_probe=runner.spend_guard_probe,
+    )
+    context = {
+        "artifact_contract": build_model_artifact_contract(
+            ["answer"], {"answer": "string"}
+        ),
+        "evaluation": {"case_id": "structured-01"},
+    }
+
+    result = asyncio.run(adapter.infer("Return bounded JSON.", context))
+
+    assert result["text"] == '{"answer":"unknown"}'
+    assert runner.schemas[0]["properties"]["artifact"] == {
+        "type": "object",
+        "required": ["answer"],
+        "properties": {"answer": {"type": "string"}},
+        "additionalProperties": False,
+    }
+    assert "not an extracted inner value" in runner.calls[1][0][-1]
+
+
+def test_codex_cli_adapter_rejects_bare_value_for_json_artifact_contract(
+    tmp_path: Path,
+):
+    runner = StructuredRunner(
+        response_override={
+            "request_binding_sha256": "replaced-by-runner",
+            "artifact": "unknown",
+        }
+    )
+
+    def bare_value_runner(command: list[str], **kwargs: object):
+        if command[1:] == ["login", "status"]:
+            return runner(command, **kwargs)
+        schema_path = Path(command[command.index("--output-schema") + 1])
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        runner.response_override = {
+            "request_binding_sha256": schema["properties"][
+                "request_binding_sha256"
+            ]["const"],
+            "artifact": "unknown",
+        }
+        return runner(command, **kwargs)
+
+    adapter = CodexCliAdapter(
+        executable=str(_executable(tmp_path)),
+        runner=bare_value_runner,
+        spend_guard_probe=runner.spend_guard_probe,
+    )
+    context = {
+        "artifact_contract": build_model_artifact_contract(
+            ["answer"], {"answer": "string"}
+        ),
+        "evaluation": {"case_id": "structured-02"},
+    }
+
+    with pytest.raises(
+        CodexCliAdapterError,
+        match="codex_cli_provider_artifact_json_contract_mismatch",
+    ):
+        asyncio.run(adapter.infer("Return bounded JSON.", context))
+
+
+def test_codex_cli_adapter_rejects_invalid_artifact_contract_before_any_probe(
+    tmp_path: Path,
+):
+    runner = StructuredRunner()
+    adapter = CodexCliAdapter(
+        executable=str(_executable(tmp_path)),
+        runner=runner,
+        spend_guard_probe=runner.spend_guard_probe,
+    )
+
+    with pytest.raises(
+        CodexCliAdapterError,
+        match="codex_cli_artifact_contract_schema_mismatch",
+    ):
+        asyncio.run(
+            adapter.infer(
+                "task",
+                {"artifact_contract": {"schema": "altered"}},
+            )
+        )
+
+    assert runner.actions == []
+
+
 def test_codex_cli_adapter_rejects_non_chatgpt_cached_auth_before_model_call(
     tmp_path: Path,
 ):
@@ -279,7 +395,7 @@ def test_codex_cli_adapter_rejects_bad_ack_nonzero_exit_and_replay(tmp_path: Pat
     mismatch_runner = StructuredRunner(
         response_override={
             "request_binding_sha256": "0" * 64,
-            "answer": "answer",
+            "artifact": "answer",
         }
     )
     mismatch = CodexCliAdapter(

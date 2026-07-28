@@ -213,7 +213,10 @@ general model-quality uplift. See `../docs/real-paired-outcome-program.md`.
 The optional `CodexCliAdapter` can execute an ephemeral, read-only Codex CLI
 round trip under confirmed ChatGPT login without exposing API-key environment
 variables. It records a schema-constrained request-binding echo from the CLI
-JSONL stream. Immediately before each call it also fails closed on missing
+JSONL stream. For registered flat-JSON tasks, the same schema separately binds
+the complete typed task artifact; a bare inner value, extra field, or wrong
+value type is rejected instead of being reinterpreted as valid JSON evidence.
+Immediately before each call it also fails closed on missing
 app-server billing state, observed spendable credits, or unavailable included
 quota, and binds the bounded guard result into the provider observation. This
 locally observed state is not cryptographically authenticated, so the path stays

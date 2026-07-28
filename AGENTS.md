@@ -124,7 +124,11 @@ Run commands from `runtime/` unless noted otherwise:
 - For API-key-free Codex CLI paired studies, require the adapter to scrub
   `OPENAI_API_KEY` and `CODEX_API_KEY`, confirm ChatGPT login immediately before
   inference, run ephemeral/read-only with user config and rules ignored, and
-  validate the schema-constrained request-binding echo from JSONL. Classify the
+  validate the schema-constrained request-binding echo from JSONL. Keep the
+  acknowledgement envelope separate from the task artifact. For supported
+  flat-JSON evaluation contracts, require a closed typed artifact schema and
+  reject bare inner values, extra fields, and wrong property types; never repair
+  a failed historical artifact by relabelling it after execution. Classify the
   call as `chatgpt_plan_usage`, not `no_charge`; require exact v2 plan-usage
   authority before the first call, and keep billing/provider identity unverified.
 - A verified v4 receipt proves routing, profile, trace, governance, memory
