@@ -210,6 +210,14 @@ provider is invoked by the bundled Program. A remote metadata echo can establish
 observed transport, not authenticated provider identity, causal context use, or
 general model-quality uplift. See `../docs/real-paired-outcome-program.md`.
 
+The optional `CodexCliAdapter` can execute an ephemeral, read-only Codex CLI
+round trip under confirmed ChatGPT login without exposing API-key environment
+variables. It records a schema-constrained request-binding echo from the CLI
+JSONL stream. Because the CLI cannot attest quota, credits, or overage state,
+this path is classified as `chatgpt_plan_usage` and requires an explicit v2
+plan-usage authority before any inference. It is never silently treated as
+`no_charge`; see `../docs/real-paired-outcome-program.md`.
+
 Freeze a task-local action denominator before preparing any Action Manifest,
 then inspect coverage through the immutable read-only path:
 
