@@ -125,6 +125,12 @@ read-only projection separates mechanism validation, reviewed fixture outcomes,
 and observed real-workload outcomes while keeping provider, reviewer, and
 workload identity unverified. See `docs/real-paired-outcome-program.md`.
 
+For projects with no role-separated second human, ARCH-06 also supports an
+explicitly pre-registered `machine_exact_contract` mode. It reports only bounded
+exact-JSON contract accuracy from the fixed scorer. It never becomes Phase 16
+semantic task-quality evidence and cannot authorize promotion; the original human
+review path remains the default.
+
 ARCH-07 adds a durable single-execution attempt, atomic compare-and-set
 transitions, and read-only `recovery_required` status. It refuses automatic
 retry after an interrupted provider attempt because the transport call count is

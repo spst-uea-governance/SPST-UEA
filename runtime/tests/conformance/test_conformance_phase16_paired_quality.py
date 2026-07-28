@@ -215,6 +215,73 @@ def test_phase16_establishes_bounded_quality_only_after_blinded_scoring_and_huma
 
 
 @pytest.mark.conformance
+def test_phase16_machine_exact_contract_is_available_without_semantic_quality(
+    tmp_path,
+):
+    repository, ledger, _, _, pairs = _setup_evaluation(tmp_path)
+
+    evaluation = ledger.evaluate(
+        {
+            "pairs": pairs,
+            "evaluation_mode": PairedQualityEvidenceLedger.MACHINE_EXACT_CONTRACT_MODE,
+        }
+    )
+
+    assert evaluation["status"] == "machine_exact_contract_ready"
+    assert evaluation["evaluation_mode"] == "machine_exact_contract"
+    assert evaluation["measurement"] == {
+        "available": False,
+        "metric_scope": ledger.METRIC_SCOPE,
+        "sample_count": 0,
+        "minimum_paired_samples": 8,
+        "reason": "machine_exact_contract_exposed_separately",
+    }
+    metric = evaluation["machine_exact_contract"]
+    assert metric["available"] is True
+    assert metric["metric_scope"] == ledger.MACHINE_EXACT_CONTRACT_SCOPE
+    assert metric["sample_count"] == 8
+    assert metric["baseline_mean"] == 0.0
+    assert metric["candidate_mean"] == 1.0
+    assert metric["paired_delta"] == 1.0
+    assert metric["positive_effect_observed"] is True
+    assert metric["human_reviewed"] is False
+    assert metric["semantic_task_quality_established"] is False
+    assert metric["claim_eligible"] is False
+    assert evaluation["human_review"]["status"] == "not_applicable"
+    assert evaluation["task_quality"]["available"] is False
+    assert (
+        evaluation["task_quality"]["reason"]
+        == "machine_exact_contract_not_semantic_task_quality"
+    )
+    assert evaluation["claims"]["task_quality_uplift_claimed"] is False
+    assert repository.verify_provenance()["valid"] is True
+
+    rejected_human_review = ledger.review(
+        evaluation["id"],
+        _accepted_review(evaluation),
+    )
+    assert rejected_human_review["operation"]["status"] == "blocked"
+    assert (
+        rejected_human_review["operation"]["reason"]
+        == "quality_evaluation_not_pending"
+    )
+
+
+@pytest.mark.conformance
+def test_phase16_unknown_evaluation_mode_fails_closed(tmp_path):
+    _, ledger, _, _, pairs = _setup_evaluation(tmp_path)
+
+    blocked = ledger.evaluate(
+        {"pairs": pairs, "evaluation_mode": "machine_semantic_quality"}
+    )
+
+    assert blocked["status"] == "blocked"
+    assert "paired_evaluation_mode_invalid" in blocked["reasons"]
+    assert blocked["machine_exact_contract"]["available"] is False
+    assert blocked["task_quality"]["available"] is False
+
+
+@pytest.mark.conformance
 def test_phase16_minimum_sample_and_human_review_digest_fail_closed(tmp_path):
     _, ledger, _, _, pairs = _setup_evaluation(tmp_path, sample_count=7)
 

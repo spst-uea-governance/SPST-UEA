@@ -285,8 +285,9 @@ def _registration_payload(
     workload_class: str = "test_fixture",
     baseline_candidate_id: str = "normal-control",
     candidate_id: str = "spst-treatment",
+    evaluation_mode: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "baseline_candidate_id": baseline_candidate_id,
         "candidate_id": candidate_id,
         "context_intervention": intervention,
@@ -294,6 +295,9 @@ def _registration_payload(
         "study": {"workload_class": workload_class},
         "task_ids": task_ids,
     }
+    if evaluation_mode is not None:
+        payload["evaluation_mode"] = evaluation_mode
+    return payload
 
 
 def _program_fixture(
@@ -304,6 +308,7 @@ def _program_fixture(
     workload_class: str = "test_fixture",
     authority: dict[str, Any] | None = None,
     reverse_registration: bool = False,
+    evaluation_mode: str | None = None,
 ) -> tuple[
     SQLiteRepository,
     RealPairedOutcomeProgram,
@@ -332,6 +337,7 @@ def _program_fixture(
             intervention,
             authority=authority,
             workload_class=workload_class,
+            evaluation_mode=evaluation_mode,
         )
     )
     return repository, program, selected_adapter, intervention, registered
@@ -387,6 +393,7 @@ def test_preregistered_fixture_reaches_only_mechanism_validation(
     assert executed["execution"]["evidence_class"] == "mechanism_validation"
     assert executed["blind_review"]["source_pairs_disclosed"] is False
     assert executed["outcome"]["measurement_available"] is False
+    assert executed["outcome"]["machine_exact_contract"]["available"] is False
     assert adapter.calls == 32
 
     review_payload = _review_payload(executed)
@@ -431,6 +438,83 @@ def test_preregistered_fixture_reaches_only_mechanism_validation(
     assert duplicate["status"] == "blocked"
     assert duplicate["reason"] == "real_paired_outcome_execution_already_recorded"
     assert adapter.calls == calls_before
+
+
+def test_machine_exact_contract_mode_is_preregistered_and_never_becomes_task_quality(
+    tmp_path: Path,
+):
+    repository, program, adapter, intervention, registered = _program_fixture(
+        tmp_path,
+        evaluation_mode=RealPairedOutcomeProgram.MACHINE_EXACT_CONTRACT_MODE,
+    )
+
+    assert registered["status"] == "registered"
+    assert registered["evaluation_contract"] == {
+        "mode": "machine_exact_contract",
+        "metric_scope": (
+            "task_specific_exact_json_contract_accuracy_on_registered_local_corpus"
+        ),
+        "minimum_paired_samples": 8,
+        "confidence_level": 0.95,
+        "uncertainty_method": "hoeffding_bounded_paired_delta",
+        "human_review_required": False,
+        "blind_review_required": False,
+        "machine_exact_contract_metric": True,
+        "semantic_task_quality_established_by_machine": False,
+        "automatic_promotion": False,
+    }
+    assert registered["preregistration"]["evaluation_mode"] == "machine_exact_contract"
+    assert program.preflight(registered["id"])["status"] == "ready"
+    assert adapter.calls == 0
+
+    executed = program.execute(
+        registered["id"],
+        context_intervention=intervention,
+    )
+
+    assert executed["status"] == "machine_exact_contract_observed"
+    assert executed["reason"] == "machine_metric_not_semantic_task_quality"
+    assert executed["execution"]["status"] == "machine_exact_contract_ready"
+    assert executed["execution"]["actual_adapter_invocations"] == 32
+    metric = executed["outcome"]["machine_exact_contract"]
+    assert metric["available"] is True
+    assert metric["sample_count"] == 8
+    assert metric["baseline_mean"] == 0.0
+    assert metric["candidate_mean"] == 1.0
+    assert metric["paired_delta"] == 1.0
+    assert metric["positive_effect_observed"] is True
+    assert metric["human_reviewed"] is False
+    assert metric["semantic_task_quality_established"] is False
+    assert metric["claim_eligible"] is False
+    assert executed["outcome"]["measurement_available"] is False
+    assert executed["outcome"]["observed_real_workload_outcome"] is False
+    assert executed["claims"]["general_model_quality_claimed"] is False
+    assert (
+        executed["claims"]["machine_exact_contract_is_semantic_task_quality"]
+        is False
+    )
+    assert repository.verify_provenance()["valid"] is True
+
+    blocked_review = program.review(registered["id"], {})
+    assert blocked_review["status"] == "blocked"
+    assert blocked_review["reason"] == "real_paired_outcome_not_pending_review"
+
+
+def test_invalid_machine_evaluation_mode_fails_before_provider_calls(tmp_path: Path):
+    _, program, adapter, intervention, _ = _program_fixture(tmp_path)
+    task_ids = [f"outcome-{index:02d}" for index in range(8)]
+
+    blocked = program.register(
+        _registration_payload(
+            task_ids,
+            intervention,
+            evaluation_mode="machine_semantic_quality",
+        )
+    )
+
+    assert blocked["status"] == "blocked"
+    assert blocked["reason"] == "real_paired_outcome_evaluation_mode_invalid"
+    assert adapter.calls == 0
 
 
 def test_task_set_binding_is_independent_of_corpus_insertion_order(tmp_path: Path):

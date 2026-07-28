@@ -114,6 +114,22 @@ mapping was not accessed and the reviewer is independent. These declarations
 remain cryptographically unverified. The full mapping and measurement become
 visible only after the append-only review is accepted.
 
+## Machine Exact-Contract Observation
+
+A Program that declares `machine_exact_contract` before execution may expose the
+same deterministic scorer's exact-contract measurement without a human review.
+This mode is intended for single-operator studies and is deliberately outside the
+Phase 16 semantic-quality claim path. It still requires valid producer bindings,
+distinct runs, provider observations when applicable, at least eight pairs, and
+the fixed uncertainty calculation.
+
+The machine projection reports `human_reviewed: false`,
+`semantic_task_quality_established: false`, and `claim_eligible: false`.
+`task_quality.available` remains false. Unknown modes, post-hoc mode changes, and
+attempts to append a human review to a machine-mode record fail closed. Machine
+results may diagnose exact-format regressions; they do not establish semantic
+correctness, causal context use, general model quality, or promotion authority.
+
 ## Cockpit API
 
 - `POST /api/paired-quality-evaluations` accepts producer references only.
