@@ -121,6 +121,12 @@ Run commands from `runtime/` unless noted otherwise:
   evidence. Keep provider, reviewer, and real-workload identity assurance
   explicitly unverified, and run `preflight()` before any credentialed or
   network-backed study.
+- For API-key-free Codex CLI paired studies, require the adapter to scrub
+  `OPENAI_API_KEY` and `CODEX_API_KEY`, confirm ChatGPT login immediately before
+  inference, run ephemeral/read-only with user config and rules ignored, and
+  validate the schema-constrained request-binding echo from JSONL. Classify the
+  call as `chatgpt_plan_usage`, not `no_charge`; require exact v2 plan-usage
+  authority before the first call, and keep billing/provider identity unverified.
 - A verified v4 receipt proves routing, profile, trace, governance, memory
   action, mediated-context digests, session binding, provenance, and the
   recorded repository identity. v1-v3 remain narrower legacy evidence.

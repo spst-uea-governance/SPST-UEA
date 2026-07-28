@@ -17,6 +17,7 @@ from spst_runtime.evidence_context import EvidenceContextCompiler
 from spst_runtime.interfaces.model_adapter import ModelAdapter
 from spst_runtime.persistence.sqlite_repository import SQLiteRepository
 from spst_runtime.provider_observation import (
+    CODEX_CLI_OBSERVATION_SOURCE,
     build_provider_observation,
     build_provider_request_binding,
 )
@@ -24,6 +25,7 @@ from spst_runtime.real_paired_outcome import (
     PROGRAM_EXECUTION_PREFIX,
     PROGRAM_RECORD_PREFIX,
     PROVIDER_EXECUTION_AUTHORITY_SCHEMA,
+    PROVIDER_EXECUTION_AUTHORITY_V2_SCHEMA,
     RealPairedOutcomeProgram,
 )
 from spst_runtime.real_paired_outcome_bridge import main as outcome_bridge_main
@@ -84,15 +86,19 @@ class ProgramObservableAdapter(ModelAdapter):
         }
 
     def health(self) -> dict[str, Any]:
-        return {
+        health = {
             "ok": True,
             "provider": "program-observable-provider",
             "model_version": self.model_version,
             "requires_api_key": self.execution_environment == "external_network",
         }
+        if self.declared_observation_source == CODEX_CLI_OBSERVATION_SOURCE:
+            health["requires_api_key"] = False
+            health["authentication_mode"] = "chatgpt_cached_session_required"
+        return health
 
     def get_capabilities(self) -> dict[str, Any]:
-        return {
+        capabilities = {
             "interface": "ModelAdapter",
             "supports_structured_evaluation": True,
             "supports_provider_observation": True,
@@ -100,6 +106,17 @@ class ProgramObservableAdapter(ModelAdapter):
             "execution_environment": self.execution_environment,
             "billing_class": self.billing_class,
         }
+        if self.declared_observation_source == CODEX_CLI_OBSERVATION_SOURCE:
+            capabilities.update(
+                {
+                    "authentication_mode": "chatgpt_cached_session_required",
+                    "api_key_environment_scrubbed": True,
+                    "ephemeral_session_required": True,
+                    "read_only_sandbox_required": True,
+                    "structured_output_binding_required": True,
+                }
+            )
+        return capabilities
 
 
 def _git(repository: Path, *arguments: str) -> str:
@@ -207,14 +224,22 @@ def _authority(
     *,
     external: bool = False,
     paid: bool = False,
+    chatgpt_plan: bool | None = None,
     maximum_adapter_invocations: int = 32,
 ) -> dict[str, Any]:
-    return {
-        "schema": PROVIDER_EXECUTION_AUTHORITY_SCHEMA,
+    authority = {
+        "schema": (
+            PROVIDER_EXECUTION_AUTHORITY_V2_SCHEMA
+            if chatgpt_plan is not None
+            else PROVIDER_EXECUTION_AUTHORITY_SCHEMA
+        ),
         "external_provider_calls_authorized": external,
         "paid_provider_calls_authorized": paid,
         "maximum_adapter_invocations": maximum_adapter_invocations,
     }
+    if chatgpt_plan is not None:
+        authority["chatgpt_plan_usage_authorized"] = chatgpt_plan
+    return authority
 
 
 def _registration_payload(
@@ -520,6 +545,102 @@ def test_paid_or_unknown_provider_is_blocked_before_first_call(tmp_path: Path):
     assert blocked["status"] == "blocked"
     assert blocked["reason"] == "paid_or_unknown_provider_calls_not_authorized"
     assert adapter.calls == 0
+
+
+def test_chatgpt_plan_provider_requires_exact_v2_authority_before_calls(
+    tmp_path: Path,
+):
+    legacy_adapter = ProgramObservableAdapter(
+        observation_source=CODEX_CLI_OBSERVATION_SOURCE,
+        execution_environment="external_network",
+        billing_class="chatgpt_plan_usage",
+    )
+    _, legacy_program, _, _, legacy_registration = _program_fixture(
+        tmp_path / "legacy-authority",
+        adapter=legacy_adapter,
+        workload_class="real_user_workload",
+        authority=_authority(external=True),
+    )
+    legacy = legacy_program.preflight(legacy_registration["id"])
+    assert legacy["status"] == "blocked"
+    assert legacy["reason"] == "chatgpt_plan_usage_not_authorized"
+    assert legacy_adapter.calls == 0
+
+    blocked_adapter = ProgramObservableAdapter(
+        observation_source=CODEX_CLI_OBSERVATION_SOURCE,
+        execution_environment="external_network",
+        billing_class="chatgpt_plan_usage",
+    )
+    _, blocked_program, _, _, blocked_registration = _program_fixture(
+        tmp_path / "blocked",
+        adapter=blocked_adapter,
+        workload_class="real_user_workload",
+        authority=_authority(external=True, chatgpt_plan=False),
+    )
+    blocked = blocked_program.preflight(blocked_registration["id"])
+    assert blocked["status"] == "blocked"
+    assert blocked["reason"] == "chatgpt_plan_usage_not_authorized"
+    assert blocked_adapter.calls == 0
+
+    allowed_adapter = ProgramObservableAdapter(
+        observation_source=CODEX_CLI_OBSERVATION_SOURCE,
+        execution_environment="external_network",
+        billing_class="chatgpt_plan_usage",
+    )
+    _, allowed_program, _, allowed_intervention, allowed_registration = _program_fixture(
+        tmp_path / "allowed",
+        adapter=allowed_adapter,
+        workload_class="real_user_workload",
+        authority=_authority(external=True, chatgpt_plan=True),
+    )
+    ready = allowed_program.preflight(allowed_registration["id"])
+    assert ready["status"] == "ready"
+    assert ready["chatgpt_plan_usage_authorized"] is True
+    assert ready["paid_provider_calls_authorized"] is False
+    assert allowed_adapter.calls == 0
+    executed = allowed_program.execute(
+        allowed_registration["id"],
+        context_intervention=allowed_intervention,
+    )
+    assert executed["status"] == "pending_human_review"
+    assert executed["execution"]["evidence_class"] == "remote_transport_observed"
+    reviewed = allowed_program.review(
+        allowed_registration["id"],
+        _review_payload(executed),
+    )
+    assert reviewed["status"] == "reviewed_observed_real_workload"
+    assert reviewed["outcome"]["observed_real_workload_outcome"] is True
+    assert reviewed["outcome"]["provider_identity_cryptographically_verified"] is False
+    assert reviewed["outcome"]["real_paired_outcome_cryptographically_verified"] is False
+
+    fixture_adapter = ProgramObservableAdapter(
+        observation_source=CODEX_CLI_OBSERVATION_SOURCE,
+        execution_environment="external_network",
+        billing_class="chatgpt_plan_usage",
+    )
+    (
+        _,
+        fixture_program,
+        _,
+        fixture_intervention,
+        fixture_registration,
+    ) = _program_fixture(
+        tmp_path / "fixture-relabel",
+        adapter=fixture_adapter,
+        workload_class="test_fixture",
+        authority=_authority(external=True, chatgpt_plan=True),
+    )
+    fixture_executed = fixture_program.execute(
+        fixture_registration["id"],
+        context_intervention=fixture_intervention,
+    )
+    fixture_reviewed = fixture_program.review(
+        fixture_registration["id"],
+        _review_payload(fixture_executed),
+    )
+    assert fixture_reviewed["status"] == "reviewed_fixture_outcome"
+    assert fixture_reviewed["reason"] == "fixture_workload_is_not_real_outcome_evidence"
+    assert fixture_reviewed["outcome"]["observed_real_workload_outcome"] is False
 
 
 def test_source_relabel_and_provider_drift_fail_closed(tmp_path: Path):

@@ -21,7 +21,10 @@ from spst_runtime.live_pairing import (
 )
 from spst_runtime.persistence.sqlite_repository import SQLiteRepository
 from spst_runtime.process_transport import build_recovery_lease_resource_id
-from spst_runtime.provider_observation import PROVIDER_OBSERVATION_SOURCES
+from spst_runtime.provider_observation import (
+    CODEX_CLI_OBSERVATION_SOURCE,
+    PROVIDER_OBSERVATION_SOURCES,
+)
 from spst_runtime.provider_transport import (
     IdempotentTransportAdapter,
     PROVIDER_RECOVERY_AUTHORITY_SCHEMA,
@@ -52,6 +55,7 @@ REAL_PAIRED_OUTCOME_EXECUTION_SCHEMA = "spst-real-paired-outcome-execution-v2"
 LEGACY_REAL_PAIRED_OUTCOME_EXECUTION_SCHEMA = "spst-real-paired-outcome-execution-v1"
 REAL_PAIRED_OUTCOME_INDEX_SCHEMA = "spst-real-paired-outcome-index-v1"
 PROVIDER_EXECUTION_AUTHORITY_SCHEMA = "spst-provider-execution-authority-v1"
+PROVIDER_EXECUTION_AUTHORITY_V2_SCHEMA = "spst-provider-execution-authority-v2"
 PROGRAM_INDEX_KEY = "runtime:real_paired_outcome:index:v1"
 PROGRAM_RECORD_PREFIX = "runtime:real_paired_outcome:program:"
 PROGRAM_EXECUTION_PREFIX = "runtime:real_paired_outcome:execution:"
@@ -59,10 +63,15 @@ WORKLOAD_CLASSES = frozenset({"test_fixture", "real_user_workload"})
 EXECUTION_ENVIRONMENTS = frozenset(
     {"in_process", "local_process", "external_network"}
 )
-BILLING_CLASSES = frozenset({"no_charge", "paid", "unknown"})
+BILLING_CLASSES = frozenset(
+    {"chatgpt_plan_usage", "no_charge", "paid", "unknown"}
+)
 MECHANISM_OBSERVATION_SOURCE = "in_process_provider_echo"
 PROCESS_MECHANISM_OBSERVATION_SOURCE = "local_process_provider_echo"
 REMOTE_OBSERVATION_SOURCE = "https_response_metadata_echo"
+REMOTE_OBSERVATION_SOURCES = frozenset(
+    {REMOTE_OBSERVATION_SOURCE, CODEX_CLI_OBSERVATION_SOURCE}
+)
 MAXIMUM_TRANSPORT_RECONCILIATION_MULTIPLIER = 2
 
 _identifier = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
@@ -355,6 +364,9 @@ class RealPairedOutcomeProgram:
             "paid_provider_calls_authorized": registration["execution_authority"][
                 "paid_provider_calls_authorized"
             ],
+            "chatgpt_plan_usage_authorized": registration[
+                "execution_authority"
+            ].get("chatgpt_plan_usage_authorized", False),
             "provider": deepcopy(registration["provider"]),
             "state_changed": False,
             "adapter_invocations_executed": 0,
@@ -1428,6 +1440,19 @@ class RealPairedOutcomeProgram:
             return "real_paired_outcome_execution_authority_invalid"
         provider = self._mapping(value.get("provider"))
         hardening = self._mapping(value.get("operational_hardening"))
+        if provider.get("provider_observation_source") == CODEX_CLI_OBSERVATION_SOURCE:
+            if (
+                provider.get("execution_environment") != "external_network"
+                or provider.get("billing_class") != "chatgpt_plan_usage"
+                or provider.get("requires_api_key") is not False
+                or provider.get("authentication_mode")
+                != "chatgpt_cached_session_required"
+                or provider.get("api_key_environment_scrubbed") is not True
+                or provider.get("ephemeral_session_required") is not True
+                or provider.get("read_only_sandbox_required") is not True
+                or provider.get("structured_output_binding_required") is not True
+            ):
+                return "codex_cli_provider_contract_invalid"
         transport_fields_present = any(
             field in provider
             for field in (
@@ -1816,9 +1841,15 @@ class RealPairedOutcomeProgram:
             return "external_provider_calls_not_authorized"
         if (
             adapter["billing_class"] != "no_charge"
+            and adapter["billing_class"] != "chatgpt_plan_usage"
             and authority["paid_provider_calls_authorized"] is not True
         ):
             return "paid_or_unknown_provider_calls_not_authorized"
+        if (
+            adapter["billing_class"] == "chatgpt_plan_usage"
+            and authority.get("chatgpt_plan_usage_authorized") is not True
+        ):
+            return "chatgpt_plan_usage_not_authorized"
         if authority["maximum_adapter_invocations"] < registration[
             "expected_adapter_invocations"
         ]:
@@ -1891,6 +1922,19 @@ class RealPairedOutcomeProgram:
         health_recovery_authority_trust_sha256 = health.get(
             "recovery_authority_trust_anchor_sha256"
         )
+        authentication_mode = capabilities.get("authentication_mode")
+        api_key_environment_scrubbed = capabilities.get(
+            "api_key_environment_scrubbed"
+        )
+        ephemeral_session_required = capabilities.get(
+            "ephemeral_session_required"
+        )
+        read_only_sandbox_required = capabilities.get(
+            "read_only_sandbox_required"
+        )
+        structured_output_binding_required = capabilities.get(
+            "structured_output_binding_required"
+        )
         provider_name = health.get("provider") or health.get("active_provider")
         model_version = health.get("model_version") or health.get("model")
         if observation_source not in PROVIDER_OBSERVATION_SOURCES:
@@ -1899,6 +1943,19 @@ class RealPairedOutcomeProgram:
             return None, "real_paired_outcome_execution_environment_required"
         if billing_class not in BILLING_CLASSES:
             return None, "real_paired_outcome_billing_class_required"
+        if observation_source == CODEX_CLI_OBSERVATION_SOURCE and (
+            execution_environment != "external_network"
+            or billing_class != "chatgpt_plan_usage"
+            or health.get("requires_api_key") is not False
+            or health.get("authentication_mode")
+            != "chatgpt_cached_session_required"
+            or authentication_mode != "chatgpt_cached_session_required"
+            or api_key_environment_scrubbed is not True
+            or ephemeral_session_required is not True
+            or read_only_sandbox_required is not True
+            or structured_output_binding_required is not True
+        ):
+            return None, "codex_cli_provider_contract_invalid"
         if transport_idempotency is not transport_reconciliation:
             return None, "provider_transport_capability_incomplete"
         if transport_idempotency and not callable(
@@ -2021,6 +2078,23 @@ class RealPairedOutcomeProgram:
                 "transport_idempotency_supported": transport_idempotency,
                 "transport_reconciliation_supported": transport_reconciliation,
                 "requires_api_key": bool(health.get("requires_api_key", False)),
+                "authentication_mode": (
+                    str(authentication_mode)
+                    if authentication_mode is not None
+                    else None
+                ),
+                "api_key_environment_scrubbed": (
+                    api_key_environment_scrubbed is True
+                ),
+                "ephemeral_session_required": (
+                    ephemeral_session_required is True
+                ),
+                "read_only_sandbox_required": (
+                    read_only_sandbox_required is True
+                ),
+                "structured_output_binding_required": (
+                    structured_output_binding_required is True
+                ),
                 "adapter_declaration_authenticated": False,
                 "provider_identity_cryptographically_verified": False,
                 "process_isolated_recovery_supported": process_isolated_recovery,
@@ -2258,7 +2332,7 @@ class RealPairedOutcomeProgram:
             PROCESS_MECHANISM_OBSERVATION_SOURCE,
         }:
             return "mechanism_validation", None
-        if sources[0] == REMOTE_OBSERVATION_SOURCE:
+        if sources[0] in REMOTE_OBSERVATION_SOURCES:
             return "remote_transport_observed", None
         return "unresolved", "real_paired_outcome_observation_source_invalid"
 
@@ -2337,18 +2411,32 @@ class RealPairedOutcomeProgram:
 
     @staticmethod
     def _authority(value: Any) -> dict[str, Any] | None:
-        if not isinstance(value, dict) or set(value) != {
+        if not isinstance(value, dict):
+            return None
+        schema = value.get("schema")
+        fields = {
             "external_provider_calls_authorized",
             "maximum_adapter_invocations",
             "paid_provider_calls_authorized",
             "schema",
-        }:
+        }
+        if schema == PROVIDER_EXECUTION_AUTHORITY_V2_SCHEMA:
+            fields.add("chatgpt_plan_usage_authorized")
+        if set(value) != fields:
             return None
         maximum = value.get("maximum_adapter_invocations")
         if (
-            value.get("schema") != PROVIDER_EXECUTION_AUTHORITY_SCHEMA
+            schema
+            not in {
+                PROVIDER_EXECUTION_AUTHORITY_SCHEMA,
+                PROVIDER_EXECUTION_AUTHORITY_V2_SCHEMA,
+            }
             or not isinstance(value.get("external_provider_calls_authorized"), bool)
             or not isinstance(value.get("paid_provider_calls_authorized"), bool)
+            or (
+                schema == PROVIDER_EXECUTION_AUTHORITY_V2_SCHEMA
+                and not isinstance(value.get("chatgpt_plan_usage_authorized"), bool)
+            )
             or not isinstance(maximum, int)
             or isinstance(maximum, bool)
             or maximum < 1

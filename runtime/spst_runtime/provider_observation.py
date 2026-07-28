@@ -10,8 +10,10 @@ from spst_runtime.model_input_binding import ModelInputBindingError, bind_model_
 
 PROVIDER_REQUEST_BINDING_SCHEMA = "spst-provider-request-binding-v1"
 PROVIDER_OBSERVATION_SCHEMA = "spst-provider-observation-v1"
+CODEX_CLI_OBSERVATION_SOURCE = "codex_cli_jsonl_model_echo"
 PROVIDER_OBSERVATION_SOURCES = frozenset(
     {
+        CODEX_CLI_OBSERVATION_SOURCE,
         "https_response_metadata_echo",
         "in_process_provider_echo",
         "local_process_provider_echo",

@@ -67,6 +67,48 @@ limit for an opaque remote adapter.
 
 No paid provider was invoked while implementing or verifying ARCH-06.
 
+## API-key-free Codex CLI provider path
+
+`CodexCliAdapter` adds a bounded external-provider path for a locally installed
+Codex CLI that is already signed in with ChatGPT. It invokes `codex exec` with
+`--ephemeral`, ignores user config and exec-policy rules, uses a read-only
+sandbox, and requires JSONL plus schema-constrained structured output. The
+adapter removes `OPENAI_API_KEY` and `CODEX_API_KEY` from the child environment
+and checks `codex login status` immediately before every inference. Any login
+mode other than the exact ChatGPT status fails before the model call.
+
+The model output must echo the exact SPST provider-request binding inside the
+schema-constrained response. The adapter records the returned CLI thread ID,
+turn-completion event, token usage, answer digest, and acknowledgement as
+`codex_cli_jsonl_model_echo`. Missing, malformed, failed, mismatched, or replayed
+events are rejected. This proves a fresh observable CLI request/response round
+trip; it does not cryptographically authenticate OpenAI, the account, model
+weights, or provider identity.
+
+ChatGPT login avoids Platform API-key billing, but the CLI cannot attest the
+account's remaining quota, credits, overage configuration, or incremental cost.
+Its billing class is therefore `chatgpt_plan_usage`, not `no_charge`. A Program
+must use `spst-provider-execution-authority-v2` and explicitly set
+`chatgpt_plan_usage_authorized: true` in addition to external-call authority.
+The v1 authority and a v2 false/missing authorization both fail before the first
+model call. This authorization permits plan quota consumption; it is not proof
+that the invocation was monetarily free.
+
+```json
+{
+  "schema": "spst-provider-execution-authority-v2",
+  "external_provider_calls_authorized": true,
+  "paid_provider_calls_authorized": false,
+  "chatgpt_plan_usage_authorized": true,
+  "maximum_adapter_invocations": 32
+}
+```
+
+A reviewed `real_user_workload` Program using this source may reach
+`reviewed_observed_real_workload`. `real_paired_outcome_cryptographically_verified`
+remains false because workload provenance, reviewer independence, provider
+identity, and billing state are still not externally authenticated.
+
 ## Execution and recomputation
 
 `execute()` accepts the exact registered intervention only. Before the first
