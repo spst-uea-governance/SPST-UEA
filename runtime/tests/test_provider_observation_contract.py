@@ -12,6 +12,8 @@ from spst_runtime.live_pairing import (
     validate_live_pair_plan,
 )
 from spst_runtime.provider_observation import (
+    CODEX_CLI_OBSERVATION_SOURCE,
+    CODEX_CLI_SPEND_GUARD_SCHEMA,
     ProviderObservationError,
     build_provider_observation,
     build_provider_request_binding,
@@ -54,6 +56,37 @@ def _observation(prompt: str = "bound") -> tuple[dict, dict]:
         output_text='{"answer": 1}',
         observation_source="in_process_provider_echo",
         acknowledged_request_binding_sha256=request["request_binding_sha256"],
+    )
+    return request, observation
+
+
+def _codex_spend_guard() -> dict:
+    return {
+        "schema": CODEX_CLI_SPEND_GUARD_SCHEMA,
+        "account_type": "chatgpt",
+        "plan_type": "plus",
+        "included_usage_percent": 24,
+        "maximum_included_usage_percent": 95,
+        "spendable_credits_present": False,
+        "credit_balance_zero": True,
+        "rate_limit_reached": False,
+        "source": "codex_app_server_account_rate_limits_read",
+        "source_authenticated": False,
+    }
+
+
+def _codex_observation(*, guard: dict | None) -> tuple[dict, dict]:
+    request = build_provider_request_binding("codex-bound", {"evaluation": {}})
+    observation = build_provider_observation(
+        request,
+        provider_name="openai-codex-cli",
+        model_version="gpt-5.6-luna",
+        response_id="codex-thread-one",
+        response_status="completed",
+        output_text='{"answer": 1}',
+        observation_source=CODEX_CLI_OBSERVATION_SOURCE,
+        acknowledged_request_binding_sha256=request["request_binding_sha256"],
+        execution_guard=guard,
     )
     return request, observation
 
@@ -285,6 +318,60 @@ def test_persisted_provider_observation_rejects_context_and_claim_tampering():
         match="provider_observation_not_canonicalizable",
     ):
         canonical_provider_value_sha256({"not_finite": float("nan")})
+
+
+def test_codex_observation_requires_a_valid_bound_no_spend_guard():
+    guard = _codex_spend_guard()
+    request, observation = _codex_observation(guard=guard)
+    assert observation["execution_guard"] == guard
+    assert verify_provider_observation(
+        observation,
+        request,
+        output_text='{"answer": 1}',
+    ) == (True, None)
+
+    _, missing = _codex_observation(guard=None)
+    assert missing["status"] == "unresolved"
+    assert missing["reason"] == "codex_cli_spend_guard_missing"
+
+    removed = deepcopy(observation)
+    del removed["execution_guard"]
+    removed = _resign(removed, "observation_sha256")
+    assert verify_provider_observation(
+        removed,
+        request,
+        output_text='{"answer": 1}',
+    )[1] == "codex_cli_spend_guard_missing"
+
+    exhausted = deepcopy(observation)
+    exhausted["execution_guard"]["included_usage_percent"] = 95
+    exhausted = _resign(exhausted, "observation_sha256")
+    assert verify_provider_observation(
+        exhausted,
+        request,
+        output_text='{"answer": 1}',
+    )[1] == "codex_cli_spend_guard_invalid"
+
+    extra_field = deepcopy(observation)
+    extra_field["execution_guard"]["caller_claim"] = "free"
+    extra_field = _resign(extra_field, "observation_sha256")
+    assert verify_provider_observation(
+        extra_field,
+        request,
+        output_text='{"answer": 1}',
+    )[1] == "codex_cli_spend_guard_shape_invalid"
+
+
+def test_execution_guard_cannot_be_relabelled_onto_an_unrelated_source():
+    request, observation = _observation()
+    relabelled = deepcopy(observation)
+    relabelled["execution_guard"] = _codex_spend_guard()
+    relabelled = _resign(relabelled, "observation_sha256")
+    assert verify_provider_observation(
+        relabelled,
+        request,
+        output_text='{"answer": 1}',
+    )[1] == "provider_execution_guard_scope_invalid"
 
 
 def test_live_pair_plan_and_execution_fail_closed_on_invalid_contracts():

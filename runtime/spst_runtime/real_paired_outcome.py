@@ -23,6 +23,7 @@ from spst_runtime.persistence.sqlite_repository import SQLiteRepository
 from spst_runtime.process_transport import build_recovery_lease_resource_id
 from spst_runtime.provider_observation import (
     CODEX_CLI_OBSERVATION_SOURCE,
+    CODEX_CLI_SPEND_GUARD_SCHEMA,
     PROVIDER_OBSERVATION_SOURCES,
 )
 from spst_runtime.provider_transport import (
@@ -1451,6 +1452,11 @@ class RealPairedOutcomeProgram:
                 or provider.get("ephemeral_session_required") is not True
                 or provider.get("read_only_sandbox_required") is not True
                 or provider.get("structured_output_binding_required") is not True
+                or provider.get("zero_incremental_spend_guard")
+                != CODEX_CLI_SPEND_GUARD_SCHEMA
+                or provider.get("spendable_credits_must_be_absent") is not True
+                or provider.get("included_plan_rate_limit_must_be_available")
+                is not True
             ):
                 return "codex_cli_provider_contract_invalid"
         transport_fields_present = any(
@@ -1935,6 +1941,15 @@ class RealPairedOutcomeProgram:
         structured_output_binding_required = capabilities.get(
             "structured_output_binding_required"
         )
+        zero_incremental_spend_guard = capabilities.get(
+            "zero_incremental_spend_guard"
+        )
+        spendable_credits_must_be_absent = capabilities.get(
+            "spendable_credits_must_be_absent"
+        )
+        included_plan_rate_limit_must_be_available = capabilities.get(
+            "included_plan_rate_limit_must_be_available"
+        )
         provider_name = health.get("provider") or health.get("active_provider")
         model_version = health.get("model_version") or health.get("model")
         if observation_source not in PROVIDER_OBSERVATION_SOURCES:
@@ -1954,6 +1969,12 @@ class RealPairedOutcomeProgram:
             or ephemeral_session_required is not True
             or read_only_sandbox_required is not True
             or structured_output_binding_required is not True
+            or zero_incremental_spend_guard != CODEX_CLI_SPEND_GUARD_SCHEMA
+            or spendable_credits_must_be_absent is not True
+            or included_plan_rate_limit_must_be_available is not True
+            or health.get("zero_incremental_spend_guard")
+            != CODEX_CLI_SPEND_GUARD_SCHEMA
+            or health.get("spendable_credits_must_be_absent") is not True
         ):
             return None, "codex_cli_provider_contract_invalid"
         if transport_idempotency is not transport_reconciliation:
@@ -2094,6 +2115,17 @@ class RealPairedOutcomeProgram:
                 ),
                 "structured_output_binding_required": (
                     structured_output_binding_required is True
+                ),
+                "zero_incremental_spend_guard": (
+                    str(zero_incremental_spend_guard)
+                    if zero_incremental_spend_guard is not None
+                    else None
+                ),
+                "spendable_credits_must_be_absent": (
+                    spendable_credits_must_be_absent is True
+                ),
+                "included_plan_rate_limit_must_be_available": (
+                    included_plan_rate_limit_must_be_available is True
                 ),
                 "adapter_declaration_authenticated": False,
                 "provider_identity_cryptographically_verified": False,

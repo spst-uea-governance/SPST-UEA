@@ -85,14 +85,26 @@ events are rejected. This proves a fresh observable CLI request/response round
 trip; it does not cryptographically authenticate OpenAI, the account, model
 weights, or provider identity.
 
-ChatGPT login avoids Platform API-key billing, but the CLI cannot attest the
-account's remaining quota, credits, overage configuration, or incremental cost.
-Its billing class is therefore `chatgpt_plan_usage`, not `no_charge`. A Program
-must use `spst-provider-execution-authority-v2` and explicitly set
+ChatGPT login avoids Platform API-key billing. Before every inference, the adapter
+also queries the local Codex app-server `account/read` and
+`account/rateLimits/read` surfaces. It fails closed unless the account is a
+ChatGPT account, the plan identities match, the included Codex limit remains below
+the configured threshold, the limit is not reported as reached, and credits are
+explicitly reported as absent, finite, and zero balance. The projected decision is
+bound inside the canonical provider observation, so removing or altering it makes
+the Producer Evidence ineligible.
+
+This is a local, unauthenticated observation of the installed Codex client state;
+it is not a cryptographic billing attestation and cannot rule out every
+server-side account-policy change. Its billing class therefore remains
+`chatgpt_plan_usage`, not `no_charge`. A Program must use
+`spst-provider-execution-authority-v2` and explicitly set
 `chatgpt_plan_usage_authorized: true` in addition to external-call authority.
 The v1 authority and a v2 false/missing authorization both fail before the first
-model call. This authorization permits plan quota consumption; it is not proof
-that the invocation was monetarily free.
+model call. This authorization permits included-plan quota consumption. The
+per-call guard prevents execution when spendable credits are present or the
+reported included limit is unavailable, but it is not cryptographic proof that
+an invocation was monetarily free.
 
 ```json
 {

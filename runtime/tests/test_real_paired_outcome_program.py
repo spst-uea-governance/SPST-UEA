@@ -7,6 +7,8 @@ from pathlib import Path
 import subprocess
 from typing import Any
 
+import pytest
+
 from spst_runtime.chat_bridge import run_chat_turn
 from spst_runtime.context_review import (
     SEMANTIC_REVIEW_SCOPE,
@@ -18,6 +20,7 @@ from spst_runtime.interfaces.model_adapter import ModelAdapter
 from spst_runtime.persistence.sqlite_repository import SQLiteRepository
 from spst_runtime.provider_observation import (
     CODEX_CLI_OBSERVATION_SOURCE,
+    CODEX_CLI_SPEND_GUARD_SCHEMA,
     build_provider_observation,
     build_provider_request_binding,
 )
@@ -45,6 +48,9 @@ class ProgramObservableAdapter(ModelAdapter):
         billing_class: str = "no_charge",
         observed_provider_name: str = "program-observable-provider",
         observed_model_version: str | None = None,
+        emit_execution_guard: bool = True,
+        capability_overrides: dict[str, Any] | None = None,
+        health_overrides: dict[str, Any] | None = None,
     ):
         self.observation_source = observation_source
         self.declared_observation_source = (
@@ -54,6 +60,9 @@ class ProgramObservableAdapter(ModelAdapter):
         self.billing_class = billing_class
         self.observed_provider_name = observed_provider_name
         self.observed_model_version = observed_model_version
+        self.emit_execution_guard = emit_execution_guard
+        self.capability_overrides = capability_overrides or {}
+        self.health_overrides = health_overrides or {}
         self.calls = 0
         self.model_version = "real-paired-program-v1"
 
@@ -76,6 +85,12 @@ class ProgramObservableAdapter(ModelAdapter):
             output_text=text,
             observation_source=self.observation_source,
             acknowledged_request_binding_sha256=request["request_binding_sha256"],
+            execution_guard=(
+                self._spend_guard()
+                if self.observation_source == CODEX_CLI_OBSERVATION_SOURCE
+                and self.emit_execution_guard
+                else None
+            ),
         )
         return {
             "provider": self.observed_provider_name,
@@ -95,7 +110,9 @@ class ProgramObservableAdapter(ModelAdapter):
         if self.declared_observation_source == CODEX_CLI_OBSERVATION_SOURCE:
             health["requires_api_key"] = False
             health["authentication_mode"] = "chatgpt_cached_session_required"
-        return health
+            health["zero_incremental_spend_guard"] = CODEX_CLI_SPEND_GUARD_SCHEMA
+            health["spendable_credits_must_be_absent"] = True
+        return {**health, **self.health_overrides}
 
     def get_capabilities(self) -> dict[str, Any]:
         capabilities = {
@@ -114,9 +131,27 @@ class ProgramObservableAdapter(ModelAdapter):
                     "ephemeral_session_required": True,
                     "read_only_sandbox_required": True,
                     "structured_output_binding_required": True,
+                    "zero_incremental_spend_guard": CODEX_CLI_SPEND_GUARD_SCHEMA,
+                    "spendable_credits_must_be_absent": True,
+                    "included_plan_rate_limit_must_be_available": True,
                 }
             )
-        return capabilities
+        return {**capabilities, **self.capability_overrides}
+
+    @staticmethod
+    def _spend_guard() -> dict[str, Any]:
+        return {
+            "schema": CODEX_CLI_SPEND_GUARD_SCHEMA,
+            "account_type": "chatgpt",
+            "plan_type": "plus",
+            "included_usage_percent": 25,
+            "maximum_included_usage_percent": 95,
+            "spendable_credits_present": False,
+            "credit_balance_zero": True,
+            "rate_limit_reached": False,
+            "source": "codex_app_server_account_rate_limits_read",
+            "source_authenticated": False,
+        }
 
 
 def _git(repository: Path, *arguments: str) -> str:
@@ -641,6 +676,64 @@ def test_chatgpt_plan_provider_requires_exact_v2_authority_before_calls(
     assert fixture_reviewed["status"] == "reviewed_fixture_outcome"
     assert fixture_reviewed["reason"] == "fixture_workload_is_not_real_outcome_evidence"
     assert fixture_reviewed["outcome"]["observed_real_workload_outcome"] is False
+
+
+@pytest.mark.parametrize(
+    ("capability_overrides", "health_overrides"),
+    [
+        ({"zero_incremental_spend_guard": None}, {}),
+        ({"spendable_credits_must_be_absent": False}, {}),
+        ({"included_plan_rate_limit_must_be_available": False}, {}),
+        ({}, {"zero_incremental_spend_guard": None}),
+        ({}, {"spendable_credits_must_be_absent": False}),
+    ],
+)
+def test_codex_plan_provider_declaration_cannot_omit_no_spend_contract(
+    tmp_path: Path,
+    capability_overrides: dict[str, Any],
+    health_overrides: dict[str, Any],
+):
+    adapter = ProgramObservableAdapter(
+        observation_source=CODEX_CLI_OBSERVATION_SOURCE,
+        execution_environment="external_network",
+        billing_class="chatgpt_plan_usage",
+        capability_overrides=capability_overrides,
+        health_overrides=health_overrides,
+    )
+    _, _, _, _, registration = _program_fixture(
+        tmp_path,
+        adapter=adapter,
+        workload_class="real_user_workload",
+        authority=_authority(external=True, chatgpt_plan=True),
+    )
+    assert registration["status"] == "blocked"
+    assert registration["reason"] == "codex_cli_provider_contract_invalid"
+    assert adapter.calls == 0
+
+
+def test_codex_plan_execution_rejects_missing_per_call_spend_guard(
+    tmp_path: Path,
+):
+    adapter = ProgramObservableAdapter(
+        observation_source=CODEX_CLI_OBSERVATION_SOURCE,
+        execution_environment="external_network",
+        billing_class="chatgpt_plan_usage",
+        emit_execution_guard=False,
+    )
+    _, program, _, intervention, registration = _program_fixture(
+        tmp_path,
+        adapter=adapter,
+        workload_class="real_user_workload",
+        authority=_authority(external=True, chatgpt_plan=True),
+    )
+    assert registration["status"] == "registered"
+    executed = program.execute(
+        registration["id"],
+        context_intervention=intervention,
+    )
+    assert executed["status"] == "blocked"
+    assert "provider_observation" in executed["reason"]
+    assert executed["outcome"]["measurement_available"] is False
 
 
 def test_source_relabel_and_provider_drift_fail_closed(tmp_path: Path):

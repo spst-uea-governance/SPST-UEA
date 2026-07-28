@@ -2,18 +2,23 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 import json
 import os
 from pathlib import Path
+from queue import Empty, Queue
 import re
 import shutil
 import subprocess
 import tempfile
+from threading import Thread
+import time
 from typing import Any, Callable
 
 from spst_runtime.interfaces.model_adapter import ModelAdapter
 from spst_runtime.provider_observation import (
     CODEX_CLI_OBSERVATION_SOURCE,
+    CODEX_CLI_SPEND_GUARD_SCHEMA,
     build_provider_observation,
     build_provider_request_binding,
 )
@@ -21,8 +26,81 @@ from spst_runtime.provider_observation import (
 
 CODEX_CLI_PROVIDER = "openai-codex-cli"
 CODEX_CLI_BILLING_CLASS = "chatgpt_plan_usage"
+CODEX_CLI_SPEND_GUARD = CODEX_CLI_SPEND_GUARD_SCHEMA
 _SAFE_MODEL = re.compile(r"^[A-Za-z0-9._:-]{1,96}$")
 _Runner = Callable[..., subprocess.CompletedProcess[str]]
+_SpendGuardProbe = Callable[[str, str, dict[str, str], int], str]
+
+
+def _run_spend_guard_probe(
+    executable: str,
+    payload: str,
+    environment: dict[str, str],
+    timeout_seconds: int,
+) -> str:
+    process = subprocess.Popen(
+        [executable, "app-server", "--stdio"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        env=environment,
+    )
+    if process.stdin is None or process.stdout is None:
+        process.kill()
+        raise OSError("codex app-server stdio unavailable")
+    process_stdin = process.stdin
+    process_stdout = process.stdout
+    output: Queue[str | None] = Queue()
+
+    def read_stdout() -> None:
+        try:
+            for line in process_stdout:
+                output.put(line)
+        finally:
+            output.put(None)
+
+    reader = Thread(target=read_stdout, daemon=True)
+    reader.start()
+    try:
+        process_stdin.write(payload)
+        process_stdin.flush()
+        deadline = time.monotonic() + timeout_seconds
+        lines: list[str] = []
+        response_ids: set[int] = set()
+        while time.monotonic() < deadline and response_ids != {0, 1, 2}:
+            try:
+                line = output.get(timeout=min(0.1, max(0.0, deadline - time.monotonic())))
+            except Empty:
+                if process.poll() is not None:
+                    break
+                continue
+            if line is None:
+                break
+            lines.append(line)
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(message, dict) and message.get("id") in {0, 1, 2}:
+                response_ids.add(int(message["id"]))
+        if response_ids != {0, 1, 2}:
+            raise subprocess.TimeoutExpired(
+                [executable, "app-server", "--stdio"],
+                timeout_seconds,
+            )
+        return "".join(lines)
+    finally:
+        process_stdin.close()
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        reader.join(timeout=1)
 
 
 class CodexCliAdapterError(RuntimeError):
@@ -42,7 +120,9 @@ class CodexCliAdapter(ModelAdapter):
     executable: str | None = None
     working_directory: str | None = None
     timeout_seconds: int = 180
+    maximum_included_usage_percent: int = 95
     runner: _Runner = subprocess.run
+    spend_guard_probe: _SpendGuardProbe = _run_spend_guard_probe
     _seen_thread_ids: set[str] = field(default_factory=set, init=False, repr=False)
 
     async def infer(
@@ -61,6 +141,8 @@ class CodexCliAdapter(ModelAdapter):
             "requires_api_key": False,
             "authentication_mode": "chatgpt_cached_session_required",
             "billing_class": CODEX_CLI_BILLING_CLASS,
+            "zero_incremental_spend_guard": CODEX_CLI_SPEND_GUARD,
+            "spendable_credits_must_be_absent": True,
             "billing_state_cryptographically_verified": False,
             "provider_identity_cryptographically_verified": False,
         }
@@ -73,6 +155,9 @@ class CodexCliAdapter(ModelAdapter):
             "provider_observation_source": CODEX_CLI_OBSERVATION_SOURCE,
             "execution_environment": "external_network",
             "billing_class": CODEX_CLI_BILLING_CLASS,
+            "zero_incremental_spend_guard": CODEX_CLI_SPEND_GUARD,
+            "spendable_credits_must_be_absent": True,
+            "included_plan_rate_limit_must_be_available": True,
             "requires_api_key": False,
             "authentication_mode": "chatgpt_cached_session_required",
             "api_key_environment_scrubbed": True,
@@ -95,6 +180,7 @@ class CodexCliAdapter(ModelAdapter):
             raise CodexCliAdapterError("codex_cli_model_invalid")
         environment = self._chatgpt_only_environment()
         self._assert_chatgpt_auth(executable, environment)
+        spend_guard = self._assert_zero_incremental_spend(executable, environment)
 
         request = build_provider_request_binding(prompt, context)
         request_digest = str(request["request_binding_sha256"])
@@ -162,6 +248,7 @@ class CodexCliAdapter(ModelAdapter):
             output_text=answer,
             observation_source=CODEX_CLI_OBSERVATION_SOURCE,
             acknowledged_request_binding_sha256=request_digest,
+            execution_guard=spend_guard,
         )
         return {
             "provider": CODEX_CLI_PROVIDER,
@@ -174,6 +261,7 @@ class CodexCliAdapter(ModelAdapter):
                 "turn_completed": True,
                 "usage": parsed["usage"],
                 "authentication_mode": "chatgpt_cached_session_required",
+                "zero_incremental_spend_guard": spend_guard,
                 "billing_state_cryptographically_verified": False,
             },
         }
@@ -198,6 +286,112 @@ class CodexCliAdapter(ModelAdapter):
         if completed.returncode != 0 or "Logged in using ChatGPT" not in output:
             raise CodexCliAdapterError("codex_cli_chatgpt_auth_required")
 
+    def _assert_zero_incremental_spend(
+        self,
+        executable: str,
+        environment: dict[str, str],
+    ) -> dict[str, Any]:
+        requests = (
+            {
+                "method": "initialize",
+                "id": 0,
+                "params": {
+                    "clientInfo": {
+                        "name": "spst_uea_credit_guard",
+                        "title": "SPST-UEA Credit Guard",
+                        "version": "1.0.0",
+                    }
+                },
+            },
+            {"method": "initialized", "params": {}},
+            {
+                "method": "account/read",
+                "id": 1,
+                "params": {"refreshToken": False},
+            },
+            {"method": "account/rateLimits/read", "id": 2},
+        )
+        payload = "".join(
+            json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n"
+            for item in requests
+        )
+        try:
+            output = self.spend_guard_probe(
+                executable,
+                payload,
+                environment,
+                min(self.timeout_seconds, 30),
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise CodexCliAdapterError("codex_cli_spend_guard_unavailable") from error
+
+        responses: dict[int, dict[str, Any]] = {}
+        for line in output.splitlines():
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise CodexCliAdapterError("codex_cli_spend_guard_invalid") from error
+            if not isinstance(message, dict):
+                raise CodexCliAdapterError("codex_cli_spend_guard_invalid")
+            message_id = message.get("id")
+            if message_id not in {0, 1, 2}:
+                continue
+            if message_id in responses or message.get("error") is not None:
+                raise CodexCliAdapterError("codex_cli_spend_guard_invalid")
+            responses[message_id] = message
+        if set(responses) != {0, 1, 2}:
+            raise CodexCliAdapterError("codex_cli_spend_guard_incomplete")
+
+        account_result = self._mapping(responses[1].get("result"))
+        account = self._mapping(account_result.get("account"))
+        rate_result = self._mapping(responses[2].get("result"))
+        rate_limits = self._mapping(rate_result.get("rateLimits"))
+        credits = self._mapping(rate_limits.get("credits"))
+        primary = self._mapping(rate_limits.get("primary"))
+        account_plan = account.get("planType")
+        rate_plan = rate_limits.get("planType")
+        used_percent = primary.get("usedPercent")
+
+        if account.get("type") != "chatgpt":
+            raise CodexCliAdapterError("codex_cli_spend_guard_chatgpt_required")
+        if (
+            not isinstance(account_plan, str)
+            or not account_plan
+            or rate_plan != account_plan
+            or rate_limits.get("limitId") != "codex"
+        ):
+            raise CodexCliAdapterError("codex_cli_spend_guard_plan_mismatch")
+        if (
+            credits.get("hasCredits") is not False
+            or credits.get("unlimited") is not False
+            or not self._zero_credit_balance(credits.get("balance"))
+        ):
+            raise CodexCliAdapterError("codex_cli_spendable_credits_present_or_unknown")
+        if (
+            isinstance(used_percent, bool)
+            or not isinstance(used_percent, (int, float))
+            or not 0 <= float(used_percent) <= 100
+            or not 0 < self.maximum_included_usage_percent <= 100
+        ):
+            raise CodexCliAdapterError("codex_cli_rate_limit_state_invalid")
+        if (
+            rate_limits.get("rateLimitReachedType") is not None
+            or float(used_percent) >= self.maximum_included_usage_percent
+        ):
+            raise CodexCliAdapterError("codex_cli_included_plan_limit_unavailable")
+        return {
+            "schema": CODEX_CLI_SPEND_GUARD,
+            "account_type": "chatgpt",
+            "plan_type": account_plan,
+            "included_usage_percent": used_percent,
+            "maximum_included_usage_percent": self.maximum_included_usage_percent,
+            "spendable_credits_present": False,
+            "credit_balance_zero": True,
+            "rate_limit_reached": False,
+            "source": "codex_app_server_account_rate_limits_read",
+            "source_authenticated": False,
+        }
+
     def _resolved_executable(self) -> str | None:
         candidates = [
             self.executable,
@@ -219,6 +413,19 @@ class CodexCliAdapter(ModelAdapter):
         environment.pop("OPENAI_API_KEY", None)
         environment.pop("CODEX_API_KEY", None)
         return environment
+
+    @staticmethod
+    def _mapping(value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _zero_credit_balance(value: Any) -> bool:
+        if not isinstance(value, str):
+            return False
+        try:
+            return Decimal(value) == Decimal(0)
+        except InvalidOperation:
+            return False
 
     @staticmethod
     def _response_schema(request_digest: str) -> dict[str, Any]:

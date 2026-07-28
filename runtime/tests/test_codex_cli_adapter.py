@@ -13,6 +13,7 @@ from spst_runtime.provider_observation import (
 from spst_runtime.providers.codex_cli_adapter import (
     CODEX_CLI_BILLING_CLASS,
     CODEX_CLI_PROVIDER,
+    CODEX_CLI_SPEND_GUARD,
     CodexCliAdapter,
     CodexCliAdapterError,
 )
@@ -26,22 +27,28 @@ class StructuredRunner:
         thread_id: str = "thread-real-001",
         returncode: int = 0,
         event_override: list[dict[str, object]] | None = None,
+        spend_guard_override: dict[str, object] | None = None,
     ):
         self.response_override = response_override
         self.thread_id = thread_id
         self.returncode = returncode
         self.event_override = event_override
+        self.spend_guard_override = spend_guard_override
         self.calls: list[tuple[list[str], dict[str, object]]] = []
+        self.probe_calls: list[tuple[str, str, dict[str, str], int]] = []
+        self.actions: list[str] = []
 
     def __call__(self, command: list[str], **kwargs: object):
         self.calls.append((command, kwargs))
         if command[1:] == ["login", "status"]:
+            self.actions.append("login")
             return subprocess.CompletedProcess(
                 command,
                 0,
                 "Logged in using ChatGPT\n",
                 "",
             )
+        self.actions.append("exec")
         schema_path = Path(command[command.index("--output-schema") + 1])
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
         digest = schema["properties"]["request_binding_sha256"]["const"]
@@ -73,6 +80,48 @@ class StructuredRunner:
         stdout = "\n".join(json.dumps(event) for event in events)
         return subprocess.CompletedProcess(command, self.returncode, stdout, "")
 
+    def spend_guard_probe(
+        self,
+        executable: str,
+        payload: str,
+        environment: dict[str, str],
+        timeout_seconds: int,
+    ) -> str:
+        self.actions.append("spend_guard")
+        self.probe_calls.append(
+            (executable, payload, environment, timeout_seconds)
+        )
+        rate_limits = self.spend_guard_override or {
+            "limitId": "codex",
+            "planType": "plus",
+            "primary": {
+                "usedPercent": 22,
+                "windowDurationMins": 300,
+                "resetsAt": 1785832476,
+            },
+            "secondary": None,
+            "rateLimitReachedType": None,
+            "credits": {
+                "hasCredits": False,
+                "unlimited": False,
+                "balance": "0",
+            },
+        }
+        return "\n".join(
+            json.dumps(item)
+            for item in (
+                {"id": 0, "result": {"userAgent": "test"}},
+                {
+                    "id": 1,
+                    "result": {
+                        "account": {"type": "chatgpt", "planType": "plus"},
+                        "requiresOpenaiAuth": True,
+                    },
+                },
+                {"id": 2, "result": {"rateLimits": rate_limits}},
+            )
+        )
+
 
 def _executable(tmp_path: Path) -> Path:
     executable = tmp_path / "codex.exe"
@@ -91,6 +140,7 @@ def test_codex_cli_adapter_emits_verified_observation_and_scrubs_api_keys(
         executable=str(_executable(tmp_path)),
         model="gpt-5.6-sol",
         runner=runner,
+        spend_guard_probe=runner.spend_guard_probe,
     )
     context = {
         "instructions": "Return bounded JSON.",
@@ -103,6 +153,18 @@ def test_codex_cli_adapter_emits_verified_observation_and_scrubs_api_keys(
     assert result["model_version"] == "gpt-5.6-sol"
     assert result["text"] == '{"answer":1}'
     assert result["codex_cli"]["turn_completed"] is True
+    assert result["codex_cli"]["zero_incremental_spend_guard"] == {
+        "schema": CODEX_CLI_SPEND_GUARD,
+        "account_type": "chatgpt",
+        "plan_type": "plus",
+        "included_usage_percent": 22,
+        "maximum_included_usage_percent": 95,
+        "spendable_credits_present": False,
+        "credit_balance_zero": True,
+        "rate_limit_reached": False,
+        "source": "codex_app_server_account_rate_limits_read",
+        "source_authenticated": False,
+    }
     observation = result["provider_observation"]
     assert observation["observation_source"] == CODEX_CLI_OBSERVATION_SOURCE
     assert observation["provider"]["identity_cryptographically_verified"] is False
@@ -116,6 +178,11 @@ def test_codex_cli_adapter_emits_verified_observation_and_scrubs_api_keys(
         model_version="gpt-5.6-sol",
     ) == (True, None)
     assert runner.calls[0][0][1:] == ["login", "status"]
+    assert runner.actions == ["login", "spend_guard", "exec"]
+    _, guard_payload, guard_environment, _ = runner.probe_calls[0]
+    assert "account/rateLimits/read" in guard_payload
+    assert "OPENAI_API_KEY" not in guard_environment
+    assert "CODEX_API_KEY" not in guard_environment
     command, kwargs = runner.calls[1]
     assert "--ephemeral" in command
     assert "--ignore-user-config" in command
@@ -162,6 +229,8 @@ def test_codex_cli_adapter_declares_plan_usage_without_authentication(tmp_path: 
     assert health["billing_state_cryptographically_verified"] is False
     assert health["provider_identity_cryptographically_verified"] is False
     assert capabilities["billing_class"] == CODEX_CLI_BILLING_CLASS
+    assert capabilities["zero_incremental_spend_guard"] == CODEX_CLI_SPEND_GUARD
+    assert capabilities["spendable_credits_must_be_absent"] is True
     assert capabilities["execution_environment"] == "external_network"
     assert capabilities["supports_transport_idempotency"] is False
 
@@ -195,9 +264,11 @@ def test_codex_cli_adapter_rejects_incomplete_event_streams(
     events: list[dict[str, object]],
     reason: str,
 ):
+    runner = StructuredRunner(event_override=events)
     adapter = CodexCliAdapter(
         executable=str(_executable(tmp_path)),
-        runner=StructuredRunner(event_override=events),
+        runner=runner,
+        spend_guard_probe=runner.spend_guard_probe,
     )
     with pytest.raises(CodexCliAdapterError, match=reason):
         asyncio.run(adapter.infer("task", {"evaluation": {}}))
@@ -205,14 +276,16 @@ def test_codex_cli_adapter_rejects_incomplete_event_streams(
 
 def test_codex_cli_adapter_rejects_bad_ack_nonzero_exit_and_replay(tmp_path: Path):
     executable = str(_executable(tmp_path))
+    mismatch_runner = StructuredRunner(
+        response_override={
+            "request_binding_sha256": "0" * 64,
+            "answer": "answer",
+        }
+    )
     mismatch = CodexCliAdapter(
         executable=executable,
-        runner=StructuredRunner(
-            response_override={
-                "request_binding_sha256": "0" * 64,
-                "answer": "answer",
-            }
-        ),
+        runner=mismatch_runner,
+        spend_guard_probe=mismatch_runner.spend_guard_probe,
     )
     with pytest.raises(
         CodexCliAdapterError,
@@ -220,15 +293,21 @@ def test_codex_cli_adapter_rejects_bad_ack_nonzero_exit_and_replay(tmp_path: Pat
     ):
         asyncio.run(mismatch.infer("task", {"evaluation": {}}))
 
+    failed_runner = StructuredRunner(returncode=3)
     failed = CodexCliAdapter(
         executable=executable,
-        runner=StructuredRunner(returncode=3),
+        runner=failed_runner,
+        spend_guard_probe=failed_runner.spend_guard_probe,
     )
     with pytest.raises(CodexCliAdapterError, match="codex_cli_nonzero_exit"):
         asyncio.run(failed.infer("task", {"evaluation": {}}))
 
     replay_runner = StructuredRunner(thread_id="replayed-thread")
-    replay = CodexCliAdapter(executable=executable, runner=replay_runner)
+    replay = CodexCliAdapter(
+        executable=executable,
+        runner=replay_runner,
+        spend_guard_probe=replay_runner.spend_guard_probe,
+    )
     asyncio.run(replay.infer("task", {"evaluation": {}}))
     with pytest.raises(CodexCliAdapterError, match="codex_cli_response_replay_detected"):
         asyncio.run(replay.infer("task", {"evaluation": {}}))
@@ -248,3 +327,86 @@ def test_codex_cli_adapter_rejects_invalid_model_and_does_not_read_api_keys(
     environment = CodexCliAdapter._chatgpt_only_environment()
     assert "OPENAI_API_KEY" not in environment
     assert "CODEX_API_KEY" not in environment
+
+
+@pytest.mark.parametrize(
+    ("rate_limits", "reason"),
+    [
+        (
+            {
+                "limitId": "codex",
+                "planType": "plus",
+                "primary": {"usedPercent": 22},
+                "rateLimitReachedType": None,
+                "credits": {"hasCredits": True, "unlimited": False, "balance": "1"},
+            },
+            "codex_cli_spendable_credits_present_or_unknown",
+        ),
+        (
+            {
+                "limitId": "codex",
+                "planType": "plus",
+                "primary": {"usedPercent": 22},
+                "rateLimitReachedType": None,
+                "credits": {"hasCredits": False, "unlimited": True, "balance": "0"},
+            },
+            "codex_cli_spendable_credits_present_or_unknown",
+        ),
+        (
+            {
+                "limitId": "codex",
+                "planType": "plus",
+                "primary": {"usedPercent": 22},
+                "rateLimitReachedType": None,
+            },
+            "codex_cli_spendable_credits_present_or_unknown",
+        ),
+        (
+            {
+                "limitId": "codex",
+                "planType": "plus",
+                "primary": {"usedPercent": 95},
+                "rateLimitReachedType": None,
+                "credits": {"hasCredits": False, "unlimited": False, "balance": "0"},
+            },
+            "codex_cli_included_plan_limit_unavailable",
+        ),
+        (
+            {
+                "limitId": "codex",
+                "planType": "plus",
+                "primary": {"usedPercent": 22},
+                "rateLimitReachedType": "primary",
+                "credits": {"hasCredits": False, "unlimited": False, "balance": "0"},
+            },
+            "codex_cli_included_plan_limit_unavailable",
+        ),
+        (
+            {
+                "limitId": "codex",
+                "planType": "business",
+                "primary": {"usedPercent": 22},
+                "rateLimitReachedType": None,
+                "credits": {"hasCredits": False, "unlimited": False, "balance": "0"},
+            },
+            "codex_cli_spend_guard_plan_mismatch",
+        ),
+    ],
+)
+def test_codex_cli_adapter_rejects_paid_or_unavailable_plan_usage_before_model_call(
+    tmp_path: Path,
+    rate_limits: dict[str, object],
+    reason: str,
+):
+    runner = StructuredRunner(spend_guard_override=rate_limits)
+    adapter = CodexCliAdapter(
+        executable=str(_executable(tmp_path)),
+        runner=runner,
+        spend_guard_probe=runner.spend_guard_probe,
+    )
+
+    with pytest.raises(CodexCliAdapterError, match=reason):
+        asyncio.run(adapter.infer("task", {"evaluation": {}}))
+
+    assert runner.actions == ["login", "spend_guard"]
+    assert [call[0][1] for call in runner.calls] == ["login"]
