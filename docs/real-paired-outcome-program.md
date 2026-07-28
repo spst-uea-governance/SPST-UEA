@@ -35,6 +35,34 @@ Registration freezes:
 - the target sample count, no-optional-stopping rule, fixed 95% Hoeffding bound,
   blind review requirement, and automatic-promotion prohibition.
 
+## Single-operator deterministic mode
+
+`register()` accepts an optional `evaluation_mode`. The default is
+`human_reviewed_task_quality`, which preserves the existing blind human-review
+contract. A single-operator project may instead pre-register
+`machine_exact_contract` before any provider call.
+
+The machine mode uses the same producer-bound exact-JSON scorer, minimum eight
+pairs, fixed condition schedule, fixed stop rule, provider observation checks,
+and 95% Hoeffding calculation. After execution it may expose
+`outcome.machine_exact_contract` with exact arm means, paired delta, per-task
+scores, uncertainty, scorer identity, and scoring-artifact digest. Its status is
+`machine_exact_contract_observed`.
+
+This is intentionally not a substitute for Phase 16 semantic review. In machine
+mode all of the following remain false:
+
+- `outcome.measurement_available` for reviewed task quality;
+- `semantic_task_quality_established`;
+- task-quality or general-model claim eligibility;
+- causal context utility;
+- automatic adoption or promotion.
+
+Unknown modes fail before provider calls. Human review cannot be appended to a
+machine-mode execution, and a human-mode Program cannot be converted after
+registration. Historical all-zero or otherwise inspected results must be treated
+as pilot evidence; they cannot be relabelled into a new confirmatory Program.
+
 The public projection exposes the schedule commitment and balance, not per-task
 condition order or the randomization nonce. The full local database remains
 operator-accessible, so reviewer blindness is still a human attestation rather
@@ -230,6 +258,9 @@ The no-charge conformance adapter proves the Program lifecycle and adversarial
 recomputation. It is not a real GPT outcome. A production study still requires a
 compatible remote adapter, an explicitly approved no-charge or budgeted execution
 authority, an actual consented workload corpus, and an actual blind human review.
+Machine-mode studies replace only that final requirement and only for the
+non-semantic exact-contract metric described above; they still require fresh
+pre-registration and fresh provider-call authority.
 
 ## ARCH-07 operational hardening
 

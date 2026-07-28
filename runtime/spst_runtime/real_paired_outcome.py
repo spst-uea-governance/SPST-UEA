@@ -84,6 +84,10 @@ class RealPairedOutcomeProgram:
 
     EXPECTED_ATTEMPTS_PER_PAIR = 4
     METRIC_SCOPE = PairedQualityEvidenceLedger.METRIC_SCOPE
+    HUMAN_REVIEW_MODE = PairedQualityEvidenceLedger.HUMAN_REVIEW_MODE
+    MACHINE_EXACT_CONTRACT_MODE = (
+        PairedQualityEvidenceLedger.MACHINE_EXACT_CONTRACT_MODE
+    )
 
     def __init__(
         self,
@@ -112,14 +116,18 @@ class RealPairedOutcomeProgram:
         if self.repository.read_only:
             return self._blocked("real_paired_outcome_store_read_only")
         source = payload if isinstance(payload, dict) else {}
-        if set(source) != {
+        required_registration_fields = {
             "baseline_candidate_id",
             "candidate_id",
             "context_intervention",
             "execution_authority",
             "study",
             "task_ids",
-        }:
+        }
+        if set(source) not in (
+            required_registration_fields,
+            required_registration_fields | {"evaluation_mode"},
+        ):
             return self._blocked("real_paired_outcome_registration_shape_invalid")
         if self.model_adapter is None:
             return self._blocked("real_paired_outcome_adapter_required")
@@ -170,20 +178,19 @@ class RealPairedOutcomeProgram:
         if candidate_id == baseline_candidate_id:
             return self._blocked("real_paired_outcome_candidate_ids_not_distinct")
 
+        evaluation_mode = source.get("evaluation_mode", self.HUMAN_REVIEW_MODE)
+        if evaluation_mode not in {
+            self.HUMAN_REVIEW_MODE,
+            self.MACHINE_EXACT_CONTRACT_MODE,
+        }:
+            return self._blocked("real_paired_outcome_evaluation_mode_invalid")
+
         plan = build_live_pair_plan(
             task_ids,
             self.plan_nonce_factory(),
             str(intervention["intervention_sha256"]),
         )
-        evaluation_contract = {
-            "metric_scope": self.METRIC_SCOPE,
-            "minimum_paired_samples": PairedQualityEvidenceLedger.MINIMUM_PAIRED_SAMPLES,
-            "confidence_level": PairedQualityEvidenceLedger.CONFIDENCE_LEVEL,
-            "uncertainty_method": "hoeffding_bounded_paired_delta",
-            "human_review_required": True,
-            "blind_review_required": True,
-            "automatic_promotion": False,
-        }
+        evaluation_contract = self._evaluation_contract(str(evaluation_mode))
         unsigned = {
             "schema": REAL_PAIRED_OUTCOME_PROGRAM_SCHEMA,
             "kind": "program_registration",
@@ -490,6 +497,7 @@ class RealPairedOutcomeProgram:
                 ),
                 task_ids=list(registration["corpus"]["task_ids"]),
                 execution_plan=deepcopy(registration["execution_plan"]),
+                evaluation_mode=self._evaluation_mode(registration),
             )
         except (ProviderTransportOutcomeUnknown, ProviderTransportRecoveryRequired):
             return self.get(program_id) or self._blocked(
@@ -729,6 +737,7 @@ class RealPairedOutcomeProgram:
                 task_ids=list(registration["corpus"]["task_ids"]),
                 execution_plan=deepcopy(registration["execution_plan"]),
                 resume_registered_plan=True,
+                evaluation_mode=self._evaluation_mode(registration),
             )
         except (ProviderTransportOutcomeUnknown, ProviderTransportRecoveryRequired):
             terminal_reason = ledger.complete_recovery(
@@ -818,10 +827,18 @@ class RealPairedOutcomeProgram:
             producer_record_keys,
             attempt_id=str(running_attempt["attempt_id"]),
         )
+        expected_live_status = (
+            "machine_exact_contract_ready"
+            if self._evaluation_mode(registration)
+            == self.MACHINE_EXACT_CONTRACT_MODE
+            else "pending_human_review"
+        )
         reasons = [
-            str(live.get("reason") or "")
-            if live.get("status") != "pending_human_review"
-            else "",
+            (
+                str(live.get("reason") or "real_paired_outcome_live_status_mismatch")
+                if live.get("status") != expected_live_status
+                else ""
+            ),
             source_reason or "",
             (
                 "real_paired_outcome_provider_observation_source_mismatch"
@@ -854,11 +871,7 @@ class RealPairedOutcomeProgram:
             ),
         ]
         reasons = self._dedupe(reasons)
-        execution_status = (
-            "pending_human_review"
-            if not reasons and live.get("status") == "pending_human_review"
-            else "blocked"
-        )
+        execution_status = expected_live_status if not reasons else "blocked"
         execution_unsigned = {
             "schema": REAL_PAIRED_OUTCOME_EXECUTION_SCHEMA,
             "kind": "program_execution",
@@ -909,7 +922,7 @@ class RealPairedOutcomeProgram:
             registration,
             running_attempt,
             outcome=(
-                "completed" if execution_status == "pending_human_review" else "blocked"
+                "completed" if execution_status == expected_live_status else "blocked"
             ),
             execution_sha256=str(execution["execution_sha256"]),
             reason=next(iter(reasons), None),
@@ -1064,6 +1077,20 @@ class RealPairedOutcomeProgram:
                 iter(execution.get("reasons", [])),
                 "real_paired_outcome_execution_blocked",
             )
+        elif (
+            evaluation.get("status") == "machine_exact_contract_ready"
+            and self._evaluation_mode(registration)
+            == self.MACHINE_EXACT_CONTRACT_MODE
+        ):
+            machine_metric = self._mapping(
+                evaluation.get("machine_exact_contract")
+            )
+            if machine_metric.get("available") is True:
+                status = "machine_exact_contract_observed"
+                reason = "machine_metric_not_semantic_task_quality"
+            else:
+                status = "blocked"
+                reason = "machine_exact_contract_metric_unavailable"
         elif evaluation.get("status") == "pending_human_review":
             status, reason = "pending_human_review", None
         elif evaluation.get("status") == "reviewed_evidence":
@@ -1164,6 +1191,9 @@ class RealPairedOutcomeProgram:
         task_quality = self._mapping(
             self._mapping(evaluation).get("task_quality")
         )
+        machine_exact_contract = self._mapping(
+            self._mapping(evaluation).get("machine_exact_contract")
+        )
         remote_observed = (
             isinstance(execution, dict)
             and execution.get("evidence_class") == "remote_transport_observed"
@@ -1236,6 +1266,7 @@ class RealPairedOutcomeProgram:
             "provider": deepcopy(registration["provider"]),
             "candidates": deepcopy(registration["candidates"]),
             "execution_authority": deepcopy(registration["execution_authority"]),
+            "evaluation_contract": deepcopy(registration["evaluation_contract"]),
             "operational_hardening": {
                 "assurance": assurance,
                 "attempt_bound": attempt_bound,
@@ -1318,6 +1349,7 @@ class RealPairedOutcomeProgram:
                 "execution_manifest_sha256": plan["manifest_sha256"],
                 "randomization_nonce_sha256": plan["randomization_nonce_sha256"],
                 "condition_order_balance": deepcopy(plan["condition_order_balance"]),
+                "evaluation_mode": self._evaluation_mode(registration),
                 "per_task_order_disclosed": False,
                 "stop_rule": {
                     "target_pair_count": registration["corpus"]["task_count"],
@@ -1389,6 +1421,7 @@ class RealPairedOutcomeProgram:
                 "process_isolated_recovery_mechanism_observed": (
                     process_isolated_recovery_observed
                 ),
+                "machine_exact_contract": deepcopy(machine_exact_contract),
             },
             "revalidation": {
                 "program_valid": status != "blocked",
@@ -1439,6 +1472,11 @@ class RealPairedOutcomeProgram:
             return "real_paired_outcome_program_binding_mismatch"
         if self._authority(value.get("execution_authority")) is None:
             return "real_paired_outcome_execution_authority_invalid"
+        evaluation_contract_reason = self._evaluation_contract_reason(
+            value.get("evaluation_contract")
+        )
+        if evaluation_contract_reason:
+            return evaluation_contract_reason
         provider = self._mapping(value.get("provider"))
         hardening = self._mapping(value.get("operational_hardening"))
         if provider.get("provider_observation_source") == CODEX_CLI_OBSERVATION_SOURCE:
@@ -1803,6 +1841,11 @@ class RealPairedOutcomeProgram:
             or live_digest != execution.get("execution_record_sha256")
         ):
             return "real_paired_outcome_live_execution_mismatch"
+        live_evaluation_mode = live_record.get(
+            "evaluation_mode", self.HUMAN_REVIEW_MODE
+        )
+        if live_evaluation_mode != self._evaluation_mode(registration):
+            return "real_paired_outcome_live_evaluation_mode_mismatch"
         return None
 
     def _current_corpus_reason(self, registration: dict[str, Any]) -> str | None:
@@ -2477,6 +2520,65 @@ class RealPairedOutcomeProgram:
             return None
         return deepcopy(value)
 
+    @classmethod
+    def _evaluation_contract(cls, mode: str) -> dict[str, Any]:
+        machine_mode = mode == cls.MACHINE_EXACT_CONTRACT_MODE
+        return {
+            "mode": mode,
+            "metric_scope": (
+                PairedQualityEvidenceLedger.MACHINE_EXACT_CONTRACT_SCOPE
+                if machine_mode
+                else cls.METRIC_SCOPE
+            ),
+            "minimum_paired_samples": PairedQualityEvidenceLedger.MINIMUM_PAIRED_SAMPLES,
+            "confidence_level": PairedQualityEvidenceLedger.CONFIDENCE_LEVEL,
+            "uncertainty_method": "hoeffding_bounded_paired_delta",
+            "human_review_required": not machine_mode,
+            "blind_review_required": not machine_mode,
+            "machine_exact_contract_metric": machine_mode,
+            "semantic_task_quality_established_by_machine": False,
+            "automatic_promotion": False,
+        }
+
+    @classmethod
+    def _evaluation_contract_reason(cls, value: Any) -> str | None:
+        if not isinstance(value, dict):
+            return "real_paired_outcome_evaluation_contract_invalid"
+        mode = value.get("mode")
+        if mode is None:
+            legacy = {
+                "metric_scope": cls.METRIC_SCOPE,
+                "minimum_paired_samples": PairedQualityEvidenceLedger.MINIMUM_PAIRED_SAMPLES,
+                "confidence_level": PairedQualityEvidenceLedger.CONFIDENCE_LEVEL,
+                "uncertainty_method": "hoeffding_bounded_paired_delta",
+                "human_review_required": True,
+                "blind_review_required": True,
+                "automatic_promotion": False,
+            }
+            return (
+                None
+                if value == legacy
+                else "real_paired_outcome_evaluation_contract_invalid"
+            )
+        if mode not in {
+            cls.HUMAN_REVIEW_MODE,
+            cls.MACHINE_EXACT_CONTRACT_MODE,
+        }:
+            return "real_paired_outcome_evaluation_mode_invalid"
+        if value != cls._evaluation_contract(str(mode)):
+            return "real_paired_outcome_evaluation_contract_invalid"
+        return None
+
+    @classmethod
+    def _evaluation_mode(cls, registration: dict[str, Any]) -> str:
+        contract = registration.get("evaluation_contract")
+        if isinstance(contract, dict) and contract.get("mode") in {
+            cls.HUMAN_REVIEW_MODE,
+            cls.MACHINE_EXACT_CONTRACT_MODE,
+        }:
+            return str(contract["mode"])
+        return cls.HUMAN_REVIEW_MODE
+
     @staticmethod
     def _claim_boundary() -> dict[str, bool]:
         return {
@@ -2487,6 +2589,7 @@ class RealPairedOutcomeProgram:
             "reviewer_identity_cryptographically_verified": False,
             "workload_provenance_cryptographically_verified": False,
             "provider_transport_attempt_count_verified": False,
+            "machine_exact_contract_is_semantic_task_quality": False,
             "automatic_promotion": False,
         }
 

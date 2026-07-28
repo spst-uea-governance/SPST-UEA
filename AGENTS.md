@@ -174,6 +174,12 @@ Run commands from `runtime/` unless noted otherwise:
   uncertainty bound, and an artifact-digest-bound human review. Keep its scope
   limited to the registered local rubric corpus; never infer it from provider
   capability flags or generalize it to GPT quality.
+- A single-operator Program may pre-register `machine_exact_contract` before any
+  provider call. Keep this metric separate from Phase 16 task quality: require the
+  same producer, provider-observation, sample, fixed-stop, scorer, and uncertainty
+  bindings, but keep semantic task quality, claim eligibility, causal utility, and
+  automatic promotion false. Reject unknown or post-hoc evaluation modes before
+  provider execution; never relabel a machine result as human-reviewed evidence.
 - Do not couple runtime logic to a specific model provider.
 - Keep inference, reflection, governance, and state commit concerns separate.
 - Add or update tests when implementing normative behavior.

@@ -194,6 +194,14 @@ observation source, randomized order commitment, no-optional-stopping rule,
 adapter-invocation cap, and separate external/paid authority. Call `preflight()`
 before `execute()`; preflight changes no state and makes no provider calls.
 
+Single-operator studies may explicitly register
+`evaluation_mode="machine_exact_contract"`. This publishes only the deterministic
+exact-JSON contract metric after provider-observation and provenance revalidation.
+It does not satisfy Phase 16 human review: `task_quality.available`, semantic
+quality, causal utility, claim eligibility, and automatic promotion remain false.
+The default `human_reviewed_task_quality` mode and its blind independent-human gate
+are unchanged. An evaluation mode cannot be added or changed after registration.
+
 Inspect a Program without changing its database:
 
 ```powershell

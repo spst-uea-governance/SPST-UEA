@@ -42,6 +42,12 @@ class PairedQualityEvidenceLedger:
     REVIEW_SCOPE = "paired_quality_scoring_artifact"
     BLIND_REVIEW_SURFACE_SCHEMA = "spst-blind-review-surface-v1"
     METRIC_SCOPE = "task_specific_exact_json_quality_on_registered_local_corpus"
+    HUMAN_REVIEW_MODE = "human_reviewed_task_quality"
+    MACHINE_EXACT_CONTRACT_MODE = "machine_exact_contract"
+    MACHINE_EXACT_CONTRACT_SCHEMA = "spst-machine-exact-contract-metric-v1"
+    MACHINE_EXACT_CONTRACT_SCOPE = (
+        "task_specific_exact_json_contract_accuracy_on_registered_local_corpus"
+    )
     _identifier = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
     _sha256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -63,6 +69,7 @@ class PairedQualityEvidenceLedger:
     def evaluate(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Score stored producer bindings; caller-supplied scores are never accepted."""
         normalized = self._normalize_evaluation(payload)
+        evaluation_mode = normalized["evaluation_mode"]
         provenance = self.repository.verify_provenance()
         resolved_pairs, resolution_reasons = self._resolve_pairs(normalized["pairs"])
         reasons = [*normalized["errors"], *resolution_reasons]
@@ -78,7 +85,14 @@ class PairedQualityEvidenceLedger:
         ]
         if resolved_pairs and not blocking_reasons:
             scoring_artifact, paired_scores = self._score_pairs(resolved_pairs)
-            measurement = self._measurement(paired_scores)
+            measurement = self._measurement(
+                paired_scores,
+                metric_scope=(
+                    self.MACHINE_EXACT_CONTRACT_SCOPE
+                    if evaluation_mode == self.MACHINE_EXACT_CONTRACT_MODE
+                    else self.METRIC_SCOPE
+                ),
+            )
         provider_observation_required = bool(resolved_pairs) and all(
             pair["baseline"]["binding"].get("schema_version")
             == UPTAKE_SCHEMA_VERSION
@@ -111,13 +125,18 @@ class PairedQualityEvidenceLedger:
         if not governance.get("authorized", False) or not provenance.get("valid", False):
             status = "blocked"
         elif sufficient:
-            status = "pending_human_review"
+            status = (
+                "machine_exact_contract_ready"
+                if evaluation_mode == self.MACHINE_EXACT_CONTRACT_MODE
+                else "pending_human_review"
+            )
         else:
             status = "insufficient_evidence"
 
         record: dict[str, Any] = {
             "schema_version": self.SCHEMA_VERSION,
             "kind": "evaluation",
+            "evaluation_mode": evaluation_mode,
             "initial_status": status,
             "reasons": reasons,
             "source_pairs": self._source_pairs(resolved_pairs, paired_scores),
@@ -130,6 +149,13 @@ class PairedQualityEvidenceLedger:
                 "review_scope": self.REVIEW_SCOPE,
                 "human_identity_cryptographically_verified": False,
             },
+            "machine_exact_contract": self._machine_exact_contract(
+                evaluation_mode=evaluation_mode,
+                status=status,
+                measurement=measurement,
+                scoring_artifact=scoring_artifact,
+                revalidation_valid=True,
+            ),
             "task_quality": self._task_quality(
                 status=status,
                 measurement=measurement,
@@ -719,7 +745,12 @@ class PairedQualityEvidenceLedger:
             return None
         return self._digest(sorted(str(value) for value in digests))
 
-    def _measurement(self, paired_scores: list[dict[str, Any]]) -> dict[str, Any]:
+    def _measurement(
+        self,
+        paired_scores: list[dict[str, Any]],
+        *,
+        metric_scope: str | None = None,
+    ) -> dict[str, Any]:
         baseline = [float(item["baseline_score"]) for item in paired_scores]
         candidate = [float(item["candidate_score"]) for item in paired_scores]
         deltas = [float(item["delta"]) for item in paired_scores]
@@ -729,7 +760,7 @@ class PairedQualityEvidenceLedger:
         )
         return {
             "available": bool(paired_scores) and uncertainty.get("available") is True,
-            "metric_scope": self.METRIC_SCOPE,
+            "metric_scope": metric_scope or self.METRIC_SCOPE,
             "sample_count": len(paired_scores),
             "minimum_paired_samples": self.MINIMUM_PAIRED_SAMPLES,
             "baseline_mean": self._mean(baseline),
@@ -764,6 +795,9 @@ class PairedQualityEvidenceLedger:
         else:
             status = initial_status
         measurement = self._mapping(view.get("measurement"))
+        evaluation_mode = str(
+            evaluation.get("evaluation_mode") or self.HUMAN_REVIEW_MODE
+        )
         view["status"] = status
         view["revalidation"] = {
             "valid": revalidation_valid,
@@ -805,6 +839,13 @@ class PairedQualityEvidenceLedger:
             measurement=measurement,
             review=review,
         )
+        view["machine_exact_contract"] = self._machine_exact_contract(
+            evaluation_mode=evaluation_mode,
+            status=status,
+            measurement=measurement,
+            scoring_artifact=self._mapping(view.get("scoring_artifact")),
+            revalidation_valid=revalidation_valid,
+        )
         claims = self._mapping(view.get("claims"))
         view["claims"] = {
             **claims,
@@ -824,6 +865,14 @@ class PairedQualityEvidenceLedger:
                 "sample_count": measurement.get("sample_count"),
                 "minimum_paired_samples": self.MINIMUM_PAIRED_SAMPLES,
                 "reason": "withheld_until_blind_review",
+            }
+        elif evaluation_mode == self.MACHINE_EXACT_CONTRACT_MODE:
+            view["measurement"] = {
+                "available": False,
+                "metric_scope": self.METRIC_SCOPE,
+                "sample_count": 0,
+                "minimum_paired_samples": self.MINIMUM_PAIRED_SAMPLES,
+                "reason": "machine_exact_contract_exposed_separately",
             }
         return view
 
@@ -870,7 +919,18 @@ class PairedQualityEvidenceLedger:
         recomputed_artifact, paired_scores = self._score_pairs(resolved, fixed_slots)
         if recomputed_artifact != artifact:
             return False, "scoring_artifact_recomputation_mismatch"
-        if self._measurement(paired_scores) != evaluation.get("measurement"):
+        evaluation_mode = str(
+            evaluation.get("evaluation_mode") or self.HUMAN_REVIEW_MODE
+        )
+        metric_scope = (
+            self.MACHINE_EXACT_CONTRACT_SCOPE
+            if evaluation_mode == self.MACHINE_EXACT_CONTRACT_MODE
+            else self.METRIC_SCOPE
+        )
+        if self._measurement(
+            paired_scores,
+            metric_scope=metric_scope,
+        ) != evaluation.get("measurement"):
             return False, "paired_measurement_recomputation_mismatch"
         return True, None
 
@@ -888,6 +948,8 @@ class PairedQualityEvidenceLedger:
             reason = "human_review_pending"
         elif status == "rejected_by_human":
             reason = "human_review_rejected"
+        elif status == "machine_exact_contract_ready":
+            reason = "machine_exact_contract_not_semantic_task_quality"
         else:
             reason = "paired_quality_evidence_incomplete"
         return {
@@ -905,6 +967,52 @@ class PairedQualityEvidenceLedger:
             "reason": reason,
             "automatic_promotion": False,
             "generalization_beyond_registered_corpus": False,
+        }
+
+    def _machine_exact_contract(
+        self,
+        *,
+        evaluation_mode: str,
+        status: str,
+        measurement: dict[str, Any],
+        scoring_artifact: dict[str, Any],
+        revalidation_valid: bool,
+    ) -> dict[str, Any]:
+        available = (
+            evaluation_mode == self.MACHINE_EXACT_CONTRACT_MODE
+            and status == "machine_exact_contract_ready"
+            and revalidation_valid
+            and measurement.get("available") is True
+            and measurement.get("sample_count", 0) >= self.MINIMUM_PAIRED_SAMPLES
+        )
+        return {
+            "schema": self.MACHINE_EXACT_CONTRACT_SCHEMA,
+            "available": available,
+            "metric_scope": self.MACHINE_EXACT_CONTRACT_SCOPE,
+            "sample_count": measurement.get("sample_count") if available else 0,
+            "minimum_paired_samples": self.MINIMUM_PAIRED_SAMPLES,
+            "baseline_mean": measurement.get("baseline_mean") if available else None,
+            "candidate_mean": measurement.get("candidate_mean") if available else None,
+            "paired_delta": measurement.get("paired_delta") if available else None,
+            "paired_scores": (
+                deepcopy(measurement.get("paired_scores", [])) if available else []
+            ),
+            "uncertainty": measurement.get("uncertainty") if available else None,
+            "positive_effect_observed": (
+                measurement.get("positive_effect_supported") if available else False
+            ),
+            "scoring_artifact_digest": (
+                scoring_artifact.get("artifact_digest") if available else None
+            ),
+            "evaluator": (
+                deepcopy(scoring_artifact.get("evaluator", {})) if available else {}
+            ),
+            "human_reviewed": False,
+            "semantic_task_quality_established": False,
+            "claim_eligible": False,
+            "automatic_promotion": False,
+            "generalization_beyond_registered_corpus": False,
+            "reason": None if available else "machine_exact_contract_unavailable",
         }
 
     def _persist_evaluation(self, record: dict[str, Any]) -> dict[str, Any]:
@@ -971,11 +1079,22 @@ class PairedQualityEvidenceLedger:
     def _normalize_evaluation(self, payload: Any) -> dict[str, Any]:
         source = payload if isinstance(payload, dict) else {}
         errors: list[str] = []
-        if set(source) != {"pairs"}:
+        if set(source) not in ({"pairs"}, {"pairs", "evaluation_mode"}):
             errors.append("paired_evaluation_payload_shape_invalid")
+        evaluation_mode = source.get("evaluation_mode", self.HUMAN_REVIEW_MODE)
+        if evaluation_mode not in {
+            self.HUMAN_REVIEW_MODE,
+            self.MACHINE_EXACT_CONTRACT_MODE,
+        }:
+            errors.append("paired_evaluation_mode_invalid")
+            evaluation_mode = self.HUMAN_REVIEW_MODE
         values = source.get("pairs")
         if not isinstance(values, list) or not values:
-            return {"pairs": [], "errors": [*errors, "paired_evaluation_pairs_required"]}
+            return {
+                "pairs": [],
+                "evaluation_mode": evaluation_mode,
+                "errors": [*errors, "paired_evaluation_pairs_required"],
+            }
         pairs: list[dict[str, Any]] = []
         for value in values:
             if not isinstance(value, dict) or set(value) != {"task_id", "baseline", "candidate"}:
@@ -990,7 +1109,11 @@ class PairedQualityEvidenceLedger:
             pairs.append(
                 {"task_id": task_id, "baseline": baseline, "candidate": candidate}
             )
-        return {"pairs": pairs, "errors": self._dedupe(errors)}
+        return {
+            "pairs": pairs,
+            "evaluation_mode": evaluation_mode,
+            "errors": self._dedupe(errors),
+        }
 
     def _normalize_reference(self, value: Any) -> dict[str, str] | None:
         if not isinstance(value, dict) or set(value) != {"producer_run_id", "binding_id"}:

@@ -57,7 +57,13 @@ class LiveContextPairedEvaluator:
         task_ids: list[str] | None = None,
         execution_plan: dict[str, Any] | None = None,
         resume_registered_plan: bool = False,
+        evaluation_mode: str = PairedQualityEvidenceLedger.HUMAN_REVIEW_MODE,
     ) -> dict[str, Any]:
+        if evaluation_mode not in {
+            PairedQualityEvidenceLedger.HUMAN_REVIEW_MODE,
+            PairedQualityEvidenceLedger.MACHINE_EXACT_CONTRACT_MODE,
+        }:
+            return self._blocked("live_context_evaluation_mode_invalid")
         valid, reason = validate_context_intervention(context_intervention)
         if not valid:
             return self._blocked(reason or "live_context_intervention_invalid")
@@ -166,7 +172,9 @@ class LiveContextPairedEvaluator:
                     self._binding(treatment_report, task_id, "maximized"),
                 )
             )
-        evaluation = self.paired_quality.evaluate({"pairs": pairs})
+        evaluation = self.paired_quality.evaluate(
+            {"pairs": pairs, "evaluation_mode": evaluation_mode}
+        )
         verified_observations = sum(
             binding.get("schema_version") == UPTAKE_SCHEMA_VERSION
             and binding.get("provider_observation_status") == "verified"
@@ -177,8 +185,14 @@ class LiveContextPairedEvaluator:
             len(report.get("cases", [])) * 2 for report in all_reports
         )
         expected_adapter_attempts = len(selected_task_ids) * 4
+        expected_evaluation_status = (
+            "machine_exact_contract_ready"
+            if evaluation_mode
+            == PairedQualityEvidenceLedger.MACHINE_EXACT_CONTRACT_MODE
+            else "pending_human_review"
+        )
         live_evidence_complete = (
-            evaluation.get("status") == "pending_human_review"
+            evaluation.get("status") == expected_evaluation_status
             and verified_observations == expected_observations
             and adapter_attempts == expected_adapter_attempts
         )
@@ -186,6 +200,7 @@ class LiveContextPairedEvaluator:
             "schema": LIVE_CONTEXT_EVALUATION_SCHEMA,
             "kind": "selected_condition_execution",
             "experiment_id": plan["experiment_id"],
+            "evaluation_mode": evaluation_mode,
             "manifest": plan,
             "evaluation_id": evaluation.get("id"),
             "pairs": pairs,
@@ -204,7 +219,7 @@ class LiveContextPairedEvaluator:
         result = {
             "schema": LIVE_CONTEXT_EVALUATION_SCHEMA,
             "status": (
-                "pending_human_review" if live_evidence_complete else "blocked"
+                expected_evaluation_status if live_evidence_complete else "blocked"
             ),
             "reason": (
                 None
