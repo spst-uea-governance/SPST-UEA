@@ -11,6 +11,7 @@ from spst_runtime.model_input_binding import ModelInputBindingError, bind_model_
 PROVIDER_REQUEST_BINDING_SCHEMA = "spst-provider-request-binding-v1"
 PROVIDER_OBSERVATION_SCHEMA = "spst-provider-observation-v1"
 CODEX_CLI_OBSERVATION_SOURCE = "codex_cli_jsonl_model_echo"
+CODEX_CLI_SPEND_GUARD_SCHEMA = "codex_app_server_rate_limits_v1"
 PROVIDER_OBSERVATION_SOURCES = frozenset(
     {
         CODEX_CLI_OBSERVATION_SOURCE,
@@ -137,6 +138,7 @@ def build_provider_observation(
     output_text: str,
     observation_source: str,
     acknowledged_request_binding_sha256: str | None,
+    execution_guard: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Record an adapter-observed response acknowledgement without causal claims."""
 
@@ -154,6 +156,12 @@ def build_provider_observation(
         reasons.append("provider_observation_response_incomplete")
     if observation_source not in PROVIDER_OBSERVATION_SOURCES:
         reasons.append("provider_observation_source_invalid")
+    guard_valid, guard_reason = validate_provider_execution_guard(
+        execution_guard,
+        observation_source=observation_source,
+    )
+    if not guard_valid:
+        reasons.append(guard_reason or "provider_execution_guard_invalid")
     if (
         acknowledged_request_binding_sha256
         != request_binding["request_binding_sha256"]
@@ -192,7 +200,58 @@ def build_provider_observation(
             "causal_effect_established": False,
         },
     }
+    if execution_guard is not None:
+        unsigned["execution_guard"] = deepcopy(execution_guard)
     return {**unsigned, "observation_sha256": _canonical_hash(unsigned)}
+
+
+def validate_provider_execution_guard(
+    value: Any,
+    *,
+    observation_source: str,
+) -> tuple[bool, str | None]:
+    """Validate the per-call no-spend decision bound to a Codex CLI observation."""
+
+    if observation_source != CODEX_CLI_OBSERVATION_SOURCE:
+        if value is not None:
+            return False, "provider_execution_guard_scope_invalid"
+        return True, None
+    if not isinstance(value, dict):
+        return False, "codex_cli_spend_guard_missing"
+    if set(value) != {
+        "schema",
+        "account_type",
+        "plan_type",
+        "included_usage_percent",
+        "maximum_included_usage_percent",
+        "spendable_credits_present",
+        "credit_balance_zero",
+        "rate_limit_reached",
+        "source",
+        "source_authenticated",
+    }:
+        return False, "codex_cli_spend_guard_shape_invalid"
+    used_percent = value.get("included_usage_percent")
+    maximum_percent = value.get("maximum_included_usage_percent")
+    if (
+        value.get("schema") != CODEX_CLI_SPEND_GUARD_SCHEMA
+        or value.get("account_type") != "chatgpt"
+        or not _safe_identifier(value.get("plan_type"))
+        or isinstance(used_percent, bool)
+        or not isinstance(used_percent, (int, float))
+        or not 0 <= float(used_percent) <= 100
+        or isinstance(maximum_percent, bool)
+        or not isinstance(maximum_percent, int)
+        or not 0 < maximum_percent <= 100
+        or float(used_percent) >= maximum_percent
+        or value.get("spendable_credits_present") is not False
+        or value.get("credit_balance_zero") is not True
+        or value.get("rate_limit_reached") is not False
+        or value.get("source") != "codex_app_server_account_rate_limits_read"
+        or value.get("source_authenticated") is not False
+    ):
+        return False, "codex_cli_spend_guard_invalid"
+    return True, None
 
 
 def verify_provider_observation(
@@ -331,6 +390,17 @@ def _validate_observation_integrity(value: Any) -> tuple[bool, str | None]:
         return False, "provider_observation_boundary_invalid"
     if value.get("observation_source") not in PROVIDER_OBSERVATION_SOURCES:
         return False, "provider_observation_source_invalid"
+    guard_valid, guard_reason = validate_provider_execution_guard(
+        value.get("execution_guard"),
+        observation_source=str(value["observation_source"]),
+    )
+    if value.get("status") == "observed" and not guard_valid:
+        return False, guard_reason
+    if (
+        value.get("observation_source") != CODEX_CLI_OBSERVATION_SOURCE
+        and "execution_guard" in value
+    ):
+        return False, guard_reason
     return True, None
 
 
