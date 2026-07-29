@@ -13,6 +13,7 @@ from spst_runtime.events.event import Event
 from spst_runtime.models.subject_state import SubjectState
 from spst_runtime.orchestrator.runtime_orchestrator import RuntimeOrchestrator
 from spst_runtime.project_context_supervisor import ProjectContextSupervisor
+from spst_runtime.runtime_release_identity import RuntimeReleaseIdentity
 from spst_runtime.runtime.runtime_loop import RuntimeLoop
 
 
@@ -21,6 +22,12 @@ DEFAULT_COCKPIT_DB_PATH = "spst_cockpit.db"
 PROJECT_CONTEXT_CORPUS_ENV = "SPST_PROJECT_CONTEXT_CORPUS"
 DEFAULT_PROJECT_CONTEXT_CORPUS = (
     Path(__file__).resolve().parents[2] / ".spst" / "project-context" / "corpus.json"
+)
+RUNTIME_REPOSITORY_ROOT_ENV = "SPST_RUNTIME_REPOSITORY_ROOT"
+DEFAULT_RUNTIME_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+RUNTIME_RELEASE_ADMISSION_SCHEMA = "spst-runtime-release-admission-v1"
+RUNTIME_RELEASE_RECOVERY_POST_PATHS = frozenset(
+    {"/api/project-context/shutdown"}
 )
 
 
@@ -506,6 +513,8 @@ class CockpitRuntime:
 
 _DEFAULT_COCKPIT: CockpitRuntime | None = None
 _DEFAULT_COCKPIT_LOCK = Lock()
+_RUNTIME_RELEASE_IDENTITY: RuntimeReleaseIdentity | None = None
+_RUNTIME_RELEASE_IDENTITY_LOCK = Lock()
 
 
 def get_default_cockpit() -> CockpitRuntime:
@@ -521,6 +530,61 @@ def get_default_cockpit() -> CockpitRuntime:
     return cockpit
 
 
+def initialize_runtime_release_identity(
+    repository_root: str | Path,
+) -> RuntimeReleaseIdentity:
+    global _RUNTIME_RELEASE_IDENTITY
+    identity = RuntimeReleaseIdentity(repository_root)
+    with _RUNTIME_RELEASE_IDENTITY_LOCK:
+        _RUNTIME_RELEASE_IDENTITY = identity
+    return identity
+
+
+def runtime_release_identity_status() -> dict[str, Any]:
+    with _RUNTIME_RELEASE_IDENTITY_LOCK:
+        identity = _RUNTIME_RELEASE_IDENTITY
+    if identity is None:
+        return {
+            "schema": "spst-runtime-release-identity-v1",
+            "status": "blocked",
+            "reason": "runtime_release_identity_not_initialized",
+            "startup_repository_identity": None,
+            "current_match": False,
+            "path_disclosed": False,
+            "persistent_state_written": False,
+        }
+    return identity.status()
+
+
+def runtime_release_admission_failure() -> tuple[HTTPStatus, dict[str, Any]] | None:
+    """Reject executable HTTP paths when this process no longer matches its code."""
+
+    identity = runtime_release_identity_status()
+    if identity.get("status") == "ready" and identity.get("current_match") is True:
+        return None
+    return HTTPStatus.SERVICE_UNAVAILABLE, {
+        "schema": RUNTIME_RELEASE_ADMISSION_SCHEMA,
+        "status": "blocked",
+        "reason": "runtime_release_identity_not_current",
+        "identity_status": identity.get("status"),
+        "identity_reason": identity.get("reason"),
+        "current_match": identity.get("current_match"),
+        "path_disclosed": False,
+        "persistent_state_written": False,
+    }
+
+
+def runtime_release_admission_required(method: str, path: str) -> bool:
+    """Identify HTTP paths that may execute or increase Runtime capability."""
+
+    parsed_path = urlparse(path).path
+    if method == "GET":
+        return parsed_path == "/api/run"
+    if method == "POST":
+        return parsed_path not in RUNTIME_RELEASE_RECOVERY_POST_PATHS
+    return False
+
+
 def handle_cockpit_request(
     method: str,
     path: str,
@@ -528,8 +592,12 @@ def handle_cockpit_request(
     body: bytes | None = None,
     runtime: CockpitRuntime | None = None,
 ) -> tuple[HTTPStatus, dict[str, Any]]:
-    runtime = runtime if runtime is not None else get_default_cockpit()
     parsed = urlparse(path)
+
+    if method == "GET" and parsed.path == "/api/runtime-identity":
+        return HTTPStatus.OK, runtime_release_identity_status()
+
+    runtime = runtime if runtime is not None else get_default_cockpit()
 
     if method == "GET" and parsed.path == "/api/status":
         return HTTPStatus.OK, runtime.status()
@@ -642,6 +710,11 @@ class RuntimeWebHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/run":
+            if runtime_release_admission_required("GET", self.path):
+                admission_failure = runtime_release_admission_failure()
+                if admission_failure is not None:
+                    self._send_json(*admission_failure)
+                    return
             query = parse_qs(parsed.query)
             steps = int(query.get("steps", ["3"])[0])
             event = query.get("event", ["browser_run"])[0]
@@ -652,6 +725,7 @@ class RuntimeWebHandler(BaseHTTPRequestHandler):
 
         if parsed.path in {
             "/api/status",
+            "/api/runtime-identity",
             "/api/project-context/status",
             "/api/goals",
             "/api/subjects",
@@ -677,6 +751,11 @@ class RuntimeWebHandler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
     def do_POST(self) -> None:
+        if runtime_release_admission_required("POST", self.path):
+            admission_failure = runtime_release_admission_failure()
+            if admission_failure is not None:
+                self._send_json(*admission_failure)
+                return
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length) if length else b"{}"
         status, payload = handle_cockpit_request("POST", self.path, body=body)
@@ -697,7 +776,13 @@ class RuntimeWebHandler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
 
-def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
+def serve(
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    *,
+    repository_root: str | Path = DEFAULT_RUNTIME_REPOSITORY_ROOT,
+) -> None:
+    initialize_runtime_release_identity(repository_root)
     server = ThreadingHTTPServer((host, port), RuntimeWebHandler)
     print(f"SPST-UEA Runtime Web running at http://{host}:{port}/", flush=True)
     try:
@@ -713,8 +798,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Serve the SPST-UEA runtime browser UI.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument(
+        "--repository-root",
+        default=os.environ.get(
+            RUNTIME_REPOSITORY_ROOT_ENV,
+            str(DEFAULT_RUNTIME_REPOSITORY_ROOT),
+        ),
+    )
     args = parser.parse_args(argv)
-    serve(args.host, args.port)
+    serve(args.host, args.port, repository_root=args.repository_root)
     return 0
 
 

@@ -37,6 +37,13 @@ The launcher places Cockpit state in the ignored
 `.spst/runtime/spst_cockpit.db`. It does not use or create the historical DBs
 under `runtime/`.
 
+Before accepting either a new or existing listener, the launcher captures the
+current path-free Repository identity and compares it with the process startup
+identity through `GET /api/runtime-identity`. A changed HEAD, index, tracked
+file, or non-ignored untracked file makes the process `stale`; a listener from
+another worktree is rejected. This endpoint is read-only and does not
+initialize the Cockpit database.
+
 ## Recovery and exact-once boundary
 
 Requests are serialized through one child. If the child is already dead before

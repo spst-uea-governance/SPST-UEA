@@ -55,6 +55,17 @@ Cockpit state in the ignored `../.spst/runtime/spst_cockpit.db`. Inspect the
 read-only worker state at `GET /api/project-context/status`; submit bounded
 retrieval at `POST /api/project-context/query`.
 
+The launcher also refuses an existing listener whose startup HEAD or canonical
+worktree bytes differ from the requested Repository. Inspect this read-only,
+no-database path at `GET /api/runtime-identity`. See
+`../docs/runtime-release-identity.md` for the fail-closed contract.
+
+If Repository identity drifts after startup, the listener remains observable
+but rejects `GET /api/run` and capability-increasing POST operations with HTTP
+503 until it is restarted from the exact current state. The exact Project
+Context shutdown POST remains available only for graceful stale-process
+replacement.
+
 To stop the persistent browser UI:
 
 ```powershell
