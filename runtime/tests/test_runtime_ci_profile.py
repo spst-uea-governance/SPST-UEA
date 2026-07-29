@@ -75,3 +75,30 @@ def test_runtime_ci_direct_verification_toolchain_is_exactly_pinned():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     assert 'python -m pip install -e "./runtime[dev]"' in workflow
     assert "python -m pip check" in workflow
+
+
+def test_runtime_ci_actions_are_bound_to_immutable_commit_ids():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7" in workflow
+    assert "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7" in workflow
+    assert "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7" in workflow
+    assert "actions/checkout@v" not in workflow
+    assert "actions/setup-python@v" not in workflow
+    assert "actions/setup-node@v" not in workflow
+
+
+def test_runtime_ci_checks_committed_ranges_instead_of_the_clean_checkout():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    required = (
+        "fetch-depth: 0",
+        "PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}",
+        "PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
+        "PUSH_BEFORE_SHA: ${{ github.event.before }}",
+        'git diff --check "${PR_BASE_SHA}...${PR_HEAD_SHA}"',
+        'git diff-tree --check --root --no-commit-id -r "$GITHUB_SHA"',
+        'git diff --check "${PUSH_BEFORE_SHA}..${GITHUB_SHA}"',
+    )
+    assert all(item in workflow for item in required)
+    assert "run: git diff --check\n" not in workflow

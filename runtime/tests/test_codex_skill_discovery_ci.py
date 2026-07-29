@@ -142,7 +142,7 @@ def test_runtime_ci_runs_pinned_keyless_fresh_process_discovery() -> None:
 
     required = (
         'CODEX_CLI_VERSION: "0.144.5"',
-        "actions/setup-node@v4",
+        "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7",
         "Install pinned Codex CLI for discovery probe",
         "@openai/codex@${CODEX_CLI_VERSION}",
         "Verify fresh Codex process discovers repository skill",
@@ -151,6 +151,7 @@ def test_runtime_ci_runs_pinned_keyless_fresh_process_discovery() -> None:
         '--expected-cli-version "$CODEX_CLI_VERSION"',
     )
     assert all(value in workflow for value in required)
+    assert "actions/setup-node@v" not in workflow
     assert "CODEX_API_KEY" not in workflow
     assert "CODEX_ACCESS_TOKEN" not in workflow
     assert workflow.index("Install pinned Codex CLI for discovery probe") < workflow.index(
