@@ -148,6 +148,7 @@ def test_codex_cli_adapter_emits_verified_observation_and_scrubs_api_keys(
     context = {
         "instructions": "Return bounded JSON.",
         "evaluation": {"case_id": "real-01", "arm": "maximized"},
+        "project_context_corpus": {"secret_marker": "verification-only-corpus"},
     }
 
     result = asyncio.run(adapter.infer("Solve the task.", context))
@@ -192,6 +193,12 @@ def test_codex_cli_adapter_emits_verified_observation_and_scrubs_api_keys(
     assert "--ignore-rules" in command
     assert command[command.index("--sandbox") + 1] == "read-only"
     assert command[command.index("--model") + 1] == "gpt-5.6-sol"
+    provider_prompt = command[-1]
+    assert '"canonical_model_input"' in provider_prompt
+    assert '"instructions":"Return bounded JSON."' in provider_prompt
+    assert '"adapter_context"' not in provider_prompt
+    assert '"case_id"' not in provider_prompt
+    assert "verification-only-corpus" not in provider_prompt
     environment = kwargs["env"]
     assert isinstance(environment, dict)
     assert "OPENAI_API_KEY" not in environment

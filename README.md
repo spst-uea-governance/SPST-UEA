@@ -63,6 +63,8 @@ against the GitHub ruleset and a real failing pull request.
 - `rfc/` - normative RFC drafts and templates.
 - `benchmark/` - reproducible RFC-0005 local benchmark runner.
 - `sdk/` - typed, API-key-free Python cockpit SDK.
+- `.agents/skills/spst-project-context/` - bounded retrieval from an explicit,
+  owner-supplied ChatGPT Project snapshot.
 
 ## Codex Notes
 
@@ -79,6 +81,15 @@ reverse-entropy, and context-distillation ideas as a bounded refinement layer.
 It preserves the current task scope and behavior, and sends durable lessons
 through SPST RuleCrystal governance instead of creating a parallel
 `AETHER_MEMORY.md` store.
+
+The repository-scoped `$spst-project-context` skill compiles an explicit
+owner-supplied ChatGPT Project snapshot into a local, gitignored corpus. It
+retrieves only relevant, bounded segments as `untrusted_evidence_only`, rejects
+stale or tampered corpora, and excludes suspected prompt injection. It is not a
+background account scraper and does not place an entire Project into model
+weights or privileged Codex memory. Project packets are accepted by canonical
+model input only after V3 deterministic replay against the reviewed corpus;
+self-hashed packets alone are insufficient. See `docs/chatgpt-project-context.md`.
 
 ## Receipt-Bound Actions
 

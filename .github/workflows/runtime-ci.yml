@@ -33,13 +33,20 @@ jobs:
           "@openai/codex@${CODEX_CLI_VERSION}"
       - name: Verify fresh Codex process discovers repository skill
         shell: bash
-        run: >-
-          python runtime/scripts/codex_skill_discovery_probe.py
-          --codex "$RUNNER_TEMP/codex-skill-discovery-cli/node_modules/.bin/codex"
-          --repository-root .
-          --isolation-root "$RUNNER_TEMP/codex-skill-discovery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          --payload-output "$RUNNER_TEMP/codex-skill-discovery-prompt-input.json"
-          --expected-cli-version "$CODEX_CLI_VERSION"
+        run: |
+          python runtime/scripts/codex_skill_discovery_probe.py \
+            --codex "$RUNNER_TEMP/codex-skill-discovery-cli/node_modules/.bin/codex" \
+            --repository-root . \
+            --isolation-root "$RUNNER_TEMP/codex-aether-discovery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --payload-output "$RUNNER_TEMP/codex-aether-discovery-prompt-input.json" \
+            --expected-cli-version "$CODEX_CLI_VERSION"
+          python runtime/scripts/codex_skill_discovery_probe.py \
+            --codex "$RUNNER_TEMP/codex-skill-discovery-cli/node_modules/.bin/codex" \
+            --repository-root . \
+            --isolation-root "$RUNNER_TEMP/codex-project-context-discovery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --payload-output "$RUNNER_TEMP/codex-project-context-discovery-prompt-input.json" \
+            --expected-cli-version "$CODEX_CLI_VERSION" \
+            --skill-name spst-project-context
       - name: Configure isolated Live DB guard paths
         shell: bash
         run: |
