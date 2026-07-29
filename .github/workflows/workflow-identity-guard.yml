@@ -1,0 +1,33 @@
+name: Workflow Identity Guard
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+jobs:
+  trusted-base-evaluator:
+    name: trusted-base-evaluator
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout trusted base revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Evaluate protected workflow identity
+        working-directory: runtime
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SPST_REPOSITORY: ${{ github.repository }}
+          SPST_PR_NUMBER: ${{ github.event.pull_request.number }}
+          SPST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SPST_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          SPST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          SPST_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python -m spst_runtime.workflow_identity_guard

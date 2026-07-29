@@ -56,6 +56,12 @@ The workflow file is Repository evidence, not proof that a hosted branch rule
 currently requires the check. Hosted enforcement must be verified separately
 against the GitHub ruleset and a real failing pull request.
 
+The no-paid `Workflow Identity Guard` adds a trusted-base
+`pull_request_target` check that fails closed when any workflow or its guard
+implementation changes. It compensates for GitHub Free not providing an
+organization Required Workflow rule; it does not claim equivalent
+cryptographic workflow identity. See `docs/workflow-identity-guard.md`.
+
 ## Repository Map
 
 - `runtime/` - Python reference runtime package and tests.

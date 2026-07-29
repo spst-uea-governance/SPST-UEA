@@ -15,11 +15,13 @@ jobs:
       CODEX_CLI_VERSION: "0.144.5"
       SPST_PROVENANCE_KEY: ci-live-db-hash-guard-public-test-key
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.11"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "22"
       - name: Install pinned Codex CLI for discovery probe
@@ -91,4 +93,16 @@ jobs:
         working-directory: runtime
         run: python -m mypy spst_runtime
       - name: Check patch whitespace
-        run: git diff --check
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            git diff --check "${PR_BASE_SHA}...${PR_HEAD_SHA}"
+          elif [[ "$PUSH_BEFORE_SHA" =~ ^0+$ ]]; then
+            git diff-tree --check --root --no-commit-id -r "$GITHUB_SHA"
+          else
+            git diff --check "${PUSH_BEFORE_SHA}..${GITHUB_SHA}"
+          fi
