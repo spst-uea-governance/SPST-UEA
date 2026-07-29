@@ -90,6 +90,8 @@ background account scraper and does not place an entire Project into model
 weights or privileged Codex memory. Project packets are accepted by canonical
 model input only after V3 deterministic replay against the reviewed corpus;
 self-hashed packets alone are insufficient. See `docs/chatgpt-project-context.md`.
+The persistent Cockpit launcher manages ARCH-18's JSONL worker through a
+read-only, restartable supervisor; see `docs/project-context-supervisor.md`.
 
 ## Receipt-Bound Actions
 

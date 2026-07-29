@@ -49,6 +49,23 @@ On Windows, use the persistent launcher:
 .\run_spst_web_8767.ps1
 ```
 
+The launcher also owns the Project Context JSONL worker through the Cockpit
+Runtime, warms it when `../.spst/project-context/corpus.json` exists, and keeps
+Cockpit state in the ignored `../.spst/runtime/spst_cockpit.db`. Inspect the
+read-only worker state at `GET /api/project-context/status`; submit bounded
+retrieval at `POST /api/project-context/query`.
+
+The launcher also refuses an existing listener whose startup HEAD or canonical
+worktree bytes differ from the requested Repository. Inspect this read-only,
+no-database path at `GET /api/runtime-identity`. See
+`../docs/runtime-release-identity.md` for the fail-closed contract.
+
+If Repository identity drifts after startup, the listener remains observable
+but rejects `GET /api/run` and capability-increasing POST operations with HTTP
+503 until it is restarted from the exact current state. The exact Project
+Context shutdown POST remains available only for graceful stale-process
+replacement.
+
 To stop the persistent browser UI:
 
 ```powershell
@@ -130,6 +147,20 @@ artifacts. Dynamic verifier source is held in memory rather than written into
 the package tree.
 
 In this thread, requests addressed to SPST-UEA can be routed through that bridge by Codex.
+
+For repeated Project-context queries, the ARCH-18 JSONL bridge retains a
+bounded verified search index while hashing the corpus file before every
+request:
+
+```powershell
+python -m spst_runtime.project_context_bridge serve `
+  --corpus ..\.spst\project-context\corpus.json
+```
+
+See `../docs/low-latency-evidence-plane.md`. This reduces local evidence-plane
+overhead; it does not remove verification or claim provider/model uplift.
+For the persistent lifecycle, exact-once boundary, and formal HTTP paths, see
+`../docs/project-context-supervisor.md`.
 
 Task-specific quality evidence is separate from routing and contract-proxy
 metrics. The Phase 16 local API accepts only stored PBIND references, scores

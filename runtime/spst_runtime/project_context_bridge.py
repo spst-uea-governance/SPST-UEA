@@ -4,15 +4,40 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections.abc import Sequence
 
 from spst_runtime.project_context import (
     compile_snapshot,
     dump_json,
     load_json,
-    query_corpus,
+    load_verified_corpus,
+    query_verified_corpus,
     verify_corpus,
 )
+
+
+def _write_json(value: object, *, indent: int | None = None, flush: bool = False) -> None:
+    """Write parse-equivalent JSON even when stdout cannot encode Unicode."""
+
+    rendered = json.dumps(
+        value,
+        ensure_ascii=False,
+        indent=indent,
+        sort_keys=True,
+    )
+    encoding = getattr(sys.stdout, "encoding", None)
+    if encoding is not None:
+        try:
+            rendered.encode(encoding, errors="strict")
+        except (LookupError, UnicodeEncodeError):
+            rendered = json.dumps(
+                value,
+                ensure_ascii=True,
+                indent=indent,
+                sort_keys=True,
+            )
+    print(rendered, flush=flush)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,12 +57,17 @@ def build_parser() -> argparse.ArgumentParser:
     query_parser.add_argument("--query", required=True)
     query_parser.add_argument("--max-items", type=int, default=6)
     query_parser.add_argument("--max-chars", type=int, default=8_000)
+
+    serve_parser = subparsers.add_parser("serve")
+    serve_parser.add_argument("--corpus", required=True)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "serve":
+            return _serve(args.corpus)
         if args.command == "compile":
             result = compile_snapshot(
                 load_json(args.snapshot),
@@ -48,8 +78,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "status":
             output = verify_corpus(load_json(args.corpus))
         else:
-            output = query_corpus(
-                load_json(args.corpus),
+            output = query_verified_corpus(
+                load_verified_corpus(args.corpus),
                 args.query,
                 max_items=args.max_items,
                 max_chars=args.max_chars,
@@ -60,8 +90,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             "status": "blocked",
             "reason": str(error) or error.__class__.__name__,
         }
-    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+    _write_json(output, indent=2)
     return 0 if output["status"] in {"ready", "empty"} else 2
+
+
+def _serve(corpus_path: str) -> int:
+    """Serve independent JSONL queries while retaining only verified search indexes."""
+
+    for raw_line in sys.stdin:
+        try:
+            request = json.loads(raw_line)
+            if not isinstance(request, dict) or not isinstance(request.get("query"), str):
+                raise ValueError("query_request_invalid")
+            output = query_verified_corpus(
+                load_verified_corpus(corpus_path),
+                request["query"],
+                max_items=request.get("max_items", 6),
+                max_chars=request.get("max_chars", 8_000),
+            )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+            output = {
+                "schema": "spst-chatgpt-project-context-cli-result-v1",
+                "status": "blocked",
+                "reason": str(error) or error.__class__.__name__,
+            }
+        _write_json(output, flush=True)
+    return 0
 
 
 if __name__ == "__main__":

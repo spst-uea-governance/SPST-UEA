@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
+import os
+import subprocess
+import sys
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,9 +14,13 @@ import pytest
 from spst_runtime.project_context import (
     CORPUS_SCHEMA,
     DuplicateJSONKeyError,
+    clear_verified_corpus_cache,
     compile_snapshot,
+    dump_json,
     load_json,
+    load_verified_corpus,
     query_corpus,
+    query_verified_corpus,
     sha256_value,
     verify_corpus,
 )
@@ -220,6 +228,72 @@ def test_strict_json_loader_rejects_duplicate_keys(tmp_path: Path) -> None:
         load_json(path)
 
 
+def test_verified_corpus_handle_reuses_exact_bytes_and_matches_strict_query(
+    tmp_path: Path,
+) -> None:
+    corpus = compile_snapshot(snapshot(), now=NOW)
+    path = tmp_path / "corpus.json"
+    dump_json(path, corpus)
+    clear_verified_corpus_cache()
+
+    first = load_verified_corpus(path, now=NOW)
+    second = load_verified_corpus(path, now=NOW)
+    warm_packet = query_verified_corpus(
+        first,
+        "repository identity Receipt",
+        now=NOW,
+    )
+
+    assert first is second
+    assert first.source_bytes_sha256 == second.source_bytes_sha256
+    assert warm_packet == query_corpus(
+        corpus,
+        "repository identity Receipt",
+        now=NOW,
+    )
+
+
+def test_verified_corpus_cache_invalidates_on_byte_tamper(tmp_path: Path) -> None:
+    corpus = compile_snapshot(snapshot(), now=NOW)
+    path = tmp_path / "corpus.json"
+    dump_json(path, corpus)
+    clear_verified_corpus_cache()
+    original = load_verified_corpus(path, now=NOW)
+    corpus["segments"][0]["text"] = "altered"
+    dump_json(path, corpus)
+
+    with pytest.raises(ValueError, match="corpus_digest_mismatch"):
+        load_verified_corpus(path, now=NOW)
+    assert query_verified_corpus(original, "Receipt", now=NOW)["status"] in {
+        "empty",
+        "ready",
+    }
+
+
+def test_verified_corpus_handle_rechecks_freshness_at_query_time(tmp_path: Path) -> None:
+    corpus = compile_snapshot(snapshot(), now=NOW, max_age_days=2)
+    path = tmp_path / "corpus.json"
+    dump_json(path, corpus)
+    clear_verified_corpus_cache()
+    verified = load_verified_corpus(path, now=NOW)
+
+    with pytest.raises(ValueError, match="corpus_stale"):
+        load_verified_corpus(
+            path,
+            now=datetime(2026, 8, 2, tzinfo=timezone.utc),
+        )
+
+    packet = query_verified_corpus(
+        verified,
+        "Receipt repository",
+        now=datetime(2026, 8, 2, tzinfo=timezone.utc),
+    )
+
+    assert packet["status"] == "blocked"
+    assert packet["reason"] == "corpus_stale"
+    assert packet["selected_count"] == 0
+
+
 def test_cli_compiles_checks_and_queries(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     source = tmp_path / "snapshot.json"
     destination = tmp_path / "corpus.json"
@@ -244,6 +318,161 @@ def test_cli_compiles_checks_and_queries(tmp_path: Path, capsys: pytest.CaptureF
     )
     query_output = json.loads(capsys.readouterr().out)
     assert query_output["status"] == "ready"
+
+
+def test_cli_serve_retains_verified_plane_and_recovers_after_bad_request(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    corpus_path = tmp_path / "corpus.json"
+    dump_json(corpus_path, compile_snapshot(snapshot(), now=NOW))
+    requests = [
+        json.dumps({"query": "repository identity Receipt"}),
+        "not-json",
+        json.dumps({"query": "repository identity Receipt"}),
+    ]
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n".join(requests) + "\n"))
+
+    assert main(["serve", "--corpus", str(corpus_path)]) == 0
+
+    outputs = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [output["status"] for output in outputs] == ["ready", "blocked", "ready"]
+    assert outputs[0]["packet_sha256"] == outputs[2]["packet_sha256"]
+    assert outputs[1]["reason"]
+
+
+def _unicode_cli_corpus(tmp_path: Path) -> Path:
+    value = snapshot()
+    chats = value["chats"]
+    assert isinstance(chats, list)
+    messages = chats[0]["messages"]
+    assert isinstance(messages, list)
+    messages[0]["text"] = "repository identity Receipt — Unicode 😀"
+    corpus_path = tmp_path / "corpus.json"
+    dump_json(
+        corpus_path,
+        compile_snapshot(value, now=NOW, max_age_days=3_650),
+    )
+    return corpus_path
+
+
+def _cli_environment(encoding: str) -> dict[str, str]:
+    environment = os.environ.copy()
+    environment["PYTHONIOENCODING"] = encoding
+    environment["PYTHONUTF8"] = "0"
+    return environment
+
+
+def test_cli_query_falls_back_to_parse_equivalent_ascii_json_on_cp932(
+    tmp_path: Path,
+) -> None:
+    corpus_path = _unicode_cli_corpus(tmp_path)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "spst_runtime.project_context_bridge",
+            "query",
+            "--corpus",
+            str(corpus_path),
+            "--query",
+            "repository identity Receipt",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=_cli_environment("cp932"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr.decode("ascii", errors="replace")
+    rendered = result.stdout.decode("cp932")
+    output = json.loads(rendered)
+    assert output["status"] == "ready"
+    assert output["items"][0]["text"] == "repository identity Receipt — Unicode 😀"
+    assert "\\u2014" in rendered
+    assert "\\ud83d\\ude00" in rendered
+
+
+def test_cli_blocked_result_with_unicode_path_is_valid_cp932_json(
+    tmp_path: Path,
+) -> None:
+    missing = tmp_path / "missing—😀.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "spst_runtime.project_context_bridge",
+            "status",
+            "--corpus",
+            str(missing),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=_cli_environment("cp932"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    output = json.loads(result.stdout.decode("cp932"))
+    assert output["status"] == "blocked"
+    assert "missing—😀.json" in output["reason"]
+    assert not result.stderr
+
+
+def test_cli_jsonl_serve_emits_valid_cp932_lines(tmp_path: Path) -> None:
+    corpus_path = _unicode_cli_corpus(tmp_path)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "spst_runtime.project_context_bridge",
+            "serve",
+            "--corpus",
+            str(corpus_path),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=_cli_environment("cp932"),
+        input=b'{"query":"repository identity Receipt"}\n',
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr.decode("ascii", errors="replace")
+    lines = result.stdout.decode("cp932").splitlines()
+    assert len(lines) == 1
+    output = json.loads(lines[0])
+    assert output["status"] == "ready"
+    assert output["items"][0]["text"] == "repository identity Receipt — Unicode 😀"
+
+
+def test_cli_preserves_readable_unicode_on_utf8_stdout(tmp_path: Path) -> None:
+    corpus_path = _unicode_cli_corpus(tmp_path)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "spst_runtime.project_context_bridge",
+            "query",
+            "--corpus",
+            str(corpus_path),
+            "--query",
+            "repository identity Receipt",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=_cli_environment("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    assert "—".encode() in result.stdout
+    assert "😀".encode() in result.stdout
+    assert json.loads(result.stdout.decode("utf-8"))["status"] == "ready"
 
 
 def test_cli_compile_failure_is_structured_and_does_not_write_corpus(

@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 
 from spst_runtime.events.event import Event
@@ -50,3 +51,31 @@ def test_sqlite_provenance_uses_local_key_material_and_can_rotate_legacy_chain(
     rotation = legacy_repository.rotate_provenance_key()
     assert rotation["valid"] is True
     assert rotation["key_source"] == "local_key_file"
+
+
+def test_bulk_exact_load_handles_sqlite_parameter_boundary_without_writes(tmp_path):
+    db_path = tmp_path / "bulk.db"
+    writer = SQLiteRepository(str(db_path))
+    with writer.connection() as connection:
+        connection.executemany(
+            "INSERT INTO state_store(key, value) VALUES(?, ?)",
+            [
+                (f"record:{index:04d}", json.dumps({"index": index}))
+                for index in range(905)
+            ],
+        )
+    before = hashlib.sha256(db_path.read_bytes()).hexdigest()
+    reader = SQLiteRepository(str(db_path), read_only=True)
+
+    loaded = asyncio.run(
+        reader.load_many(
+            ["record:0000", *[f"record:{index:04d}" for index in range(905)], "missing"]
+        )
+    )
+
+    assert len(loaded) == 905
+    assert loaded["record:0000"] == {"index": 0}
+    assert loaded["record:0904"] == {"index": 904}
+    assert "missing" not in loaded
+    assert asyncio.run(reader.load_many([])) == {}
+    assert hashlib.sha256(db_path.read_bytes()).hexdigest() == before

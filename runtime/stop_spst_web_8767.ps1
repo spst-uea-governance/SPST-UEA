@@ -6,6 +6,17 @@ if (-not $listeners) {
     return
 }
 
+try {
+    Invoke-RestMethod `
+        -Method Post `
+        -Uri "http://127.0.0.1:8767/api/project-context/shutdown" `
+        -ContentType "application/json" `
+        -Body "{}" `
+        -TimeoutSec 5 | Out-Null
+} catch {
+    Write-Host "Project Context supervisor did not acknowledge graceful shutdown."
+}
+
 $listeners | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
     Stop-Process -Id $_ -Force
     Write-Host "Stopped SPST-UEA Runtime process $_."

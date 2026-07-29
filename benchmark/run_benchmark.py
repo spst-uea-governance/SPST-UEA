@@ -9,7 +9,7 @@ RUNTIME_DIR = Path(__file__).resolve().parents[1] / "runtime"
 if str(RUNTIME_DIR) not in sys.path:
     sys.path.insert(0, str(RUNTIME_DIR))
 
-from spst_runtime.benchmark import run_benchmark
+from spst_runtime.benchmark import run_benchmark  # noqa: E402
 
 
 if __name__ == "__main__":

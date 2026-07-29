@@ -7,7 +7,42 @@ import pytest
 from spst_runtime.memory.long_term_memory import (
     CURRENT_MEMORY_POLICY_VERSION,
     LongTermMemoryStore,
+    _matched_relevance_terms,
+    _normalize_relevance_text,
+    _weighted_relevance_terms,
 )
+
+
+@pytest.mark.parametrize(
+    ("query", "record"),
+    [
+        ("repository identity Receipt", "Receipt binds repository identity."),
+        ("foo-bar abcdef0", "prefix/foo-bar suffix abcdef0"),
+        ("foo-bar", "prefix.foo-bar.suffix"),
+        ("証拠 実行 設定", "証拠を実行設定へ結び付ける"),
+        ("ab cd", "x.ab-y cdz"),
+        ("receipt", "unrelated evidence"),
+        ("a an the", "repository evidence"),
+        ("path/to/file.py", "path/to/file.py and path/to/other.py"),
+    ],
+)
+def test_query_projected_term_matching_preserves_full_lexicon_intersection(
+    query: str,
+    record: str,
+) -> None:
+    normalized_query = _normalize_relevance_text(query)
+    normalized_record = _normalize_relevance_text(record)
+    query_terms = _weighted_relevance_terms(normalized_query)
+    record_terms = _weighted_relevance_terms(normalized_record)
+
+    matched, record_has_matched_terms = _matched_relevance_terms(
+        normalized_record,
+        query_terms.keys(),
+    )
+
+    expected = set(query_terms) & set(record_terms)
+    assert matched == expected
+    assert record_has_matched_terms is bool(expected)
 
 
 def test_long_term_memory_remember_search_and_stats(tmp_path):

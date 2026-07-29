@@ -47,11 +47,33 @@ python -m spst_runtime.project_context_bridge status `
 python -m spst_runtime.project_context_bridge query `
   --corpus ..\.spst\project-context\corpus.json `
   --query "<sanitized task>"
+
+# Long-lived JSONL mode: one {"query":"..."} object per input line.
+python -m spst_runtime.project_context_bridge serve `
+  --corpus ..\.spst\project-context\corpus.json
 ```
 
 Exit code 0 means `ready` or a valid `empty` query. Exit code 2 means blocked.
 Invalid snapshots and unreadable inputs also produce a structured `blocked`
 result with exit code 2; a failed compile does not write the destination corpus.
+`serve` keeps a bounded process-local term index, but rereads and hashes the
+corpus bytes before every request. Changed bytes therefore require full
+reverification and cannot reuse the previous handle. Malformed request lines
+produce a `blocked` line without terminating the server.
+
+CLI JSON remains parse-equivalent on terminals whose configured encoding cannot
+represent selected Project text. UTF-8 outputs readable Unicode; CP932 and other
+limited encodings fall back to JSON Unicode escapes instead of terminating with
+`UnicodeEncodeError`. This presentation fallback does not change parsed values,
+Packet hashes, or exit-code semantics.
+
+See `low-latency-evidence-plane.md` for the cache boundary, invalidation model,
+and reproducible latency benchmark.
+
+For persistent operation, the Cockpit Runtime owns the JSONL child and exposes
+read-only status, query, and graceful-shutdown paths. See
+`project-context-supervisor.md`. The supervisor does not change the corpus
+authority or the model-input binding boundary described below.
 
 ## Model Input Binding Boundary
 
