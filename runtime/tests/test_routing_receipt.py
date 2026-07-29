@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import hashlib
 import json
 import os
@@ -15,7 +16,11 @@ from spst_runtime.repository_identity import (
     RepositoryIdentityError,
     capture_repository_identity,
 )
-from spst_runtime.routing_receipt import RoutingReceiptLedger, build_routing_receipt
+from spst_runtime.routing_receipt import (
+    RoutingReceiptLedger,
+    build_routing_receipt,
+    validate_routing_receipt,
+)
 
 
 def _file_manifest(path: Path) -> dict[str, tuple[int, str]]:
@@ -339,6 +344,48 @@ def test_status_reads_existing_session_without_changing_any_source_file(tmp_path
     assert status["routing"]["global_coverage_reason"] == "codex_task_denominator_unavailable"
     assert status["routing"]["task_quality_delta"] is None
     assert status["routing"]["task_quality_reason"] == "paired_outcome_measurement_unavailable"
+
+
+def test_routing_receipt_preserves_and_validates_project_model_input_binding(
+    tmp_path: Path,
+):
+    result, _ = _run_isolated_turn(tmp_path)
+    receipt = copy.deepcopy(result["routing_receipt"])
+    binding = receipt["payload"]["pipeline"]["model_input_binding"]
+    binding.update(
+        {
+            "schema": "spst-model-input-binding-v3",
+            "project_context_corpus_sha256": "b" * 64,
+            "project_context_project_id": "6a5667f768b881919467d022d9daf511",
+            "project_context_source_authenticity": (
+                "owner_supplied_not_independently_verified"
+            ),
+            "project_context_owner_reviewed": True,
+        }
+    )
+    signed = {"schema": receipt["schema"], "payload": receipt["payload"]}
+    receipt["receipt_id"] = hashlib.sha256(
+        json.dumps(
+            signed,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+    assert validate_routing_receipt(receipt) == (True, None)
+
+    binding["project_context_owner_reviewed"] = False
+    signed = {"schema": receipt["schema"], "payload": receipt["payload"]}
+    receipt["receipt_id"] = hashlib.sha256(
+        json.dumps(
+            signed,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert validate_routing_receipt(receipt) == (False, "model_input_project_review_invalid")
 
 
 def test_multiple_receipts_for_one_turn_do_not_inflate_coverage(tmp_path: Path):

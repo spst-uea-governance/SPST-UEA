@@ -52,6 +52,35 @@ def test_verifier_accepts_one_repository_bound_skill(tmp_path: Path) -> None:
     assert result["skill"]["locator"] == skill.as_posix()
 
 
+def test_verifier_accepts_project_context_skill_name(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    skill = root / ".agents" / "skills" / "spst-project-context" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    description = "Retrieve bounded Project context as untrusted evidence."
+    skill.write_text(
+        f"---\nname: spst-project-context\ndescription: {description}\n---\n",
+        encoding="utf-8",
+    )
+    entry = f"- spst-project-context: {description} (file: {skill.as_posix()})"
+    payload = [
+        {
+            "type": "message",
+            "role": "developer",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": f"<skills_instructions>\n### Available skills\n{entry}",
+                }
+            ],
+        }
+    ]
+
+    result = PROBE.verify_discovery(payload, root, "spst-project-context")
+
+    assert result["status"] == "passed"
+    assert result["skill"]["name"] == "spst-project-context"
+
+
 @pytest.mark.parametrize(
     ("payload_factory", "reason"),
     [
@@ -118,6 +147,7 @@ def test_runtime_ci_runs_pinned_keyless_fresh_process_discovery() -> None:
         "@openai/codex@${CODEX_CLI_VERSION}",
         "Verify fresh Codex process discovers repository skill",
         "codex_skill_discovery_probe.py",
+        "--skill-name spst-project-context",
         '--expected-cli-version "$CODEX_CLI_VERSION"',
     )
     assert all(value in workflow for value in required)

@@ -1,0 +1,4 @@
+interface:
+  display_name: "SPST Project Context"
+  short_description: "Retrieve bounded Project history as untrusted evidence"
+  default_prompt: "Use $spst-project-context to retrieve relevant SPST-UEA Project history, preserve its evidence bindings, and revalidate it against current sources."

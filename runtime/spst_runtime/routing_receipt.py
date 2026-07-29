@@ -193,13 +193,24 @@ def build_profiled_routing_receipt(
             "unbound_context_rejected",
             "delivery_status",
         )
-        if model_input_binding.get("schema") == "spst-model-input-binding-v2":
+        if model_input_binding.get("schema") in {
+            "spst-model-input-binding-v2",
+            "spst-model-input-binding-v3",
+        }:
             model_input_fields = (
                 *model_input_fields,
                 "delivered_artifact_sha256s",
                 "delivered_artifact_set_sha256",
                 "delivered_semantic_review_sha256s",
                 "delivered_semantic_review_set_sha256",
+            )
+        if model_input_binding.get("schema") == "spst-model-input-binding-v3":
+            model_input_fields = (
+                *model_input_fields,
+                "project_context_corpus_sha256",
+                "project_context_project_id",
+                "project_context_source_authenticity",
+                "project_context_owner_reviewed",
             )
         payload["pipeline"]["model_input_binding"] = {
             key: model_input_binding.get(key)
@@ -273,6 +284,7 @@ def validate_routing_receipt(receipt: dict[str, Any]) -> tuple[bool, str | None]
             if model_input_schema not in {
                 "spst-model-input-binding-v1",
                 "spst-model-input-binding-v2",
+                "spst-model-input-binding-v3",
             }:
                 return False, "model_input_binding_schema_mismatch"
             if any(
@@ -316,7 +328,10 @@ def validate_routing_receipt(receipt: dict[str, Any]) -> tuple[bool, str | None]
                 "submitted_to_provider",
             }:
                 return False, "model_input_delivery_status_invalid"
-            if model_input_schema == "spst-model-input-binding-v2":
+            if model_input_schema in {
+                "spst-model-input-binding-v2",
+                "spst-model-input-binding-v3",
+            }:
                 artifacts = model_input_binding.get("delivered_artifact_sha256s")
                 reviews = model_input_binding.get("delivered_semantic_review_sha256s")
                 if (
@@ -341,6 +356,24 @@ def validate_routing_receipt(receipt: dict[str, Any]) -> tuple[bool, str | None]
                     "delivered_semantic_review_set_sha256"
                 ) != _canonical_hash(reviews):
                     return False, "model_input_review_set_digest_mismatch"
+            if model_input_schema == "spst-model-input-binding-v3":
+                if not _is_sha256(
+                    model_input_binding.get("project_context_corpus_sha256")
+                ):
+                    return False, "model_input_project_corpus_digest_invalid"
+                project_id = model_input_binding.get("project_context_project_id")
+                if not isinstance(project_id, str) or len(project_id) != 32:
+                    return False, "model_input_project_id_invalid"
+                try:
+                    int(project_id, 16)
+                except ValueError:
+                    return False, "model_input_project_id_invalid"
+                if model_input_binding.get("project_context_source_authenticity") != (
+                    "owner_supplied_not_independently_verified"
+                ):
+                    return False, "model_input_project_source_authenticity_invalid"
+                if model_input_binding.get("project_context_owner_reviewed") is not True:
+                    return False, "model_input_project_review_invalid"
         packet_sha256 = memory_binding.get("context_packet_sha256")
         task_sha256 = memory_binding.get("context_task_sha256")
         origin_index_sha256 = memory_binding.get("context_origin_index_sha256")
