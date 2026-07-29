@@ -185,6 +185,24 @@ class SQLiteRepository(PersistenceRepository):
             ).fetchall()
         return {str(key): json.loads(value) for key, value in rows}
 
+    async def load_many(self, keys: list[str]) -> dict[str, dict[str, Any]]:
+        """Load an exact key set through one connection while preserving stored values."""
+
+        unique_keys = tuple(dict.fromkeys(keys))
+        if not unique_keys:
+            return {}
+        loaded: dict[str, dict[str, Any]] = {}
+        with self.connection() as conn:
+            for offset in range(0, len(unique_keys), 900):
+                batch = unique_keys[offset : offset + 900]
+                placeholders = ", ".join("?" for _ in batch)
+                rows = conn.execute(
+                    f"SELECT key, value FROM state_store WHERE key IN ({placeholders})",
+                    batch,
+                ).fetchall()
+                loaded.update((str(key), json.loads(value)) for key, value in rows)
+        return loaded
+
     @contextmanager
     def locked(self) -> Iterator[None]:
         """Serialize in-process write sequences for one database path."""

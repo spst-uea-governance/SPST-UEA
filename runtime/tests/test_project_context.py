@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -10,9 +11,13 @@ import pytest
 from spst_runtime.project_context import (
     CORPUS_SCHEMA,
     DuplicateJSONKeyError,
+    clear_verified_corpus_cache,
     compile_snapshot,
+    dump_json,
     load_json,
+    load_verified_corpus,
     query_corpus,
+    query_verified_corpus,
     sha256_value,
     verify_corpus,
 )
@@ -220,6 +225,72 @@ def test_strict_json_loader_rejects_duplicate_keys(tmp_path: Path) -> None:
         load_json(path)
 
 
+def test_verified_corpus_handle_reuses_exact_bytes_and_matches_strict_query(
+    tmp_path: Path,
+) -> None:
+    corpus = compile_snapshot(snapshot(), now=NOW)
+    path = tmp_path / "corpus.json"
+    dump_json(path, corpus)
+    clear_verified_corpus_cache()
+
+    first = load_verified_corpus(path, now=NOW)
+    second = load_verified_corpus(path, now=NOW)
+    warm_packet = query_verified_corpus(
+        first,
+        "repository identity Receipt",
+        now=NOW,
+    )
+
+    assert first is second
+    assert first.source_bytes_sha256 == second.source_bytes_sha256
+    assert warm_packet == query_corpus(
+        corpus,
+        "repository identity Receipt",
+        now=NOW,
+    )
+
+
+def test_verified_corpus_cache_invalidates_on_byte_tamper(tmp_path: Path) -> None:
+    corpus = compile_snapshot(snapshot(), now=NOW)
+    path = tmp_path / "corpus.json"
+    dump_json(path, corpus)
+    clear_verified_corpus_cache()
+    original = load_verified_corpus(path, now=NOW)
+    corpus["segments"][0]["text"] = "altered"
+    dump_json(path, corpus)
+
+    with pytest.raises(ValueError, match="corpus_digest_mismatch"):
+        load_verified_corpus(path, now=NOW)
+    assert query_verified_corpus(original, "Receipt", now=NOW)["status"] in {
+        "empty",
+        "ready",
+    }
+
+
+def test_verified_corpus_handle_rechecks_freshness_at_query_time(tmp_path: Path) -> None:
+    corpus = compile_snapshot(snapshot(), now=NOW, max_age_days=2)
+    path = tmp_path / "corpus.json"
+    dump_json(path, corpus)
+    clear_verified_corpus_cache()
+    verified = load_verified_corpus(path, now=NOW)
+
+    with pytest.raises(ValueError, match="corpus_stale"):
+        load_verified_corpus(
+            path,
+            now=datetime(2026, 8, 2, tzinfo=timezone.utc),
+        )
+
+    packet = query_verified_corpus(
+        verified,
+        "Receipt repository",
+        now=datetime(2026, 8, 2, tzinfo=timezone.utc),
+    )
+
+    assert packet["status"] == "blocked"
+    assert packet["reason"] == "corpus_stale"
+    assert packet["selected_count"] == 0
+
+
 def test_cli_compiles_checks_and_queries(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     source = tmp_path / "snapshot.json"
     destination = tmp_path / "corpus.json"
@@ -244,6 +315,28 @@ def test_cli_compiles_checks_and_queries(tmp_path: Path, capsys: pytest.CaptureF
     )
     query_output = json.loads(capsys.readouterr().out)
     assert query_output["status"] == "ready"
+
+
+def test_cli_serve_retains_verified_plane_and_recovers_after_bad_request(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    corpus_path = tmp_path / "corpus.json"
+    dump_json(corpus_path, compile_snapshot(snapshot(), now=NOW))
+    requests = [
+        json.dumps({"query": "repository identity Receipt"}),
+        "not-json",
+        json.dumps({"query": "repository identity Receipt"}),
+    ]
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n".join(requests) + "\n"))
+
+    assert main(["serve", "--corpus", str(corpus_path)]) == 0
+
+    outputs = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [output["status"] for output in outputs] == ["ready", "blocked", "ready"]
+    assert outputs[0]["packet_sha256"] == outputs[2]["packet_sha256"]
+    assert outputs[1]["reason"]
 
 
 def test_cli_compile_failure_is_structured_and_does_not_write_corpus(

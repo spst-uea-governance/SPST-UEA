@@ -4,6 +4,7 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,7 @@ _ENGLISH_STOP_WORDS = frozenset(
     }
 )
 _LATIN_TOKEN = re.compile(r"[a-z0-9]+(?:[._:/\\-][a-z0-9]+)*")
+_STRUCTURED_SEPARATOR = re.compile(r"[._:/\\-]")
 _JAPANESE_RUN = re.compile(r"[ぁ-んァ-ヶー一-龯々]+")
 
 
@@ -59,38 +61,100 @@ def assess_context_relevance(
 ) -> dict[str, Any]:
     """Return a deterministic lexical relevance decision without trusting caller scores."""
 
+    compiled = compile_context_relevance_query(
+        query,
+        minimum_relevance=minimum_relevance,
+    )
+    return assess_compiled_context_relevance(compiled, record_text)
+
+
+@dataclass(frozen=True)
+class CompiledRelevanceQuery:
+    """One validated query projection reusable across many candidate records."""
+
+    normalized_text: str
+    terms: dict[str, float]
+    total_weight: float
+    minimum_relevance: float
+
+
+def compile_context_relevance_query(
+    query: str,
+    *,
+    minimum_relevance: float = DEFAULT_MINIMUM_RELEVANCE,
+) -> CompiledRelevanceQuery:
+    """Compile query-only lexical work once without changing relevance semantics."""
+
     if not 0.0 <= minimum_relevance <= 1.0:
         raise ValueError("Memory relevance threshold must be between 0.0 and 1.0.")
     normalized_query = _normalize_relevance_text(query)
-    normalized_record = _normalize_relevance_text(record_text)
     query_terms = _weighted_relevance_terms(normalized_query)
-    record_terms = _weighted_relevance_terms(normalized_record)
-    matched = set(query_terms) & set(record_terms)
-    query_weight = sum(query_terms.values())
-    matched_weight = sum(query_terms[term] for term in matched)
-    coverage = matched_weight / query_weight if query_weight else 0.0
+    return CompiledRelevanceQuery(
+        normalized_text=normalized_query,
+        terms=query_terms,
+        total_weight=sum(query_terms.values()),
+        minimum_relevance=minimum_relevance,
+    )
+
+
+def assess_compiled_context_relevance(
+    query: CompiledRelevanceQuery,
+    record_text: str,
+) -> dict[str, Any]:
+    """Assess one record against a trusted in-process query compilation."""
+
+    if not isinstance(query, CompiledRelevanceQuery):
+        raise TypeError("CompiledRelevanceQuery is required.")
+    normalized_record = _normalize_relevance_text(record_text)
+    matched, record_has_terms = _matched_relevance_terms(
+        normalized_record,
+        query.terms.keys(),
+    )
+    return assess_compiled_context_relevance_matches(
+        query,
+        normalized_record,
+        matched,
+        record_has_terms=record_has_terms,
+    )
+
+
+def assess_compiled_context_relevance_matches(
+    query: CompiledRelevanceQuery,
+    normalized_record: str,
+    matched: set[str],
+    *,
+    record_has_terms: bool,
+) -> dict[str, Any]:
+    """Score a trusted precomputed term projection using the canonical formula."""
+
+    if not isinstance(query, CompiledRelevanceQuery):
+        raise TypeError("CompiledRelevanceQuery is required.")
+    if not matched <= query.terms.keys():
+        raise ValueError("Matched terms must be a subset of compiled query terms.")
+    matched_weight = sum(query.terms[term] for term in matched)
+    coverage = matched_weight / query.total_weight if query.total_weight else 0.0
     match_strength = len(matched) / (len(matched) + 2.0) if matched else 0.0
     exact_phrase = bool(
-        normalized_query
-        and len(normalized_query.replace(" ", "")) >= 4
-        and normalized_query in normalized_record
+        query.normalized_text
+        and len(query.normalized_text.replace(" ", "")) >= 4
+        and query.normalized_text in normalized_record
     )
     structured_match = any(_is_structured_term(term) for term in matched)
     score = min(1.0, (0.75 * coverage) + (0.25 * match_strength) + (0.1 if exact_phrase else 0.0))
-    required_matches = 1 if len(query_terms) <= 1 or exact_phrase or structured_match else 2
+    required_matches = 1 if len(query.terms) <= 1 or exact_phrase or structured_match else 2
     eligible = bool(
-        query_terms
-        and record_terms
+        query.terms
+        and record_has_terms
         and len(matched) >= required_matches
-        and score >= minimum_relevance
+        and score >= query.minimum_relevance
     )
     matched_digest = hashlib.sha256("\n".join(sorted(matched)).encode("utf-8")).hexdigest()
     return {
         "profile": RELEVANCE_PROFILE,
         "eligible": eligible,
         "score": score,
-        "minimum_relevance": minimum_relevance,
-        "query_term_count": len(query_terms),
+        "minimum_relevance": query.minimum_relevance,
+        "query_term_count": len(query.terms),
         "matched_term_count": len(matched),
         "required_match_count": required_matches,
         "query_coverage": coverage,
@@ -100,10 +164,51 @@ def assess_context_relevance(
     }
 
 
+def _matched_relevance_terms(
+    text: str,
+    query_terms: Any,
+) -> tuple[set[str], bool]:
+    """Project one candidate directly onto query terms without materializing its lexicon."""
+
+    wanted = set(query_terms)
+    matched = {term for term in wanted if _relevance_term_occurs(text, term)}
+    return matched, bool(matched)
+
+
+def _relevance_term_occurs(text: str, term: str) -> bool:
+    if _JAPANESE_RUN.fullmatch(term):
+        if len(term) in {2, 3}:
+            return term in text
+        return term in _JAPANESE_RUN.findall(text)
+    return _latin_relevance_term_matcher(term).search(text) is not None
+
+
+def context_relevance_term_occurs(normalized_text: str, term: str) -> bool:
+    """Test one compiled term against canonically normalized candidate text."""
+
+    return _relevance_term_occurs(normalized_text, term)
+
+
+@lru_cache(maxsize=4096)
+def _latin_relevance_term_matcher(term: str) -> re.Pattern[str]:
+    escaped = re.escape(term)
+    if _STRUCTURED_SEPARATOR.search(term):
+        boundary = r"a-z0-9._:/\\-"
+    else:
+        boundary = r"a-z0-9"
+    return re.compile(rf"(?<![{boundary}]){escaped}(?![{boundary}])")
+
+
 def _normalize_relevance_text(text: str) -> str:
     import unicodedata
 
     return " ".join(unicodedata.normalize("NFKC", str(text)).casefold().split())
+
+
+def normalize_context_relevance_text(text: str) -> str:
+    """Expose canonical lexical normalization for trusted retrieval indexes."""
+
+    return _normalize_relevance_text(text)
 
 
 def _weighted_relevance_terms(text: str) -> dict[str, float]:
@@ -111,7 +216,9 @@ def _weighted_relevance_terms(text: str) -> dict[str, float]:
 
     def add(term: str, weight: float) -> None:
         if term and term not in _ENGLISH_STOP_WORDS:
-            terms[term] = max(terms.get(term, 0.0), weight)
+            previous = terms.get(term)
+            if previous is None or weight > previous:
+                terms[term] = weight
 
     for match in _LATIN_TOKEN.finditer(text):
         token = match.group(0).strip("._:/\\-")
@@ -138,7 +245,7 @@ def _weighted_relevance_terms(text: str) -> dict[str, float]:
 
 def _is_structured_term(term: str) -> bool:
     return bool(
-        any(character in term for character in "._:/\\-")
+        _STRUCTURED_SEPARATOR.search(term)
         or (len(term) >= 7 and all(character in "0123456789abcdef" for character in term))
     )
 
@@ -291,6 +398,10 @@ class LongTermMemoryStore:
             limit=limit,
         )
         query_terms = self._terms(query)
+        compiled_query = compile_context_relevance_query(
+            query,
+            minimum_relevance=min_relevance,
+        )
         scored = []
         reference_time = self._utc(now)
         for record in self._search_candidates(query_terms):
@@ -302,10 +413,9 @@ class LongTermMemoryStore:
             )
             if not eligible:
                 continue
-            relevance = assess_context_relevance(
-                query,
+            relevance = assess_compiled_context_relevance(
+                compiled_query,
                 record.text,
-                minimum_relevance=min_relevance,
             )
             if relevance["eligible"]:
                 score = float(relevance["score"]) * record.confidence
@@ -335,9 +445,12 @@ class LongTermMemoryStore:
         return [record.as_dict() for record in records[:limit]]
 
     def list_all(self) -> list[MemoryRecord]:
+        memory_ids = self._load_index()
+        keys = [self._record_key(memory_id) for memory_id in memory_ids]
+        stored = asyncio.run(self.repository.load_many(keys))
         records = []
-        for memory_id in self._load_index():
-            data = asyncio.run(self.repository.load(self._record_key(memory_id)))
+        for key in keys:
+            data = stored.get(key)
             if data:
                 records.append(MemoryRecord(**data))
         return records
@@ -660,9 +773,12 @@ class LongTermMemoryStore:
                 """,
                 tuple(sorted(query_terms)),
             ).fetchall()
+        memory_ids = [str(memory_id) for (memory_id,) in rows]
+        keys = [self._record_key(memory_id) for memory_id in memory_ids]
+        stored = asyncio.run(self.repository.load_many(keys))
         records = []
-        for (memory_id,) in rows:
-            data = asyncio.run(self.repository.load(self._record_key(memory_id)))
+        for key in keys:
+            data = stored.get(key)
             if data:
                 records.append(MemoryRecord(**data))
         return records

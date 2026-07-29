@@ -3,6 +3,8 @@ import json
 import os
 import stat
 import subprocess
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -150,10 +152,33 @@ def _digest_worktree(
     _frame(digest, WORKTREE_DIGEST_SCHEMA)
     for path, stage, mode, object_id in index_records:
         _frame(digest, b"index", path, stage, mode, object_id)
-    for scope, paths in ((b"tracked", tracked_paths), (b"untracked", untracked_paths)):
-        for path in paths:
-            kind, executable, content_digest = _worktree_entry(root, path)
+    scoped_paths = [
+        (scope, path)
+        for scope, paths in ((b"tracked", tracked_paths), (b"untracked", untracked_paths))
+        for path in paths
+    ]
+
+    def capture(item: tuple[bytes, bytes]) -> tuple[bytes, bytes, bytes]:
+        _scope, path = item
+        return _worktree_entry(root, path)
+
+    entries: Iterator[tuple[bytes, bytes, bytes]]
+    if len(scoped_paths) < 32:
+        entries = map(capture, scoped_paths)
+        executor = None
+    else:
+        executor = ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 1) + 4))
+        entries = executor.map(capture, scoped_paths)
+    try:
+        for (scope, path), (kind, executable, content_digest) in zip(
+            scoped_paths,
+            entries,
+            strict=True,
+        ):
             _frame(digest, b"worktree", scope, path, kind, executable, content_digest)
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
     return digest.hexdigest()
 
 
@@ -183,9 +208,15 @@ def _resolve_repository_root(repository_root: str | Path) -> Path:
     return root
 
 
+def resolve_repository_root(repository_root: str | Path) -> Path:
+    """Resolve and validate the canonical Git top level without capturing file bytes."""
+
+    return _resolve_repository_root(repository_root)
+
+
 def capture_repository_identity(repository_root: str | Path) -> dict[str, Any]:
     """Capture a path-free, read-only identity for one Git HEAD and worktree."""
-    root = _resolve_repository_root(repository_root)
+    root = resolve_repository_root(repository_root)
     head_revision = _run_git(
         root,
         "rev-parse",

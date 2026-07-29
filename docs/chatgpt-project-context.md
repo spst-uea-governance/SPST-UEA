@@ -47,11 +47,22 @@ python -m spst_runtime.project_context_bridge status `
 python -m spst_runtime.project_context_bridge query `
   --corpus ..\.spst\project-context\corpus.json `
   --query "<sanitized task>"
+
+# Long-lived JSONL mode: one {"query":"..."} object per input line.
+python -m spst_runtime.project_context_bridge serve `
+  --corpus ..\.spst\project-context\corpus.json
 ```
 
 Exit code 0 means `ready` or a valid `empty` query. Exit code 2 means blocked.
 Invalid snapshots and unreadable inputs also produce a structured `blocked`
 result with exit code 2; a failed compile does not write the destination corpus.
+`serve` keeps a bounded process-local term index, but rereads and hashes the
+corpus bytes before every request. Changed bytes therefore require full
+reverification and cannot reuse the previous handle. Malformed request lines
+produce a `blocked` line without terminating the server.
+
+See `low-latency-evidence-plane.md` for the cache boundary, invalidation model,
+and reproducible latency benchmark.
 
 ## Model Input Binding Boundary
 

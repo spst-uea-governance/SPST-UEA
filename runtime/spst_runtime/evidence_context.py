@@ -17,7 +17,9 @@ from spst_runtime.memory.long_term_memory import (
     memory_record_binding_sha256,
 )
 from spst_runtime.repository_identity import (
+    RepositoryIdentityError,
     capture_repository_identity,
+    resolve_repository_root,
     validate_repository_identity,
 )
 from spst_runtime.routing_receipt import (
@@ -834,11 +836,9 @@ def _projection(artifact: dict[str, Any]) -> dict[str, Any]:
 
 def _resolve_repository_root(value: str | Path) -> Path:
     try:
-        root = Path(value).expanduser().resolve(strict=True)
-    except (OSError, RuntimeError) as error:
+        return resolve_repository_root(value)
+    except (OSError, RuntimeError, RepositoryIdentityError) as error:
         raise EvidenceContextError("artifact_repository_root_missing") from error
-    capture_repository_identity(root)
-    return root
 
 
 def _safe_repository_file(root: Path, value: str) -> tuple[str, Path]:

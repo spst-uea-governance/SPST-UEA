@@ -131,6 +131,18 @@ the package tree.
 
 In this thread, requests addressed to SPST-UEA can be routed through that bridge by Codex.
 
+For repeated Project-context queries, the ARCH-18 JSONL bridge retains a
+bounded verified search index while hashing the corpus file before every
+request:
+
+```powershell
+python -m spst_runtime.project_context_bridge serve `
+  --corpus ..\.spst\project-context\corpus.json
+```
+
+See `../docs/low-latency-evidence-plane.md`. This reduces local evidence-plane
+overhead; it does not remove verification or claim provider/model uplift.
+
 Task-specific quality evidence is separate from routing and contract-proxy
 metrics. The Phase 16 local API accepts only stored PBIND references, scores
 eight or more same-model/task pairs through an arm-blinded exact-JSON evaluator,

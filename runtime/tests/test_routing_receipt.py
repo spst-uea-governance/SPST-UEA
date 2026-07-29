@@ -259,6 +259,30 @@ def test_repository_identity_detects_head_index_tracked_and_untracked_changes(tm
     assert untracked_changed["worktree_sha256"] != untracked["worktree_sha256"]
 
 
+def test_parallel_repository_identity_is_deterministic_and_detects_content_change(
+    tmp_path: Path,
+):
+    repository = _init_repository(tmp_path)
+    for index in range(40):
+        (repository / f"evidence-{index:02d}.txt").write_text(
+            f"evidence {index}\n",
+            encoding="utf-8",
+        )
+    _git(repository, "add", ".")
+    _git(repository, "commit", "-qm", "parallel identity fixture")
+
+    first = capture_repository_identity(repository)
+    repeated = capture_repository_identity(repository)
+    (repository / "evidence-39.txt").write_text("altered evidence\n", encoding="utf-8")
+    altered = capture_repository_identity(repository)
+
+    assert repeated == first
+    assert first["tracked_entry_count"] == 42
+    assert altered["head_revision"] == first["head_revision"]
+    assert altered["worktree_sha256"] != first["worktree_sha256"]
+    assert altered["dirty"] is True
+
+
 def test_repository_identity_ignores_mtime_and_git_ignored_content(tmp_path: Path):
     repository = _init_repository(tmp_path)
     tracked = repository / "tracked.txt"

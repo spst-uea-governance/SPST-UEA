@@ -5,13 +5,21 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 import unicodedata
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from spst_runtime.memory.long_term_memory import assess_context_relevance
+from spst_runtime.memory.long_term_memory import (
+    assess_compiled_context_relevance,
+    assess_compiled_context_relevance_matches,
+    compile_context_relevance_query,
+    context_relevance_term_occurs,
+    normalize_context_relevance_text,
+)
 
 
 SNAPSHOT_SCHEMA = "chatgpt-project-export-v1"
@@ -37,6 +45,67 @@ class DuplicateJSONKeyError(ValueError):
     """Raised when an input JSON object has an ambiguous duplicate key."""
 
 
+class VerifiedProjectCorpus:
+    """Process-local handle to one isolated corpus that passed full verification."""
+
+    __slots__ = (
+        "_cache_lock",
+        "_corpus",
+        "_normalized_segments",
+        "_term_segment_cache",
+        "source_bytes_sha256",
+        "valid_until",
+    )
+
+    def __init__(
+        self,
+        corpus: dict[str, Any],
+        *,
+        source_bytes_sha256: str,
+        valid_until: datetime,
+    ) -> None:
+        self._corpus = corpus
+        self._normalized_segments = tuple(
+            normalize_context_relevance_text(str(segment.get("text", "")))
+            for segment in corpus.get("segments", [])
+        )
+        self._term_segment_cache: OrderedDict[str, tuple[int, ...]] = OrderedDict()
+        self._cache_lock = threading.RLock()
+        self.source_bytes_sha256 = source_bytes_sha256
+        self.valid_until = valid_until
+
+    def matched_segments(self, terms: Any) -> dict[int, set[str]]:
+        """Return exact segment-term matches with a bounded lazy inverted cache."""
+
+        projected: dict[int, set[str]] = {}
+        for term in terms:
+            with self._cache_lock:
+                hits = self._term_segment_cache.get(term)
+                if hits is not None:
+                    self._term_segment_cache.move_to_end(term)
+            if hits is None:
+                hits = tuple(
+                    index
+                    for index, text in enumerate(self._normalized_segments)
+                    if context_relevance_term_occurs(text, term)
+                )
+                with self._cache_lock:
+                    self._term_segment_cache[term] = hits
+                    while len(self._term_segment_cache) > 512:
+                        self._term_segment_cache.popitem(last=False)
+            for index in hits:
+                projected.setdefault(index, set()).add(term)
+        return projected
+
+    def normalized_segment(self, index: int) -> str:
+        return self._normalized_segments[index]
+
+
+_VERIFIED_CORPUS_CACHE_LIMIT = 4
+_VERIFIED_CORPUS_CACHE: OrderedDict[tuple[str, str], VerifiedProjectCorpus] = OrderedDict()
+_VERIFIED_CORPUS_CACHE_LOCK = threading.RLock()
+
+
 def canonical_json(value: Any) -> bytes:
     """Serialize a value into the canonical byte representation used for hashes."""
 
@@ -55,6 +124,12 @@ def sha256_value(value: Any) -> str:
 def load_json(path: str | Path) -> dict[str, Any]:
     """Load strict JSON, rejecting duplicate keys and non-object roots."""
 
+    return _load_json_text(Path(path).read_text(encoding="utf-8"))
+
+
+def _load_json_text(text: str) -> dict[str, Any]:
+    """Parse one strict JSON object from already-read text."""
+
     def pairs_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key, value in pairs:
@@ -63,10 +138,60 @@ def load_json(path: str | Path) -> dict[str, Any]:
             result[key] = value
         return result
 
-    loaded = json.loads(Path(path).read_text(encoding="utf-8"), object_pairs_hook=pairs_hook)
+    loaded = json.loads(text, object_pairs_hook=pairs_hook)
     if not isinstance(loaded, dict):
         raise ValueError("json_root_must_be_object")
     return loaded
+
+
+def load_verified_corpus(
+    path: str | Path,
+    *,
+    now: datetime | None = None,
+) -> VerifiedProjectCorpus:
+    """Load or reuse a fully verified immutable-by-isolation corpus snapshot.
+
+    Cache reuse is keyed by the SHA-256 of bytes read on every call. Any byte
+    change therefore misses the cache and must pass full corpus verification.
+    """
+
+    source = Path(path).expanduser().resolve(strict=True)
+    raw = source.read_bytes()
+    source_digest = hashlib.sha256(raw).hexdigest()
+    cache_key = (str(source), source_digest)
+    with _VERIFIED_CORPUS_CACHE_LOCK:
+        cached = _VERIFIED_CORPUS_CACHE.get(cache_key)
+        if cached is not None:
+            if _utc(now) > cached.valid_until:
+                raise ValueError("corpus_stale")
+            _VERIFIED_CORPUS_CACHE.move_to_end(cache_key)
+            return cached
+
+    corpus = _load_json_text(raw.decode("utf-8"))
+    status = verify_corpus(corpus, now=now)
+    if status["status"] != "ready":
+        raise ValueError(str(status["reason"]))
+    captured_at = _parse_timestamp(corpus["captured_at"])
+    valid_until = captured_at + timedelta(days=int(corpus["max_age_days"]))
+    handle = VerifiedProjectCorpus(
+        corpus,
+        source_bytes_sha256=source_digest,
+        valid_until=valid_until,
+    )
+    with _VERIFIED_CORPUS_CACHE_LOCK:
+        for stale_key in [key for key in _VERIFIED_CORPUS_CACHE if key[0] == str(source)]:
+            del _VERIFIED_CORPUS_CACHE[stale_key]
+        _VERIFIED_CORPUS_CACHE[cache_key] = handle
+        while len(_VERIFIED_CORPUS_CACHE) > _VERIFIED_CORPUS_CACHE_LIMIT:
+            _VERIFIED_CORPUS_CACHE.popitem(last=False)
+    return handle
+
+
+def clear_verified_corpus_cache() -> None:
+    """Clear process-local verified corpus handles, primarily for isolation tests."""
+
+    with _VERIFIED_CORPUS_CACHE_LOCK:
+        _VERIFIED_CORPUS_CACHE.clear()
 
 
 def dump_json(path: str | Path, value: dict[str, Any]) -> None:
@@ -151,6 +276,48 @@ def query_corpus(
 ) -> dict[str, Any]:
     """Return a deterministic, relevant, bounded packet from a verified corpus."""
 
+    return _query_corpus(
+        corpus,
+        query,
+        max_items=max_items,
+        max_chars=max_chars,
+        now=now,
+        verified_corpus=None,
+    )
+
+
+def query_verified_corpus(
+    corpus: VerifiedProjectCorpus,
+    query: str,
+    *,
+    max_items: int = DEFAULT_MAX_ITEMS,
+    max_chars: int = DEFAULT_MAX_CHARS,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Query a process-local verified handle while rechecking its freshness boundary."""
+
+    if not isinstance(corpus, VerifiedProjectCorpus):
+        raise TypeError("VerifiedProjectCorpus is required")
+    return _query_corpus(
+        corpus._corpus,
+        query,
+        max_items=max_items,
+        max_chars=max_chars,
+        now=now,
+        verified_corpus=corpus,
+    )
+
+
+def _query_corpus(
+    corpus: dict[str, Any],
+    query: str,
+    *,
+    max_items: int,
+    max_chars: int,
+    now: datetime | None,
+    verified_corpus: VerifiedProjectCorpus | None,
+) -> dict[str, Any]:
+
     normalized_query = _normalize_text(query)
     if not normalized_query:
         raise ValueError("query_empty")
@@ -159,7 +326,14 @@ def query_corpus(
     if not 1 <= max_chars <= 32_000:
         raise ValueError("max_chars_invalid")
 
-    status = verify_corpus(corpus, now=now)
+    if verified_corpus is None:
+        status = verify_corpus(corpus, now=now)
+    else:
+        expired = _utc(now) > verified_corpus.valid_until
+        status = {
+            "status": "blocked" if expired else "ready",
+            "reason": "corpus_stale" if expired else None,
+        }
     task_sha256 = hashlib.sha256(normalized_query.encode("utf-8")).hexdigest()
     if status["status"] != "ready":
         return _packet(
@@ -178,11 +352,33 @@ def query_corpus(
     assessed: list[tuple[dict[str, Any], dict[str, Any]]] = []
     rejected: dict[str, int] = {}
     segments = corpus.get("segments", [])
-    for segment in segments:
+    compiled_query = compile_context_relevance_query(normalized_query)
+    projected_matches = (
+        verified_corpus.matched_segments(compiled_query.terms)
+        if verified_corpus is not None
+        else None
+    )
+    for index, segment in enumerate(segments):
         if segment.get("prompt_injection_suspected"):
             _count(rejected, "prompt_injection_suspected")
             continue
-        relevance = assess_context_relevance(normalized_query, str(segment.get("text", "")))
+        if projected_matches is None:
+            relevance = assess_compiled_context_relevance(
+                compiled_query,
+                str(segment.get("text", "")),
+            )
+        else:
+            assert verified_corpus is not None
+            matched = projected_matches.get(index, set())
+            if not matched:
+                _count(rejected, "not_relevant")
+                continue
+            relevance = assess_compiled_context_relevance_matches(
+                compiled_query,
+                verified_corpus.normalized_segment(index),
+                matched,
+                record_has_terms=True,
+            )
         if not relevance["eligible"]:
             _count(rejected, "not_relevant")
             continue
