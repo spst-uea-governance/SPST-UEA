@@ -106,3 +106,5 @@ jobs:
           else
             git diff --check "${PUSH_BEFORE_SHA}..${GITHUB_SHA}"
           fi
+
+# Intentional workflow-identity attack probe. This PR must never be merged.
