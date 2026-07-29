@@ -64,6 +64,11 @@ produce a `blocked` line without terminating the server.
 See `low-latency-evidence-plane.md` for the cache boundary, invalidation model,
 and reproducible latency benchmark.
 
+For persistent operation, the Cockpit Runtime owns the JSONL child and exposes
+read-only status, query, and graceful-shutdown paths. See
+`project-context-supervisor.md`. The supervisor does not change the corpus
+authority or the model-input binding boundary described below.
+
 ## Model Input Binding Boundary
 
 The packet digest detects accidental changes but is not an origin signature: a

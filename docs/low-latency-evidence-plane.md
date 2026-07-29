@@ -30,6 +30,10 @@ include provider or human latency.
 - `project_context_bridge serve` provides a long-lived JSONL transport and
   checks the corpus file before every request. Packet selection and packet
   SHA-256 are regenerated for every request.
+- The persistent Cockpit Runtime owns that JSONL process through
+  `ProjectContextSupervisor`; see `project-context-supervisor.md`. A dead child
+  may be restarted before a new request, but an unresolved in-flight request is
+  never retried automatically.
 
 ## Fail-closed boundaries
 

@@ -3,6 +3,7 @@ import json
 import os
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from threading import Lock
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -11,11 +12,16 @@ from spst_runtime.chat_bridge import run_chat_turn
 from spst_runtime.events.event import Event
 from spst_runtime.models.subject_state import SubjectState
 from spst_runtime.orchestrator.runtime_orchestrator import RuntimeOrchestrator
+from spst_runtime.project_context_supervisor import ProjectContextSupervisor
 from spst_runtime.runtime.runtime_loop import RuntimeLoop
 
 
 DEFAULT_COCKPIT_DB_ENV = "SPST_COCKPIT_DB_PATH"
 DEFAULT_COCKPIT_DB_PATH = "spst_cockpit.db"
+PROJECT_CONTEXT_CORPUS_ENV = "SPST_PROJECT_CONTEXT_CORPUS"
+DEFAULT_PROJECT_CONTEXT_CORPUS = (
+    Path(__file__).resolve().parents[2] / ".spst" / "project-context" / "corpus.json"
+)
 
 
 HTML = """<!doctype html>
@@ -215,6 +221,7 @@ class CockpitRuntime:
         self,
         db_path: str | None = None,
         orchestrator: RuntimeOrchestrator | None = None,
+        project_context_supervisor: ProjectContextSupervisor | None = None,
     ):
         resolved_db_path = (
             db_path
@@ -230,6 +237,13 @@ class CockpitRuntime:
         self.last_artifact_outcome: dict[str, Any] = {}
         self.last_promotion: dict[str, Any] = {}
         self.last_paired_quality: dict[str, Any] = {}
+        corpus_path = os.environ.get(
+            PROJECT_CONTEXT_CORPUS_ENV,
+            str(DEFAULT_PROJECT_CONTEXT_CORPUS),
+        )
+        self.project_context_supervisor = (
+            project_context_supervisor or ProjectContextSupervisor(corpus_path)
+        )
 
     def status(self) -> dict:
         metadata = self.last_state.metadata
@@ -265,7 +279,21 @@ class CockpitRuntime:
                 "latest": self.last_paired_quality or paired_quality["latest"],
                 "coverage": paired_quality["coverage"],
             },
+            "project_context_supervisor": self.project_context_supervisor.status(),
         }
+
+    def project_context_status(self) -> dict[str, Any]:
+        return self.project_context_supervisor.status()
+
+    def query_project_context(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.project_context_supervisor.query(payload)
+
+    def stop_project_context(self) -> dict[str, Any]:
+        self.project_context_supervisor.close()
+        return self.project_context_supervisor.status()
+
+    def close(self) -> None:
+        self.project_context_supervisor.close()
 
     def goals(self) -> dict:
         return {"goals": self.last_state.metadata.get("goals", [])}
@@ -506,6 +534,9 @@ def handle_cockpit_request(
     if method == "GET" and parsed.path == "/api/status":
         return HTTPStatus.OK, runtime.status()
 
+    if method == "GET" and parsed.path == "/api/project-context/status":
+        return HTTPStatus.OK, runtime.project_context_status()
+
     if method == "GET" and parsed.path == "/api/goals":
         return HTTPStatus.OK, runtime.goals()
 
@@ -546,6 +577,13 @@ def handle_cockpit_request(
     if method == "POST" and parsed.path == "/api/dispatch":
         payload = json.loads((body or b"{}").decode("utf-8"))
         return HTTPStatus.OK, runtime.dispatch(payload)
+
+    if method == "POST" and parsed.path == "/api/project-context/query":
+        payload = json.loads((body or b"{}").decode("utf-8"))
+        return HTTPStatus.OK, runtime.query_project_context(payload)
+
+    if method == "POST" and parsed.path == "/api/project-context/shutdown":
+        return HTTPStatus.OK, runtime.stop_project_context()
 
     if method == "POST" and parsed.path == "/api/corpus/tasks":
         payload = json.loads((body or b"{}").decode("utf-8"))
@@ -614,6 +652,7 @@ class RuntimeWebHandler(BaseHTTPRequestHandler):
 
         if parsed.path in {
             "/api/status",
+            "/api/project-context/status",
             "/api/goals",
             "/api/subjects",
             "/api/evidence",
@@ -661,7 +700,13 @@ class RuntimeWebHandler(BaseHTTPRequestHandler):
 def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
     server = ThreadingHTTPServer((host, port), RuntimeWebHandler)
     print(f"SPST-UEA Runtime Web running at http://{host}:{port}/", flush=True)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+        with _DEFAULT_COCKPIT_LOCK:
+            if _DEFAULT_COCKPIT is not None:
+                _DEFAULT_COCKPIT.close()
 
 
 def main(argv: list[str] | None = None) -> int:

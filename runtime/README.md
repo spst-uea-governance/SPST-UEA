@@ -49,6 +49,12 @@ On Windows, use the persistent launcher:
 .\run_spst_web_8767.ps1
 ```
 
+The launcher also owns the Project Context JSONL worker through the Cockpit
+Runtime, warms it when `../.spst/project-context/corpus.json` exists, and keeps
+Cockpit state in the ignored `../.spst/runtime/spst_cockpit.db`. Inspect the
+read-only worker state at `GET /api/project-context/status`; submit bounded
+retrieval at `POST /api/project-context/query`.
+
 To stop the persistent browser UI:
 
 ```powershell
@@ -142,6 +148,8 @@ python -m spst_runtime.project_context_bridge serve `
 
 See `../docs/low-latency-evidence-plane.md`. This reduces local evidence-plane
 overhead; it does not remove verification or claim provider/model uplift.
+For the persistent lifecycle, exact-once boundary, and formal HTTP paths, see
+`../docs/project-context-supervisor.md`.
 
 Task-specific quality evidence is separate from routing and contract-proxy
 metrics. The Phase 16 local API accepts only stored PBIND references, scores

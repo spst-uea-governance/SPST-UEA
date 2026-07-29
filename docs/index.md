@@ -55,6 +55,7 @@ The persistent system is defined by the continuity of its managed state and reco
 22. `codex-autonomous-engineering-master-prompt-spst.md`
 23. `action-manifest-binding.md`
 24. `low-latency-evidence-plane.md`
+25. `project-context-supervisor.md`
 
 ## Project Layers
 
