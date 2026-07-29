@@ -17,6 +17,29 @@ from spst_runtime.project_context import (
 )
 
 
+def _write_json(value: object, *, indent: int | None = None, flush: bool = False) -> None:
+    """Write parse-equivalent JSON even when stdout cannot encode Unicode."""
+
+    rendered = json.dumps(
+        value,
+        ensure_ascii=False,
+        indent=indent,
+        sort_keys=True,
+    )
+    encoding = getattr(sys.stdout, "encoding", None)
+    if encoding is not None:
+        try:
+            rendered.encode(encoding, errors="strict")
+        except (LookupError, UnicodeEncodeError):
+            rendered = json.dumps(
+                value,
+                ensure_ascii=True,
+                indent=indent,
+                sort_keys=True,
+            )
+    print(rendered, flush=flush)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -67,7 +90,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "status": "blocked",
             "reason": str(error) or error.__class__.__name__,
         }
-    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+    _write_json(output, indent=2)
     return 0 if output["status"] in {"ready", "empty"} else 2
 
 
@@ -91,7 +114,7 @@ def _serve(corpus_path: str) -> int:
                 "status": "blocked",
                 "reason": str(error) or error.__class__.__name__,
             }
-        print(json.dumps(output, ensure_ascii=False, sort_keys=True), flush=True)
+        _write_json(output, flush=True)
     return 0
 
 

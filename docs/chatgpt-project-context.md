@@ -61,6 +61,12 @@ corpus bytes before every request. Changed bytes therefore require full
 reverification and cannot reuse the previous handle. Malformed request lines
 produce a `blocked` line without terminating the server.
 
+CLI JSON remains parse-equivalent on terminals whose configured encoding cannot
+represent selected Project text. UTF-8 outputs readable Unicode; CP932 and other
+limited encodings fall back to JSON Unicode escapes instead of terminating with
+`UnicodeEncodeError`. This presentation fallback does not change parsed values,
+Packet hashes, or exit-code semantics.
+
 See `low-latency-evidence-plane.md` for the cache boundary, invalidation model,
 and reproducible latency benchmark.
 
