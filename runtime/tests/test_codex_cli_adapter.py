@@ -183,6 +183,8 @@ def test_codex_cli_adapter_emits_verified_observation_and_scrubs_api_keys(
     ) == (True, None)
     assert runner.calls[0][0][1:] == ["login", "status"]
     assert runner.actions == ["login", "spend_guard", "exec"]
+    assert all(call[1]["encoding"] == "utf-8" for call in runner.calls)
+    assert all(call[1]["errors"] == "strict" for call in runner.calls)
     _, guard_payload, guard_environment, _ = runner.probe_calls[0]
     assert "account/rateLimits/read" in guard_payload
     assert "OPENAI_API_KEY" not in guard_environment
@@ -434,6 +436,52 @@ def test_codex_cli_adapter_rejects_bad_ack_nonzero_exit_and_replay(tmp_path: Pat
     asyncio.run(replay.infer("task", {"evaluation": {}}))
     with pytest.raises(CodexCliAdapterError, match="codex_cli_response_replay_detected"):
         asyncio.run(replay.infer("task", {"evaluation": {}}))
+
+
+def test_codex_cli_adapter_uses_utf8_and_rejects_missing_decoded_stdout(
+    tmp_path: Path,
+):
+    class MissingStdoutRunner(StructuredRunner):
+        def __call__(self, command: list[str], **kwargs: object):
+            result = super().__call__(command, **kwargs)
+            if command[1:] != ["login", "status"]:
+                return subprocess.CompletedProcess(command, 0, None, "")
+            return result
+
+    runner = MissingStdoutRunner()
+    adapter = CodexCliAdapter(
+        executable=str(_executable(tmp_path)),
+        runner=runner,
+        spend_guard_probe=runner.spend_guard_probe,
+    )
+
+    with pytest.raises(CodexCliAdapterError, match="codex_cli_output_decode_failed"):
+        asyncio.run(adapter.infer("task", {}))
+    assert all(call[1]["encoding"] == "utf-8" for call in runner.calls)
+    assert all(call[1]["errors"] == "strict" for call in runner.calls)
+
+
+@pytest.mark.parametrize("fail_during_auth", [False, True])
+def test_codex_cli_adapter_normalizes_utf8_decode_failures(
+    tmp_path: Path,
+    fail_during_auth: bool,
+):
+    class DecodeFailureRunner(StructuredRunner):
+        def __call__(self, command: list[str], **kwargs: object):
+            is_auth = command[1:] == ["login", "status"]
+            if is_auth == fail_during_auth:
+                raise UnicodeDecodeError("utf-8", b"\x80", 0, 1, "invalid start byte")
+            return super().__call__(command, **kwargs)
+
+    runner = DecodeFailureRunner()
+    adapter = CodexCliAdapter(
+        executable=str(_executable(tmp_path)),
+        runner=runner,
+        spend_guard_probe=runner.spend_guard_probe,
+    )
+
+    with pytest.raises(CodexCliAdapterError, match="codex_cli_output_decode_failed"):
+        asyncio.run(adapter.infer("task", {}))
 
 
 def test_codex_cli_adapter_rejects_invalid_model_and_does_not_read_api_keys(

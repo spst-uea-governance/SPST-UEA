@@ -234,16 +234,22 @@ class CodexCliAdapter(ModelAdapter):
                     check=False,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="strict",
                     timeout=self.timeout_seconds,
                     env=environment,
                 )
             except subprocess.TimeoutExpired as error:
                 raise CodexCliAdapterError("codex_cli_timeout") from error
+            except UnicodeDecodeError as error:
+                raise CodexCliAdapterError("codex_cli_output_decode_failed") from error
             except OSError as error:
                 raise CodexCliAdapterError("codex_cli_execution_failed") from error
 
         if completed.returncode != 0:
             raise CodexCliAdapterError("codex_cli_nonzero_exit")
+        if not isinstance(completed.stdout, str):
+            raise CodexCliAdapterError("codex_cli_output_decode_failed")
         parsed = self._parse_jsonl(completed.stdout)
         acknowledgement = parsed["response"]
         if acknowledgement.get("request_binding_sha256") != request_digest:
@@ -298,9 +304,13 @@ class CodexCliAdapter(ModelAdapter):
                 check=False,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="strict",
                 timeout=min(self.timeout_seconds, 30),
                 env=environment,
             )
+        except UnicodeDecodeError as error:
+            raise CodexCliAdapterError("codex_cli_output_decode_failed") from error
         except (OSError, subprocess.TimeoutExpired) as error:
             raise CodexCliAdapterError("codex_cli_auth_status_unavailable") from error
         output = f"{completed.stdout}\n{completed.stderr}"

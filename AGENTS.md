@@ -182,6 +182,18 @@ Run commands from `runtime/` unless noted otherwise:
   uncertainty bound, and an artifact-digest-bound human review. Keep its scope
   limited to the registered local rubric corpus; never infer it from provider
   capability flags or generalize it to GPT quality.
+- For a general practical-task quality measurement, use the practical semantic
+  study path with 30 to 50 pre-registered pairs. Require one distinct verified
+  repository-bound Routing Receipt per exact task prompt, complete blind-slot
+  scoring, a human Reviewer ID different from the generator, and the fixed
+  correction policy. Require an exact study-bound execution authority before
+  any provider call, two independently guarded provider observations per task,
+  and a blind artifact containing scoreable prompt/answer text without arm
+  labels; a hash-only blind artifact is not reviewable evidence. Permit at most
+  one same-reviewer clerical correction before
+  unblinding, preserve the superseded review, and reject post-finalization
+  corrections. Runtime status must aggregate this ledger read-only; a prepared
+  task pack or incomplete study must leave task quality unavailable.
 - A single-operator Program may pre-register `machine_exact_contract` before any
   provider call. Keep this metric separate from Phase 16 task quality: require the
   same producer, provider-observation, sample, fixed-stop, scorer, and uncertainty

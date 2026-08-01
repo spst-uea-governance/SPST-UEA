@@ -16,7 +16,11 @@ from spst_runtime.evidence_context import (
     EvidenceContextVerifier,
     reject_unverifiable_artifact_origins,
 )
+from spst_runtime.evaluation.practical_semantic_study import (
+    PracticalSemanticStudyLedger,
+)
 from spst_runtime.memory.long_term_memory import LongTermMemoryStore
+from spst_runtime.persistence.sqlite_repository import SQLiteRepository
 from spst_runtime.repository_identity import capture_repository_identity
 from spst_runtime.routing_receipt import (
     ROUTING_RECEIPT_SCHEMA,
@@ -276,6 +280,32 @@ def get_chat_status(
             "key_source": "unavailable",
         }
     )
+    semantic_study = _practical_semantic_study_status(
+        store.path,
+        repository_root=repository_root,
+        database_exists=database_exists,
+    )
+    task_quality = semantic_study.get("task_quality", {})
+    semantic_study_count = int(semantic_study.get("study_count", 0) or 0)
+    semantic_available = task_quality.get("available") is True
+    routing = {
+        **routing,
+        "task_quality_delta": (
+            task_quality.get("paired_delta") if semantic_available else None
+        ),
+        "task_quality_reason": (
+            None
+            if semantic_available
+            else semantic_study.get("reason")
+            if semantic_study_count
+            else routing.get("task_quality_reason")
+        ),
+        "task_quality_pair_count": task_quality.get("pair_count", 0),
+        "task_quality_direction": task_quality.get("direction"),
+        "task_quality_claim_eligible": task_quality.get("claim_eligible", False),
+        "task_quality_study_id": semantic_study.get("selected_study_id"),
+        "practical_semantic_study_reason": semantic_study.get("reason"),
+    }
     return {
         "mode": state.get("mode"),
         "provider": state.get("provider"),
@@ -288,6 +318,7 @@ def get_chat_status(
         "context_mediation": state.get("context_mediation", {}),
         "latest_audit": (state.get("audit") or [None])[-1],
         "routing": routing,
+        "practical_semantic_study": semantic_study,
         "persistence": {
             "access": "read_only_immutable",
             "source_unchanged": True,
@@ -295,6 +326,56 @@ def get_chat_status(
             "provenance": provenance,
         },
     }
+
+
+def _practical_semantic_study_status(
+    database_path: str,
+    *,
+    repository_root: str | None,
+    database_exists: bool,
+) -> dict:
+    if not database_exists:
+        return {
+            "schema": "spst-practical-semantic-study-status-v1",
+            "study_count": 0,
+            "completed_study_count": 0,
+            "latest_study_id": None,
+            "selected_study_id": None,
+            "status": "unavailable",
+            "reason": "practical_semantic_study_unavailable",
+            "task_quality": {
+                "available": False,
+                "paired_delta": None,
+                "pair_count": 0,
+                "uncertainty": None,
+                "direction": None,
+                "claim_eligible": False,
+                "generalization_beyond_registered_corpus": False,
+                "automatic_promotion": False,
+            },
+            "latest": {},
+            "read_only_projection": True,
+        }
+    try:
+        repository = SQLiteRepository(database_path, read_only=True)
+        return PracticalSemanticStudyLedger(
+            repository,
+            repository_root=repository_root,
+        ).status()
+    except (FileNotFoundError, PermissionError, sqlite3.DatabaseError, ValueError) as error:
+        return {
+            "schema": "spst-practical-semantic-study-status-v1",
+            "status": "unavailable",
+            "reason": f"practical_semantic_study_unavailable:{type(error).__name__}",
+            "task_quality": {
+                "available": False,
+                "paired_delta": None,
+                "pair_count": 0,
+                "direction": None,
+                "claim_eligible": False,
+            },
+            "read_only_projection": True,
+        }
 
 
 def verify_chat_receipt(

@@ -174,6 +174,27 @@ reports a fixed 95% Hoeffding bound, and requires a digest-bound human review:
 See `../docs/phase16-independent-paired-quality.md`. The offline conformance
 fixture proves the mechanism only; it is not GPT-uplift evidence.
 
+For a higher-powered practical semantic study, the runtime also ships a
+32-task answer-free cohort and an append-only 30-to-50 pair ledger:
+
+```powershell
+python -m spst_runtime.practical_semantic_study_bridge validate-task-pack
+python -m spst_runtime.practical_semantic_study_bridge status `
+  --evaluation-db .\study.db `
+  --repository-root ..
+```
+
+Each task requires its own exact-prompt, repository-bound Routing Receipt.
+Generator/Reviewer identity equality, incomplete blind scoring, unregistered
+corrections, Receipt reuse, and corrections after unblinding fail closed.
+Execution additionally requires an exact study-bound authority, an isolated
+DB, a read-only zero-call preflight, and two Codex CLI observations per task
+with their own ChatGPT-plan/no-paid guard evidence. Blind slots contain the
+prompt and answer text needed for human scoring but never expose arm labels.
+`chat_bridge --status` automatically exposes the latest eligible measurement
+without changing the database. See
+`../docs/practical-semantic-paired-study.md`.
+
 After an isolated context experiment and accepted Phase 16 review, derive or
 inspect bounded utility without supplying scores:
 
