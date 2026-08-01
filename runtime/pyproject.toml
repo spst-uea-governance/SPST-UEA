@@ -34,6 +34,9 @@ package-dir={""="."}
 [tool.setuptools.packages.find]
 include=["spst_runtime*"]
 
+[tool.setuptools.package-data]
+"spst_runtime.evaluation"=["*.json"]
+
 [tool.pytest.ini_options]
 testpaths=["tests"]
 addopts=["--strict-config", "--strict-markers"]

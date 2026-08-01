@@ -1,0 +1,167 @@
+{
+  "schema": "spst-novel-practical-task-pack-v1",
+  "workload_class": "novel_practical_repository_task",
+  "generalization_target": "bounded software-engineering diagnosis, minimal correction, and verification design",
+  "tasks": [
+    {
+      "task_id": "practical-se-01",
+      "domain": "time-data-validation",
+      "prompt": "A Python service filters active records with `datetime.fromisoformat(r['expires_at']) > now`. Inputs may end in `Z`, `now` is timezone-aware, and malformed non-null timestamps must not crash the batch or be treated as active. Propose the smallest maintainable correction and focused tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-02",
+      "domain": "semantic-cache-key",
+      "prompt": "A cache key hashes `json.dumps(payload)` directly. Equivalent requests miss when key order changes or only request_id, generated_at, or an absolute workspace_path changes; unknown business fields must remain significant. Propose deterministic canonicalization and collision-focused tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-03",
+      "domain": "async-idempotency",
+      "prompt": "An async `send_once` checks a shared completed dict, awaits provider.send, then stores the result. Concurrent callers with one key can both send; different keys should remain concurrent, failures must not be cached as success, and cancellation must not strand future callers. Propose a minimal correction and tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-04",
+      "domain": "filesystem-security",
+      "prompt": "A workspace guard accepts a path when `str(candidate.resolve()).startswith(str(root.resolve()))`. Reject sibling-prefix paths, traversal, and symlink escapes while accepting the root and real descendants on Windows and POSIX. Propose a minimal safe correction and adversarial tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-05",
+      "domain": "pagination-correctness",
+      "prompt": "A paginator uses accumulated item count to decide whether to fetch, stops after a short page even when next_cursor exists, and can loop forever when a cursor repeats. Propose the smallest clear correction and boundary tests without assuming page fullness signals completion. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-06",
+      "domain": "configuration-isolation",
+      "prompt": "Configuration merging shallow-copies defaults, updates user values, then mutates merged['headers']; this aliases nested defaults, loses nested keys, and has no explicit-None contract. Specify a deterministic merge contract, avoid input mutation, and pin it with tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-07",
+      "domain": "retry-safety",
+      "prompt": "A retry helper catches every Exception, retries a state-changing request, and sleeps after the final failure. The caller may supply an idempotency key and the provider distinguishes retryable transport errors from validation errors. Propose a safe bounded correction and deterministic tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-08",
+      "domain": "transactional-provenance",
+      "prompt": "A SQLite path commits an artifact and then separately appends and commits provenance. Readers must never observe an artifact without provenance, and an injected provenance failure must leave neither row. Propose the smallest transactional correction and failure-injection tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-09",
+      "domain": "stream-framing",
+      "prompt": "A JSONL consumer calls decode on every received byte chunk and splits on newline. UTF-8 code points and JSON records may cross chunks, the final record may lack a newline, and malformed records must be reported without losing later valid records. Propose a bounded streaming correction and tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-10",
+      "domain": "unicode-normalization",
+      "prompt": "Usernames are lowercased for uniqueness, but canonically equivalent Unicode and locale-sensitive characters produce inconsistent lookups. Display spelling must be preserved and collisions rejected deterministically. Propose a normalization contract, migration behavior, and tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-11",
+      "domain": "csv-ingestion",
+      "prompt": "A CSV importer uses line.split(',') and assumes UTF-8 without BOM. Production files contain quoted commas, embedded newlines, BOMs, empty final columns, and invalid byte sequences. Reject undecodable input without partial writes. Propose a minimal robust path and tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-12",
+      "domain": "authorization-boundary",
+      "prompt": "An endpoint checks `if user.is_admin or document.owner_id == user.id` before loading the tenant record. IDs are globally unique today but may not remain so; deleted users can retain cached sessions. Propose a minimal authorization correction and negative tests across tenants and deletion. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-13",
+      "domain": "rate-limit-concurrency",
+      "prompt": "A token bucket refills from wall-clock time and updates tokens without synchronization. Clock rollback can add capacity and concurrent requests can overspend. Preserve burst capacity and avoid a global lock across unrelated client keys. Propose a minimal correction and deterministic clock tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-14",
+      "domain": "http-conditional-write",
+      "prompt": "A client reads a resource, modifies it, then PUTs without If-Match. It retries 412 responses by repeating the stale body. Concurrent unrelated field edits must not be silently lost, and the operation must have a bounded conflict policy. Propose a correction and race tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-15",
+      "domain": "schema-migration",
+      "prompt": "A migration adds a NOT NULL column with a default, backfills millions of rows, and drops the default in one transaction. The table receives continuous writes and rollback must remain possible. Propose a staged compatibility-safe migration and verification plan. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-16",
+      "domain": "process-shutdown",
+      "prompt": "A worker handles SIGTERM by immediately exiting while jobs may have acknowledged queue messages but not committed results. Shutdown must be bounded, reject new jobs, finish or release in-flight work, and remain safe if termination repeats. Propose a minimal state machine and tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-17",
+      "domain": "subprocess-encoding",
+      "prompt": "A Windows CLI wrapper uses subprocess.run(text=True) and crashes when child output contains characters not representable in CP932. Exact raw output digest must remain reproducible while a readable diagnostic is still shown. Propose a correction and tests under CP932 and UTF-8. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-18",
+      "domain": "url-canonicalization",
+      "prompt": "A deduplicator lowercases complete URLs and strips trailing slashes. This changes case-sensitive paths, conflates encoded separators, and fails to normalize default ports and fragments consistently. Define a conservative canonicalization contract and adversarial tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-19",
+      "domain": "archive-extraction",
+      "prompt": "An upload service extracts ZIP members by joining the destination with member.filename. It must reject traversal, absolute paths, Windows drive paths, symlink-like entries, and resource-exhaustion archives without leaving partial output. Propose a minimal safe extraction flow and tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-20",
+      "domain": "log-redaction",
+      "prompt": "A logger redacts dictionary keys named password or token before JSON serialization. Secrets also appear in nested lists, Authorization headers with case variants, URLs, and exception text. Avoid corrupting ordinary words and preserve useful structure. Propose a bounded redaction design and tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-21",
+      "domain": "event-schema-evolution",
+      "prompt": "Consumers deserialize events directly into the newest dataclass. Older events lack fields, newer events add unknown fields, and one field changed meaning between versions. Propose an explicit versioning and upcasting boundary that rejects ambiguous records and test replay compatibility. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-22",
+      "domain": "event-ordering",
+      "prompt": "A projection applies events in arrival order. Delivery is at-least-once and events for one entity can arrive out of order, while different entities should process concurrently. Duplicate and stale events must not regress state. Propose a minimal ordering/idempotency contract and tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-23",
+      "domain": "circuit-breaker",
+      "prompt": "A circuit breaker increments a global failure counter for all destinations, opens forever after a threshold, and counts caller validation errors. Different destinations need isolation, half-open probes must be bounded, and concurrent probes must not stampede. Propose a minimal correction and deterministic tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-24",
+      "domain": "resource-cleanup",
+      "prompt": "A batch function opens input and output files, acquires a temporary directory, and may raise during transformation or output flush. It currently deletes the input on any exception. Preserve inputs, avoid leaked handles/temp data, and surface the primary error without hiding cleanup failures. Propose a correction and tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-25",
+      "domain": "lazy-initialization",
+      "prompt": "A module-level client is initialized with `if client is None: client = build_client()`. Concurrent first use can build twice, a failed build can publish partial state, and tests need dependency injection without import-time network or DB effects. Propose a minimal correction and tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-26",
+      "domain": "stable-sorting",
+      "prompt": "A report sorts names using the process locale and uses record index as a tie-breaker. Results differ across machines and pagination reorders when new records arrive. Define a portable stable ordering contract that preserves display text and add cross-environment tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-27",
+      "domain": "money-arithmetic",
+      "prompt": "An invoice sums binary floats and rounds only the final total. Line-item tax rules require currency-specific precision, refunds can be negative, and serialized totals must round-trip exactly. Propose a decimal arithmetic contract and tests without assuming one currency. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-28",
+      "domain": "daylight-saving-time",
+      "prompt": "A scheduler creates tomorrow at 02:30 by adding 24 hours to an aware datetime. During DST transitions the local time can be missing or duplicated. Specify deterministic policies for both cases and tests using an IANA timezone. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-29",
+      "domain": "batch-partial-failure",
+      "prompt": "A bulk API returns HTTP 200 with per-item successes and failures, but the client marks the entire input batch complete. Retries must target only safe failed items, preserve original ordering in the report, and avoid duplicating successful effects. Propose a correction and tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-30",
+      "domain": "optimistic-concurrency",
+      "prompt": "Two workers update a job row with `UPDATE jobs SET state=? WHERE id=?` after reading the same version. Illegal transitions and lost progress are possible. Propose a minimal compare-and-swap transition contract, distinguish conflicts from missing rows, and test races. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-31",
+      "domain": "webhook-authentication",
+      "prompt": "A webhook verifies an HMAC over parsed-and-reserialized JSON using normal equality. The provider signs exact request bytes, permits timestamped key rotation, and attackers can replay valid old requests. Propose a minimal verification order and adversarial tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    },
+    {
+      "task_id": "practical-se-32",
+      "domain": "backup-restore-integrity",
+      "prompt": "A restore command copies a backup database over the live file after checking only that SQLite can open it. It must preserve the existing live DB on any failure, verify an application-level manifest and provenance chain, and handle process interruption. Propose a minimal atomic restore protocol and failure tests. Return exactly four string fields: diagnosis, minimal_patch, verification, residual_risk."
+    }
+  ]
+}

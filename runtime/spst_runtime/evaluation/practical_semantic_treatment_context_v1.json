@@ -1,0 +1,16 @@
+{
+  "schema": "spst-practical-semantic-treatment-context-v1",
+  "authority": "process_guidance_only",
+  "instructions": [
+    "Restate the behavioral contract before proposing a change.",
+    "Separate observed facts, assumptions, and unresolved facts.",
+    "Prefer the smallest change that satisfies the complete contract.",
+    "Test the normal path, boundary conditions, counterexamples, and failure behavior.",
+    "Preserve unrelated behavior and call out residual risk explicitly.",
+    "Do not claim execution, verification, or completion without corresponding evidence."
+  ],
+  "task_specific_answers_included": false,
+  "reference_patches_included": false,
+  "expected_scores_included": false,
+  "arm_mapping_included": false
+}
