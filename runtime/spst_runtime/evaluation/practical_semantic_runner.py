@@ -22,6 +22,8 @@ from spst_runtime.repository_identity import capture_repository_identity
 
 
 TREATMENT_CONTEXT_SCHEMA = "spst-practical-semantic-treatment-context-v1"
+CANONICAL_TREATMENT_CONTEXT_DIGEST_PROFILE = "canonical-json-v1"
+LEGACY_TREATMENT_CONTEXT_DIGEST_PROFILE = "raw-bytes-v1"
 ARTIFACT_KEYS = [
     "diagnosis",
     "minimal_patch",
@@ -33,6 +35,44 @@ _RouteTask = Callable[..., dict[str, Any]]
 
 class PracticalSemanticRunnerError(RuntimeError):
     """Fail-closed practical study execution error; calls are never retried."""
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate_json_key:{key}")
+        value[key] = item
+    return value
+
+
+def parse_treatment_context(raw_context: bytes) -> Any:
+    try:
+        return json.loads(
+            raw_context.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise PracticalSemanticRunnerError("treatment_context_json_invalid") from error
+
+
+def treatment_context_sha256(raw_context: bytes, digest_profile: str) -> str:
+    if digest_profile == LEGACY_TREATMENT_CONTEXT_DIGEST_PROFILE:
+        return hashlib.sha256(raw_context).hexdigest()
+    if digest_profile != CANONICAL_TREATMENT_CONTEXT_DIGEST_PROFILE:
+        raise PracticalSemanticRunnerError("treatment_context_digest_profile_invalid")
+    context_value = parse_treatment_context(raw_context)
+    try:
+        canonical = json.dumps(
+            context_value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise PracticalSemanticRunnerError("treatment_context_json_invalid") from error
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def treatment_instructions(value: Any) -> str:
@@ -106,12 +146,15 @@ class PracticalSemanticStudyRunner:
             raise PracticalSemanticRunnerError("practical_semantic_repository_identity_changed")
 
         raw_context = Path(self.treatment_context_path).read_bytes()
-        try:
-            context_value = json.loads(raw_context.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise PracticalSemanticRunnerError("treatment_context_json_invalid") from error
+        context_value = parse_treatment_context(raw_context)
         instructions = treatment_instructions(context_value)
-        if hashlib.sha256(raw_context).hexdigest() != study["intervention"]["context_sha256"]:
+        digest_profile = study["intervention"].get(
+            "context_digest_profile",
+            LEGACY_TREATMENT_CONTEXT_DIGEST_PROFILE,
+        )
+        if treatment_context_sha256(raw_context, digest_profile) != study["intervention"][
+            "context_sha256"
+        ]:
             raise PracticalSemanticRunnerError("treatment_context_source_digest_mismatch")
         if hashlib.sha256(instructions.encode("utf-8")).hexdigest() != study[
             "intervention"
@@ -145,6 +188,7 @@ class PracticalSemanticStudyRunner:
             "maximum_adapter_invocations": maximum,
             "repository_identity_sha256": current_identity["identity_sha256"],
             "treatment_context_sha256": study["intervention"]["context_sha256"],
+            "treatment_context_digest_profile": digest_profile,
             "model_instructions_sha256": study["intervention"][
                 "model_instructions_sha256"
             ],
@@ -156,7 +200,7 @@ class PracticalSemanticStudyRunner:
         preflight = self.preflight(study_id)
         study = self.ledger.get(study_id)
         assert study is not None
-        context_value = json.loads(Path(self.treatment_context_path).read_text(encoding="utf-8"))
+        context_value = parse_treatment_context(Path(self.treatment_context_path).read_bytes())
         instructions = treatment_instructions(context_value)
         artifact_contract = build_model_artifact_contract(
             ARTIFACT_KEYS,

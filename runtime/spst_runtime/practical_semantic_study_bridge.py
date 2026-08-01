@@ -14,8 +14,11 @@ from spst_runtime.evaluation.practical_semantic_study import (
     PracticalSemanticStudyLedger,
 )
 from spst_runtime.evaluation.practical_semantic_runner import (
+    CANONICAL_TREATMENT_CONTEXT_DIGEST_PROFILE,
     PracticalSemanticRunnerError,
     PracticalSemanticStudyRunner,
+    parse_treatment_context,
+    treatment_context_sha256,
     treatment_instructions,
 )
 from spst_runtime.persistence.sqlite_repository import SQLiteRepository
@@ -119,7 +122,7 @@ def _preregistration_payload(arguments: argparse.Namespace) -> dict[str, Any]:
     tasks = task_pack.get("tasks")
     task_count = len(tasks) if isinstance(tasks, list) else 0
     raw_treatment_context = Path(arguments.treatment_context).read_bytes()
-    treatment_value = json.loads(raw_treatment_context.decode("utf-8"))
+    treatment_value = parse_treatment_context(raw_treatment_context)
     instructions = treatment_instructions(treatment_value)
     return {
         "task_pack": task_pack,
@@ -129,7 +132,11 @@ def _preregistration_payload(arguments: argparse.Namespace) -> dict[str, Any]:
         },
         "intervention": {
             "schema": "spst-practical-semantic-intervention-v1",
-            "context_sha256": hashlib.sha256(raw_treatment_context).hexdigest(),
+            "context_sha256": treatment_context_sha256(
+                raw_treatment_context,
+                CANONICAL_TREATMENT_CONTEXT_DIGEST_PROFILE,
+            ),
+            "context_digest_profile": CANONICAL_TREATMENT_CONTEXT_DIGEST_PROFILE,
             "model_instructions_sha256": hashlib.sha256(
                 instructions.encode("utf-8")
             ).hexdigest(),

@@ -594,16 +594,31 @@ class PracticalSemanticStudyLedger:
         if source.get("correction_policy") != CORRECTION_POLICY:
             return None, "practical_semantic_correction_policy_invalid"
         intervention = source.get("intervention")
+        legacy_intervention_fields = {
+            "schema",
+            "context_sha256",
+            "model_instructions_sha256",
+            "context_kind",
+            "task_specific_answers_absent_attested",
+        }
+        canonical_intervention_fields = {
+            *legacy_intervention_fields,
+            "context_digest_profile",
+        }
+        if isinstance(intervention, dict):
+            intervention_fields = set(intervention)
+            digest_profile_valid = (
+                intervention_fields == legacy_intervention_fields
+                or (
+                    intervention_fields == canonical_intervention_fields
+                    and intervention.get("context_digest_profile") == "canonical-json-v1"
+                )
+            )
+        else:
+            digest_profile_valid = False
         if (
             not isinstance(intervention, dict)
-            or set(intervention)
-            != {
-                "schema",
-                "context_sha256",
-                "model_instructions_sha256",
-                "context_kind",
-                "task_specific_answers_absent_attested",
-            }
+            or not digest_profile_valid
             or intervention.get("schema") != INTERVENTION_SCHEMA
             or intervention.get("context_kind") != "spst_process_guidance"
             or not self._valid_sha256(intervention.get("context_sha256"))

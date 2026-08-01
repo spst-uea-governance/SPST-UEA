@@ -6,6 +6,9 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+from types import SimpleNamespace
+
+import pytest
 
 from spst_runtime.chat_bridge import get_chat_status, run_chat_turn
 from spst_runtime.evaluation.practical_semantic_study import (
@@ -19,12 +22,17 @@ from spst_runtime.evaluation.practical_semantic_study import (
     PracticalSemanticStudyLedger,
 )
 from spst_runtime.evaluation.practical_semantic_runner import (
+    CANONICAL_TREATMENT_CONTEXT_DIGEST_PROFILE,
+    LEGACY_TREATMENT_CONTEXT_DIGEST_PROFILE,
     PracticalSemanticRunnerError,
     PracticalSemanticStudyRunner,
+    parse_treatment_context,
+    treatment_context_sha256,
     treatment_instructions,
 )
 from spst_runtime.interfaces.model_adapter import ModelAdapter
 from spst_runtime.persistence.sqlite_repository import SQLiteRepository
+from spst_runtime.practical_semantic_study_bridge import _preregistration_payload
 from spst_runtime.provider_observation import (
     CODEX_CLI_OBSERVATION_SOURCE,
     build_provider_observation,
@@ -451,21 +459,180 @@ def test_task_count_receipt_mismatch_reuse_and_post_unblind_correction_fail_clos
     )
 
 
-def test_checked_in_task_pack_has_32_unique_tasks_and_no_reference_answers():
-    path = (
-        Path(__file__).resolve().parents[1]
-        / "spst_runtime"
-        / "evaluation"
-        / "novel_practical_tasks_v1.json"
+def test_checked_in_task_packs_are_disjoint_and_have_no_reference_answers():
+    evaluation = Path(__file__).resolve().parents[1] / "spst_runtime" / "evaluation"
+    packs = [
+        json.loads((evaluation / name).read_text(encoding="utf-8"))
+        for name in ("novel_practical_tasks_v1.json", "novel_practical_tasks_v2.json")
+    ]
+    task_id_sets: list[set[str]] = []
+    prompt_sets: list[set[str]] = []
+    for task_pack in packs:
+        tasks = task_pack["tasks"]
+        task_ids = {task["task_id"] for task in tasks}
+        prompts = {task["prompt"] for task in tasks}
+        assert len(tasks) == 32
+        assert len(task_ids) == 32
+        assert len(prompts) == 32
+        serialized = json.dumps(task_pack, sort_keys=True).lower()
+        assert "reference_answer" not in serialized
+        assert "expected_patch" not in serialized
+        assert "expected_score" not in serialized
+        assert "arm_mapping" not in serialized
+        task_id_sets.append(task_ids)
+        prompt_sets.append(prompts)
+    assert task_id_sets[0].isdisjoint(task_id_sets[1])
+    assert prompt_sets[0].isdisjoint(prompt_sets[1])
+
+
+def test_treatment_context_canonical_digest_ignores_only_json_surface_differences():
+    value = {
+        "schema": "spst-practical-semantic-treatment-context-v1",
+        "authority": "process_guidance_only",
+        "instructions": ["Use evidence before assertion — café."],
+        "task_specific_answers_included": False,
+        "reference_patches_included": False,
+        "expected_scores_included": False,
+        "arm_mapping_included": False,
+    }
+    lf = (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    crlf = lf.replace(b"\n", b"\r\n")
+    reordered = json.dumps(
+        dict(reversed(list(value.items()))),
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    canonical = {
+        treatment_context_sha256(item, CANONICAL_TREATMENT_CONTEXT_DIGEST_PROFILE)
+        for item in (lf, crlf, reordered)
+    }
+    raw = {
+        treatment_context_sha256(item, LEGACY_TREATMENT_CONTEXT_DIGEST_PROFILE)
+        for item in (lf, crlf, reordered)
+    }
+
+    assert len(canonical) == 1
+    assert len(raw) == 3
+    changed = deepcopy(value)
+    changed["instructions"] = ["Use evidence after assertion — café."]
+    changed_raw = json.dumps(changed, ensure_ascii=False).encode("utf-8")
+    assert treatment_context_sha256(
+        changed_raw,
+        CANONICAL_TREATMENT_CONTEXT_DIGEST_PROFILE,
+    ) not in canonical
+
+
+def test_treatment_context_canonical_digest_rejects_ambiguous_or_unknown_input():
+    duplicate = b'{"schema":"a","schema":"b"}'
+    with pytest.raises(PracticalSemanticRunnerError, match="treatment_context_json_invalid"):
+        parse_treatment_context(duplicate)
+    with pytest.raises(
+        PracticalSemanticRunnerError,
+        match="treatment_context_digest_profile_invalid",
+    ):
+        treatment_context_sha256(b"{}", "unknown-profile")
+
+
+def test_canonical_treatment_context_preregistration_accepts_surface_variant(tmp_path):
+    source_repository = _repository(tmp_path / "source")
+    session_path = tmp_path / "canonical-study.db"
+    memory_path = tmp_path / "canonical-memory.db"
+    treatment_path = tmp_path / "treatment.json"
+    treatment_value = {
+        "schema": "spst-practical-semantic-treatment-context-v1",
+        "authority": "process_guidance_only",
+        "instructions": [TREATMENT_INSTRUCTIONS],
+        "task_specific_answers_included": False,
+        "reference_patches_included": False,
+        "expected_scores_included": False,
+        "arm_mapping_included": False,
+    }
+    registered_bytes = json.dumps(
+        treatment_value,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    rendered_variant = json.dumps(dict(reversed(list(treatment_value.items()))), indent=2)
+    treatment_path.write_bytes((rendered_variant.replace("\n", "\r\n") + "\r\n").encode("utf-8"))
+    payload = _preregistration(source_repository, count=32)
+    payload["intervention"] = {
+        "schema": INTERVENTION_SCHEMA,
+        "context_sha256": treatment_context_sha256(
+            registered_bytes,
+            CANONICAL_TREATMENT_CONTEXT_DIGEST_PROFILE,
+        ),
+        "context_digest_profile": CANONICAL_TREATMENT_CONTEXT_DIGEST_PROFILE,
+        "model_instructions_sha256": hashlib.sha256(
+            treatment_instructions(treatment_value).encode("utf-8")
+        ).hexdigest(),
+        "context_kind": "spst_process_guidance",
+        "task_specific_answers_absent_attested": True,
+    }
+    ledger = PracticalSemanticStudyLedger(
+        SQLiteRepository(str(session_path)),
+        repository_root=str(source_repository),
+        nonce_factory=lambda: "canonical-context-nonce",
     )
-    task_pack = json.loads(path.read_text(encoding="utf-8"))
-    tasks = task_pack["tasks"]
-    assert len(tasks) == 32
-    assert len({task["task_id"] for task in tasks}) == 32
-    assert len({task["prompt"] for task in tasks}) == 32
-    serialized = json.dumps(task_pack, sort_keys=True).lower()
-    assert "reference_answer" not in serialized
-    assert "expected_patch" not in serialized
+    registered = ledger.preregister(payload)
+    ledger.authorize_execution(registered["id"], _execution_authority(registered))
+    runner = PracticalSemanticStudyRunner(
+        ledger,
+        _FakeCodexAdapter(),
+        repository_root=str(source_repository),
+        session_path=str(session_path),
+        memory_path=str(memory_path),
+        treatment_context_path=str(treatment_path),
+    )
+
+    preflight = runner.preflight(registered["id"])
+
+    assert preflight["status"] == "ready"
+    assert preflight["provider_calls_executed"] == 0
+    assert preflight["treatment_context_digest_profile"] == (
+        CANONICAL_TREATMENT_CONTEXT_DIGEST_PROFILE
+    )
+
+
+def test_bridge_preregistration_payload_is_line_ending_independent(tmp_path):
+    source_repository = _repository(tmp_path / "source")
+    task_pack_path = tmp_path / "tasks.json"
+    task_pack_path.write_text(json.dumps(_task_pack(32)), encoding="utf-8")
+    treatment_value = {
+        "schema": "spst-practical-semantic-treatment-context-v1",
+        "authority": "process_guidance_only",
+        "instructions": ["Apply deterministic guidance — café."],
+        "task_specific_answers_included": False,
+        "reference_patches_included": False,
+        "expected_scores_included": False,
+        "arm_mapping_included": False,
+    }
+    lf_path = tmp_path / "treatment-lf.json"
+    crlf_path = tmp_path / "treatment-crlf.json"
+    rendered = json.dumps(treatment_value, ensure_ascii=False, indent=2)
+    lf_path.write_bytes((rendered + "\n").encode("utf-8"))
+    crlf_path.write_bytes((rendered.replace("\n", "\r\n") + "\r\n").encode("utf-8"))
+
+    def payload(path: Path) -> dict:
+        return _preregistration_payload(
+            SimpleNamespace(
+                task_pack=str(task_pack_path),
+                treatment_context=str(path),
+                generator_id="codex-cli-generator",
+                repository_root=str(source_repository),
+            )
+        )
+
+    lf_payload = payload(lf_path)
+    crlf_payload = payload(crlf_path)
+
+    assert hashlib.sha256(lf_path.read_bytes()).hexdigest() != hashlib.sha256(
+        crlf_path.read_bytes()
+    ).hexdigest()
+    assert lf_payload["intervention"] == crlf_payload["intervention"]
+    assert lf_payload["intervention"]["context_digest_profile"] == (
+        CANONICAL_TREATMENT_CONTEXT_DIGEST_PROFILE
+    )
 
 
 def test_preregistration_digest_tamper_is_detected_even_with_new_provenance(tmp_path):
